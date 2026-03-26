@@ -44,6 +44,7 @@ Complete ERP system for automotive parts distribution with TecDoc integration.
 ## Deploy on Railway (self-hosted)
 
 - Deployment guide: `docs/DEPLOY_RAILWAY.md`
+- CI/CD: GitHub Actions validates PRs and `main`; Railway should be configured with `Wait for CI` before auto-deploying `main`
 - Included deployment artifacts:
   - `Dockerfile`
   - `railway.json`

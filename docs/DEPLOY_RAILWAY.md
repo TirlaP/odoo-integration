@@ -69,6 +69,34 @@ After first successful boot, disable one-time init/update:
 - Keep `ODOO_LIST_DB=False` in production.
 - Put Railway service behind a custom domain and enforce HTTPS.
 
+## 5. CI/CD
+
+Recommended flow:
+
+1. Open Railway service settings for the app service.
+2. Enable **Wait for CI** on the connected GitHub branch.
+3. Use GitHub Actions workflow `.github/workflows/ci.yml` as the required CI check.
+4. Merge to `main` only after CI passes.
+5. Railway auto-deploys `main` after GitHub reports success.
+
+What CI validates:
+
+- Python syntax for the custom addon
+- XML parsing for addon data/views/security files
+- invoice ingest frontend bundle build
+- Docker image build
+
+What CD does:
+
+- Railway rebuilds and redeploys the app service from `main`
+- production DB remains in place
+- schema changes must still be applied by upgrading `automotive_parts`
+
+Suggested environments:
+
+- `main` -> production
+- separate Railway environment/service -> staging
+
 ## 5. Known constraints
 
 - This is self-hosted deployment. Odoo Enterprise license is still required if you use Enterprise edition features.
