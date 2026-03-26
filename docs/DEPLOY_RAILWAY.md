@@ -59,7 +59,7 @@ Tip: start from `.env.railway.example` and copy values into Railway Variables UI
 5. If you restore a dump instead, keep `ODOO_INIT_DB=false`.
 6. In Apps, update apps list and install/upgrade `automotive_parts` when needed.
 
-The service now declares `healthcheckPath=/web/login` in `railway.json` so Railway waits for a real HTTP 200 page before treating the deployment as healthy.
+The service now declares `healthcheckPath=/web/health` in `railway.json` so Railway probes Odoo's dedicated no-auth readiness endpoint instead of the login flow.
 
 After first successful boot, disable one-time init/update:
 
