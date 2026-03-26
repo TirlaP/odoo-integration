@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_anaf_invoice_wizard_form" model="ir.ui.view">
+        <field name="name">anaf.invoice.wizard.form</field>
+        <field name="model">anaf.invoice.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Link Vendor Bill to Reception">
+                <group>
+                    <field name="picking_id" readonly="1"/>
+                    <field name="partner_id"/>
+                    <field name="invoice_number" placeholder="Type invoice ref/name to auto-pick..."/>
+                    <field name="invoice_id" options="{'no_create': true}"/>
+                </group>
+                <footer>
+                    <button name="action_fetch_and_link" type="object" class="btn-primary" string="Link"/>
+                    <button special="cancel" class="btn-secondary" string="Cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>
+

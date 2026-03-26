@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Extended Stock Picking Form View (NIR) -->
+    <record id="view_picking_form_automotive" model="ir.ui.view">
+        <field name="name">stock.picking.form.automotive</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_form"/>
+        <field name="arch" type="xml">
+            <!-- Add NIR fields -->
+            <field name="origin" position="after">
+                <field name="nir_number" readonly="1"
+                       invisible="picking_type_code != 'incoming'"/>
+                <field name="received_by"
+                       invisible="picking_type_code != 'incoming'"/>
+            </field>
+
+            <!-- Add invoice information -->
+            <xpath expr="//notebook" position="inside">
+                <page string="NIR Information" name="nir_info"
+                      invisible="picking_type_code != 'incoming'">
+                    <group>
+                        <group string="Supplier Invoice">
+                            <field name="supplier_invoice_id"/>
+                            <field name="supplier_invoice_number"/>
+                            <field name="supplier_invoice_date"/>
+                        </group>
+                        <group string="Reception Info">
+                            <field name="has_differences" readonly="1"/>
+                            <field name="reception_notes" placeholder="Add reception notes..."/>
+                        </group>
+                    </group>
+
+                    <group>
+                        <button name="action_scan_barcode" string="Scan Barcode"
+                                type="object" class="btn-primary" icon="fa-barcode"/>
+                        <button name="action_print_labels" string="Print Labels"
+                                type="object" class="btn-secondary" icon="fa-print"/>
+                        <button name="action_link_invoice" string="Link Vendor Bill"
+                                type="object" class="btn-secondary" icon="fa-link"/>
+                    </group>
+                </page>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Stock Picking Tree View -->
+    <record id="view_picking_tree_automotive" model="ir.ui.view">
+        <field name="name">stock.picking.tree.automotive</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.vpicktree"/>
+        <field name="arch" type="xml">
+            <field name="name" position="after">
+                <field name="nir_number"/>
+                <field name="has_differences" widget="boolean_toggle"/>
+            </field>
+        </field>
+    </record>
+</odoo>

@@ -1,0 +1,42 @@
+.o_invoice_ingest_lines_wrap {
+  .o_list_renderer .o_list_table {
+    table-layout: auto !important;
+  }
+
+  .o_list_renderer .o_list_table thead th {
+    height: auto !important;
+    min-height: 58px;
+    white-space: normal !important;
+    vertical-align: middle;
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
+  .o_list_renderer .o_list_table thead th > .d-flex {
+    align-items: flex-start !important;
+  }
+
+  .o_list_renderer .o_list_table thead th .text-truncate {
+    display: block;
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    line-height: 1.2 !important;
+    max-height: none !important;
+  }
+
+  .o_list_renderer .o_list_table tbody td.o_data_cell {
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    word-break: break-word;
+    line-height: 1.25;
+  }
+
+  .o_list_renderer .o_list_table tbody td.o_data_cell .text-truncate {
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    max-height: none !important;
+  }
+}

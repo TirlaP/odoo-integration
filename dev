@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+# Load local environment variables if present.
+# This makes `Load from Env` in Odoo work when using `./dev start`.
+if [[ -f ".env" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source ".env"
+  set +a
+fi
+
+if [[ -f ".env.local" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source ".env.local"
+  set +a
+fi
+
+VENV_DIR="${VENV_DIR:-odoo-venv}"
+PYTHON="${PYTHON:-$VENV_DIR/bin/python}"
+ODOO_BIN="${ODOO_BIN:-odoo/odoo-bin}"
+CONF_FILE="${CONF_FILE:-odoo.conf}"
+MODULE="${MODULE:-automotive_parts}"
+LOG_FILE="${LOG_FILE:-}"
+DB_NAME="${DB_NAME:-}"
+
+conf_get() {
+  local key="$1"
+  [[ -f "$CONF_FILE" ]] || return 1
+  awk -v k="$key" -F '=' '
+    $0 !~ /^[[:space:]]*#/ && $0 ~ /[[:alnum:]_][[:space:]]*=/ {
+      kk=$1
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", kk)
+      if (kk == k) {
+        val=$2
+        sub(/^[[:space:]]+/, "", val)
+        sub(/[[:space:]]+$/, "", val)
+        print val
+        exit
+      }
+    }
+  ' "$CONF_FILE"
+}
+
+HTTP_PORT="${HTTP_PORT:-$(conf_get http_port || true)}"
+HTTP_PORT="${HTTP_PORT:-8069}"
+LOG_TO_STDOUT="${LOG_TO_STDOUT:-1}"
+DEFAULT_DEV_MODE="${DEFAULT_DEV_MODE:-reload}"
+DATA_DIR="${DATA_DIR:-$(conf_get data_dir || true)}"
+DATA_DIR="${DATA_DIR:-odoo_data}"
+
+has_db_arg() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -d|--database|-d*|--database=*)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+guess_db_name() {
+  local filestore="${DATA_DIR%/}/filestore"
+  [[ -d "$filestore" ]] || return 1
+  local -a dbs=()
+  local d
+  for d in "$filestore"/*; do
+    [[ -d "$d" ]] || continue
+    dbs+=("$(basename "$d")")
+  done
+  if [[ "${#dbs[@]}" -eq 1 ]]; then
+    printf '%s' "${dbs[0]}"
+    return 0
+  fi
+  return 1
+}
+
+if [[ -z "${LOG_FILE}" ]]; then
+  LOG_FILE="$(conf_get logfile || true)"
+  LOG_FILE="${LOG_FILE:-odoo.log}"
+fi
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./dev start [extra odoo args...]
+  ./dev update [extra odoo args...]
+  ./dev logs
+  ./dev open
+
+Environment overrides:
+  VENV_DIR, PYTHON, ODOO_BIN, CONF_FILE, MODULE, LOG_FILE, HTTP_PORT, LOG_TO_STDOUT, DEFAULT_DEV_MODE, DB_NAME, DATA_DIR
+EOF
+}
+
+require_file() {
+  local path="$1"
+  if [[ ! -e "$path" ]]; then
+    echo "Missing: $path" >&2
+    exit 1
+  fi
+}
+
+command="${1:-}"
+shift || true
+
+case "$command" in
+  start)
+    require_file "$PYTHON"
+    require_file "$ODOO_BIN"
+    require_file "$CONF_FILE"
+    echo "Starting Odoo..."
+    echo "Open: http://localhost:${HTTP_PORT}"
+    echo "Stop: Ctrl+C"
+    dev_arg=()
+    if ! printf '%s\0' "$@" | grep -qzE -- '--dev(=|$)'; then
+      dev_arg=(--dev="${DEFAULT_DEV_MODE}")
+    fi
+
+    if [[ "${LOG_TO_STDOUT}" == "1" ]]; then
+      if [[ -n "${LOG_FILE}" && "${LOG_FILE}" != "-" ]]; then
+        echo "Logs: stdout + ${LOG_FILE} (run: ./dev logs)"
+        "$PYTHON" "$ODOO_BIN" -c "$CONF_FILE" "${dev_arg[@]}" --logfile - "$@" 2>&1 | tee -a "$LOG_FILE"
+        exit "${PIPESTATUS[0]}"
+      fi
+      echo "Logs: stdout"
+      exec "$PYTHON" "$ODOO_BIN" -c "$CONF_FILE" "${dev_arg[@]}" --logfile - "$@"
+    fi
+    echo "Logs: ${LOG_FILE} (run: ./dev logs)"
+    exec "$PYTHON" "$ODOO_BIN" -c "$CONF_FILE" "${dev_arg[@]}" "$@"
+    ;;
+  update)
+    require_file "$PYTHON"
+    require_file "$ODOO_BIN"
+    require_file "$CONF_FILE"
+    echo "Updating module: ${MODULE}"
+    db_args=()
+    if ! has_db_arg "$@"; then
+      if [[ -z "${DB_NAME}" ]]; then
+        DB_NAME="$(guess_db_name || true)"
+      fi
+      if [[ -n "${DB_NAME}" ]]; then
+        db_args=(-d "$DB_NAME")
+      else
+        echo "Tip: pass the database name, e.g. ./dev update -d TecDocIntegration (or set DB_NAME=...)." >&2
+      fi
+    fi
+    exec "$PYTHON" "$ODOO_BIN" -c "$CONF_FILE" "${db_args[@]}" -u "$MODULE" --stop-after-init --no-http --logfile - "$@"
+    ;;
+  logs)
+    require_file "$LOG_FILE"
+    exec tail -f "$LOG_FILE"
+    ;;
+  open)
+    url="http://localhost:${HTTP_PORT}"
+    echo "$url"
+    if command -v open >/dev/null 2>&1; then
+      open "$url" >/dev/null 2>&1 || true
+      exit 0
+    fi
+    if command -v xdg-open >/dev/null 2>&1; then
+      xdg-open "$url" >/dev/null 2>&1 || true
+      exit 0
+    fi
+    ;;
+  ""|-h|--help|help)
+    usage
+    ;;
+  *)
+    echo "Unknown command: $command" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

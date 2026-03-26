@@ -1,0 +1,36 @@
+.DS_Store
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+.pytest_cache/
+
+# Local secrets and machine-specific config
+.env
+odoo.conf
+
+# Local runtime data
+odoo_data/
+tecdoc_data/
+odoo-venv/
+odoo.log
+odoo_startup.log
+tecdoc_fetch.log
+
+# Local scratch / exports
+ART_*.xml
+INVENTORY_ROLLBACK_*.csv
+remaining_codes.txt
+_progress.json
+not_found.json
+not_found.jsonl
+summary.json
+
+# Editor / local tooling
+.claude/
+
+# Nested framework repo metadata will be tracked as a submodule instead
+odoo/.git
+
+# Odd local artifact
+-

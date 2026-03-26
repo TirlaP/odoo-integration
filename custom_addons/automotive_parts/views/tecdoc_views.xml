@@ -1,0 +1,331 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- TecDoc API Configuration Form -->
+    <record id="view_tecdoc_api_form" model="ir.ui.view">
+        <field name="name">tecdoc.api.form</field>
+        <field name="model">tecdoc.api</field>
+        <field name="arch" type="xml">
+            <form string="TecDoc API Configuration">
+                <header>
+                    <button name="action_test_connection" string="Test Connection" type="object" class="btn-primary"/>
+                    <button name="action_sync_suppliers_catalog" string="Sync TecDoc Suppliers" type="object" class="btn-secondary"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group string="API Configuration">
+                            <field name="name"/>
+                            <field name="api_key" password="True"/>
+                            <field name="api_host"/>
+                            <field name="base_url"/>
+                        </group>
+                        <group string="Default Settings">
+                            <field name="lang_id"/>
+                            <field name="country_filter_id"/>
+                            <field name="cache_enabled"/>
+                            <field name="cache_ttl_seconds" invisible="not cache_enabled"/>
+                            <field name="cache_allow_stale_on_error" invisible="not cache_enabled"/>
+                            <field name="download_images"/>
+                            <field name="overwrite_images" invisible="not download_images"/>
+                        </group>
+                    </group>
+
+                    <notebook>
+                        <page string="Help" name="help">
+                            <group>
+                                <div>
+                                    <h3>TecDoc API Setup Instructions</h3>
+                                    <ol>
+                                        <li>Sign up for RapidAPI at https://rapidapi.com</li>
+                                        <li>Subscribe to TecDoc Catalog API</li>
+                                        <li>Copy your API key from RapidAPI dashboard</li>
+                                        <li>Paste it in the API Key field above</li>
+                                        <li>Save this configuration</li>
+                                    </ol>
+
+                                    <p><strong>Language IDs:</strong></p>
+                                    <ul>
+                                        <li>Use the RapidAPI “Languages” endpoint to list valid IDs for your plan.</li>
+                                        <li>Provider examples often use <code>lang_id = 4</code>.</li>
+                                    </ul>
+
+                                    <p><strong>Country Filter IDs:</strong></p>
+                                    <ul>
+                                        <li>Use the RapidAPI “Countries” / “Country details” endpoints to find the correct country filter id.</li>
+                                        <li>Provider examples often use <code>country_filter_id = 63</code>.</li>
+                                    </ul>
+
+                                    <p><strong>Debugging requests:</strong></p>
+                                    <ul>
+                                        <li>Open <em>Automotive Parts → TecDoc → Cache</em> to see the exact endpoint/params and the raw JSON response saved by the module.</li>
+                                    </ul>
+                                </div>
+                            </group>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- TecDoc API Tree -->
+    <record id="view_tecdoc_api_tree" model="ir.ui.view">
+        <field name="name">tecdoc.api.tree</field>
+        <field name="model">tecdoc.api</field>
+        <field name="arch" type="xml">
+            <list string="TecDoc API">
+                <field name="name"/>
+                <field name="api_host"/>
+                <field name="lang_id"/>
+                <field name="cache_enabled"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- TecDoc API Action -->
+    <record id="action_tecdoc_api" model="ir.actions.act_window">
+        <field name="name">TecDoc API Configuration</field>
+        <field name="path">automotive-tecdoc-config</field>
+        <field name="res_model">tecdoc.api</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- TecDoc Cache List -->
+    <record id="view_tecdoc_api_cache_list" model="ir.ui.view">
+        <field name="name">tecdoc.api.cache.list</field>
+        <field name="model">tecdoc.api.cache</field>
+        <field name="arch" type="xml">
+            <list string="TecDoc Cache" create="false" delete="false">
+                <field name="api_id"/>
+                <field name="endpoint"/>
+                <field name="ok"/>
+                <field name="status_code"/>
+                <field name="hits"/>
+                <field name="fetched_at"/>
+                <field name="expires_at"/>
+                <field name="last_hit_at"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_api_cache_form" model="ir.ui.view">
+        <field name="name">tecdoc.api.cache.form</field>
+        <field name="model">tecdoc.api.cache</field>
+        <field name="arch" type="xml">
+            <form string="TecDoc Cache Entry" create="false" delete="false">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="api_id" readonly="1"/>
+                            <field name="endpoint" readonly="1"/>
+                            <field name="params_json" widget="text" readonly="1"/>
+                        </group>
+                        <group>
+                            <field name="ok" readonly="1"/>
+                            <field name="status_code" readonly="1"/>
+                            <field name="hits" readonly="1"/>
+                            <field name="fetched_at" readonly="1"/>
+                            <field name="expires_at" readonly="1"/>
+                            <field name="last_hit_at" readonly="1"/>
+                        </group>
+                    </group>
+                    <group string="Error" invisible="ok">
+                        <field name="error" widget="text" readonly="1"/>
+                    </group>
+                    <group string="Response">
+                        <field name="response_json" widget="text" readonly="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_tecdoc_api_cache" model="ir.actions.act_window">
+        <field name="name">TecDoc Cache</field>
+        <field name="path">cache</field>
+        <field name="res_model">tecdoc.api.cache</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[]</field>
+        <field name="context">{}</field>
+    </record>
+
+    <!-- TecDoc Products (synced) -->
+    <record id="action_tecdoc_products" model="ir.actions.act_window">
+        <field name="name">TecDoc Products</field>
+        <field name="path">automotive-tecdoc-products</field>
+        <field name="res_model">product.template</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">['|', ('tecdoc_id', '!=', False), ('tecdoc_article_no', '!=', False)]</field>
+        <field name="context">{}</field>
+    </record>
+
+    <!-- TecDoc Sync Wizard -->
+    <record id="view_tecdoc_sync_wizard_form" model="ir.ui.view">
+        <field name="name">tecdoc.sync.wizard.form</field>
+        <field name="model">tecdoc.sync.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Sync Product from TecDoc">
+                <group>
+                    <field name="article_number" placeholder="Enter article number..."/>
+                    <field name="supplier_id"/>
+                </group>
+                <group>
+                    <field name="candidates_info" widget="text" readonly="1" placeholder="Click “Find Supplier IDs” to preview matches."/>
+                </group>
+                <footer>
+                    <button name="action_preview_candidates" string="Find Supplier IDs" type="object" class="btn-secondary"/>
+                    <button name="action_sync" string="Sync Product" type="object" class="btn-primary"/>
+                    <button string="Cancel" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <!-- TecDoc Sync Wizard Action -->
+    <record id="action_tecdoc_sync_wizard" model="ir.actions.act_window">
+        <field name="name">Sync Product from TecDoc</field>
+        <field name="path">automotive-tecdoc-sync</field>
+        <field name="res_model">tecdoc.sync.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <!-- ANAF e-Factura Configuration Form -->
+    <record id="view_anaf_efactura_form" model="ir.ui.view">
+        <field name="name">anaf.efactura.form</field>
+        <field name="model">anaf.efactura</field>
+        <field name="arch" type="xml">
+            <form string="ANAF e-Factura Configuration">
+                <header>
+                    <button name="action_load_from_env" string="Load from Env" type="object" class="btn-secondary"/>
+                    <button name="action_open_authorize_url" string="Open OAuth Login" type="object" class="btn-secondary"
+                            invisible="use_oauth == False"/>
+                    <button name="action_exchange_authorization_code" string="Exchange Auth Code" type="object" class="btn-primary"
+                            invisible="use_oauth == False"/>
+                    <button name="action_refresh_access_token" string="Refresh Access Token" type="object" class="btn-secondary"
+                            invisible="use_oauth == False"/>
+                    <button name="fetch_invoices" string="Fetch Invoices" type="object" class="btn-primary"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group string="Base Configuration">
+                            <field name="name"/>
+                            <field name="active"/>
+                            <field name="environment"/>
+                            <field name="cui_company"/>
+                            <field name="use_oauth"/>
+                            <field name="api_url"/>
+                            <field name="api_token" password="True" invisible="use_oauth == True"/>
+                        </group>
+                        <group string="Fetch Controls">
+                            <field name="fetch_days"/>
+                            <field name="fetch_filter"/>
+                            <field name="last_sync_at" readonly="1"/>
+                            <field name="last_fetch_count" readonly="1"/>
+                        </group>
+                    </group>
+
+                    <group string="OAuth2 Settings" invisible="use_oauth == False">
+                        <group>
+                            <field name="oauth_authorize_url"/>
+                            <field name="oauth_token_url"/>
+                            <field name="oauth_client_id"/>
+                            <field name="oauth_client_secret" password="True"/>
+                            <field name="oauth_redirect_uri"/>
+                            <field name="oauth_token_content_type"/>
+                        </group>
+                        <group>
+                            <field name="oauth_state" readonly="1"/>
+                            <field name="oauth_authorization_code" placeholder="Paste authorization code from redirect URL"/>
+                            <field name="access_token" password="True"/>
+                            <field name="refresh_token" password="True"/>
+                            <field name="token_expires_at" readonly="1"/>
+                            <field name="refresh_expires_at" readonly="1"/>
+                        </group>
+                    </group>
+
+                    <notebook>
+                        <page string="Help" name="help">
+                            <group>
+                                <div>
+                                    <h3>ANAF e-Factura Setup Instructions</h3>
+                                    <p>OAuth2 endpoints (ANAF official):</p>
+                                    <ul>
+                                        <li>Authorize: https://logincert.anaf.ro/anaf-oauth2/v1/authorize</li>
+                                        <li>Token: https://logincert.anaf.ro/anaf-oauth2/v1/token</li>
+                                    </ul>
+                                    <p>Use "Load from Env" to populate fields from environment variables.</p>
+                                    <p>This flow fetches messages via listaMesajeFactura and downloads XML via descarcare.</p>
+                                </div>
+                            </group>
+                        </page>
+                        <page string="Sync Status">
+                            <group>
+                                <field name="last_sync_message" readonly="1" widget="text"/>
+                            </group>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ANAF e-Factura Action -->
+    <record id="action_anaf_efactura" model="ir.actions.act_window">
+        <field name="name">ANAF e-Factura Configuration</field>
+        <field name="path">automotive-anaf-config</field>
+        <field name="res_model">anaf.efactura</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- Audit Log Tree View -->
+    <record id="view_audit_log_tree" model="ir.ui.view">
+        <field name="name">automotive.audit.log.tree</field>
+        <field name="model">automotive.audit.log</field>
+        <field name="arch" type="xml">
+            <list string="Audit Log" create="false" delete="false">
+                <field name="create_date"/>
+                <field name="user_id"/>
+                <field name="action"/>
+                <field name="model_name"/>
+                <field name="record_id"/>
+                <field name="description"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- Audit Log Form View -->
+    <record id="view_audit_log_form" model="ir.ui.view">
+        <field name="name">automotive.audit.log.form</field>
+        <field name="model">automotive.audit.log</field>
+        <field name="arch" type="xml">
+            <form string="Audit Log Entry" create="false" delete="false">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="user_id"/>
+                            <field name="action"/>
+                            <field name="model_name"/>
+                            <field name="record_id"/>
+                        </group>
+                        <group>
+                            <field name="create_date"/>
+                            <field name="description"/>
+                        </group>
+                    </group>
+                    <group string="Changes">
+                        <field name="old_values" widget="text"/>
+                        <field name="new_values" widget="text"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- Audit Log Action -->
+    <record id="action_audit_log" model="ir.actions.act_window">
+        <field name="name">Audit Log</field>
+        <field name="path">automotive-audit-log</field>
+        <field name="res_model">automotive.audit.log</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>

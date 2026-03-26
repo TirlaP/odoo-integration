@@ -1,0 +1,17 @@
+.git
+.gitignore
+.DS_Store
+odoo-venv
+odoo_data
+tecdoc_data
+*.log
+odoo.log
+odoo_startup.log
+-
+__pycache__
+*.pyc
+.env
+.env.local
+.env.*.local
+node_modules
+docs/oferta

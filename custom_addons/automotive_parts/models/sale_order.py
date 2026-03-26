@@ -1,0 +1,434 @@
+# -*- coding: utf-8 -*-
+from odoo import models, fields, api
+from odoo.exceptions import UserError
+from odoo.tools.float_utils import float_compare
+
+
+class SaleOrder(models.Model):
+    """Extended Sale Order with automotive workflow"""
+    _inherit = 'sale.order'
+
+    # Custom order states
+    auto_state = fields.Selection([
+        ('draft', 'Draft'),
+        ('waiting_supply', 'În așteptare aprovizionare'),
+        ('partial_received', 'Parțial recepționată'),
+        ('fully_received', 'Complet recepționată'),
+        ('ready_prep', 'Gata de pregătire'),
+        ('delivered', 'Livrată'),
+        ('cancel', 'Anulată'),
+    ], string='Stare Comandă Auto', default='draft', tracking=True)
+
+    # Order type
+    order_type = fields.Selection([
+        ('internal', 'Comandă Internă'),
+        ('external', 'Comandă Externă'),
+    ], string='Tip Comandă', default='external')
+
+    # Delivery information
+    estimated_delivery_date = fields.Date('Dată Livrare Estimată')
+    responsible_user_id = fields.Many2one('res.users', 'Responsabil Intern',
+                                           default=lambda self: self.env.user)
+
+    # Stock status
+    stock_status = fields.Selection([
+        ('none', 'Fără Stoc'),
+        ('partial', 'Parțial în Stoc'),
+        ('full', 'Complet în Stoc'),
+    ], string='Status Stoc', compute='_compute_stock_status', store=True)
+
+    observations = fields.Text('Observații')
+
+    def _audit_snapshot(self, field_names):
+        self.ensure_one()
+        snapshot = {}
+        for field_name in field_names:
+            if field_name not in self._fields:
+                continue
+            value = self[field_name]
+            if isinstance(value, models.BaseModel):
+                snapshot[field_name] = value.ids
+            else:
+                snapshot[field_name] = value
+        return snapshot
+
+    @api.depends(
+        'state',
+        'order_line',
+        'order_line.product_id',
+        'order_line.product_uom_qty',
+        'order_line.product_uom',
+        'order_line.qty_reserved',
+        'order_line.qty_received',
+    )
+    def _compute_stock_status(self):
+        """Compute stock availability status"""
+        for order in self:
+            if not order.order_line:
+                order.stock_status = 'none'
+                continue
+
+            relevant_lines = order.order_line.filtered(lambda l: l.product_id and l.product_id.is_storable)
+            if not relevant_lines:
+                order.stock_status = 'full'
+                continue
+
+            lines_full = 0
+            lines_partial = 0
+            total_lines = len(relevant_lines)
+
+            for line in relevant_lines:
+                ready_qty = line._get_ready_qty()
+                needed = line.product_uom_qty
+                rounding = line.product_uom.rounding
+                if float_compare(ready_qty, needed, precision_rounding=rounding) >= 0:
+                    lines_full += 1
+                elif float_compare(ready_qty, 0.0, precision_rounding=rounding) > 0:
+                    lines_partial += 1
+
+            if lines_full == 0 and lines_partial == 0:
+                order.stock_status = 'none'
+            elif lines_full == total_lines:
+                order.stock_status = 'full'
+            else:
+                order.stock_status = 'partial'
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        """Override create to reserve stock"""
+        orders = super().create(vals_list)
+
+        for order in orders:
+            # Reserve stock automatically
+            if order.state in ['sale', 'done']:
+                order._reserve_stock()
+
+        audit_log = self.env['automotive.audit.log']
+        for order, vals in zip(orders, vals_list):
+            tracked_fields = [f for f in vals.keys() if f in order._fields]
+            audit_log.log_change(
+                action='create',
+                record=order,
+                description=f'Created order: {order.name}',
+                new_values=order._audit_snapshot(tracked_fields),
+            )
+
+        return orders
+
+    def write(self, vals):
+        """Override write to enforce rules and update auto_state"""
+        context = dict(self.env.context or {})
+        if context.get('skip_edit_restriction') is not True:
+            self._ensure_order_editable(vals)
+
+        tracked_fields = [f for f in vals.keys() if f in self._fields]
+        old_by_id = {}
+        if context.get('skip_audit_log') is not True:
+            old_by_id = {order.id: order._audit_snapshot(tracked_fields) for order in self}
+
+        result = super().write(vals)
+
+        skip_auto_state_update = context.get('skip_auto_state_update') is True or 'auto_state' in vals
+        if not skip_auto_state_update:
+            self._update_auto_state()
+
+        if context.get('skip_audit_log') is not True:
+            audit_log = self.env['automotive.audit.log']
+            for order in self:
+                audit_log.log_change(
+                    action='write',
+                    record=order,
+                    description=f'Modified order: {order.name}',
+                    old_values=old_by_id.get(order.id),
+                    new_values=order._audit_snapshot(tracked_fields),
+                )
+
+        return result
+
+    def _ensure_order_editable(self, vals):
+        restricted_fields = {
+            'order_line',
+            'partner_id',
+            'order_type',
+            'estimated_delivery_date',
+            'responsible_user_id',
+            'observations',
+            'pricelist_id',
+            'payment_term_id',
+            'currency_id',
+        }
+        if not restricted_fields.intersection(vals.keys()):
+            return
+
+        for order in self:
+            if order.auto_state in {'ready_prep', 'delivered'}:
+                raise UserError('Comanda nu mai poate fi modificată după starea „Gata de pregătire”.')
+
+    def _reserve_stock(self):
+        """Reserve stock for order lines"""
+        for order in self:
+            for line in order.order_line:
+                if line.product_id.is_storable:
+                    # Check if enough stock
+                    available = line.product_id.stock_available
+
+                    if available < line.product_uom_qty:
+                        # Create notification
+                        order.message_post(
+                            body=f'Insufficient stock for {line.product_id.name}. '
+                                 f'Available: {available}, Required: {line.product_uom_qty}',
+                            message_type='notification'
+                        )
+
+    def _update_auto_state(self):
+        """Update automatic state based on stock availability"""
+        for order in self:
+            if order.state == 'cancel':
+                desired = 'cancel'
+            elif order._is_fully_delivered():
+                desired = 'delivered'
+            elif order.state == 'draft':
+                desired = 'draft'
+            else:
+                relevant_lines = order.order_line.filtered(lambda l: l.product_id and l.product_id.is_storable)
+                if not relevant_lines:
+                    desired = 'ready_prep'
+                else:
+                    all_reserved = True
+                    all_received = True
+                    any_progress = False
+                    for line in relevant_lines:
+                        needed = line.product_uom_qty
+                        rounding = line.product_uom.rounding
+                        reserved_ok = float_compare(line.qty_reserved, needed, precision_rounding=rounding) >= 0
+                        received_ok = float_compare(line.qty_received, needed, precision_rounding=rounding) >= 0
+                        has_progress = (
+                            float_compare(line.qty_reserved, 0.0, precision_rounding=rounding) > 0
+                            or float_compare(line.qty_received, 0.0, precision_rounding=rounding) > 0
+                        )
+                        all_reserved = all_reserved and reserved_ok
+                        all_received = all_received and received_ok
+                        any_progress = any_progress or has_progress
+
+                    if all_reserved:
+                        desired = 'ready_prep'
+                    elif all_received:
+                        desired = 'fully_received'
+                    elif any_progress:
+                        desired = 'partial_received'
+                    else:
+                        desired = 'waiting_supply'
+
+            if order.auto_state == desired:
+                continue
+
+            order.with_context(skip_auto_state_update=True, skip_audit_log=True).write({'auto_state': desired})
+
+    def _is_fully_delivered(self):
+        self.ensure_one()
+        relevant_lines = self.order_line.filtered(
+            lambda l: l.product_id and l.product_id.is_storable and not l.display_type
+        )
+        if not relevant_lines:
+            return False
+
+        for line in relevant_lines:
+            delivered = line.qty_delivered
+            needed = line.product_uom_qty
+            rounding = line.product_uom.rounding
+            if float_compare(delivered, needed, precision_rounding=rounding) < 0:
+                return False
+        return True
+
+    def _get_portal_mechanic_status(self):
+        """Return portal-ready automotive status metadata for website pages."""
+        self.ensure_one()
+
+        auto_state_labels = dict(self._fields['auto_state'].selection)
+        stock_status_labels = dict(self._fields['stock_status'].selection)
+        auto_state_classes = {
+            'draft': 'secondary',
+            'waiting_supply': 'warning',
+            'partial_received': 'warning',
+            'fully_received': 'info',
+            'ready_prep': 'primary',
+            'delivered': 'success',
+            'cancel': 'danger',
+        }
+        stock_status_classes = {
+            'none': 'danger',
+            'partial': 'warning',
+            'full': 'success',
+        }
+
+        outgoing_pickings = self.picking_ids.filtered(
+            lambda picking: picking.picking_type_id.code == 'outgoing'
+        )
+        latest_picking = outgoing_pickings.sorted(
+            key=lambda picking: picking.scheduled_date or picking.date_done or picking.create_date or fields.Datetime.from_string('1970-01-01 00:00:00'),
+            reverse=True,
+        )[:1]
+
+        delivery_label = False
+        delivery_class = 'secondary'
+        delivery_date = False
+        if latest_picking:
+            picking = latest_picking[0]
+            delivery_date = picking.scheduled_date or picking.date_done
+            if picking.state == 'done':
+                delivery_label = 'Livrat'
+                delivery_class = 'success'
+            elif picking.state in ('assigned', 'confirmed', 'waiting'):
+                delivery_label = 'În magazin / în pregătire'
+                delivery_class = 'info'
+            elif picking.state == 'cancel':
+                delivery_label = 'Anulată'
+                delivery_class = 'danger'
+            else:
+                delivery_label = 'În așteptare'
+                delivery_class = 'warning'
+
+        return {
+            'auto_state_label': auto_state_labels.get(self.auto_state, self.auto_state),
+            'auto_state_class': auto_state_classes.get(self.auto_state, 'secondary'),
+            'stock_status_label': stock_status_labels.get(self.stock_status, self.stock_status),
+            'stock_status_class': stock_status_classes.get(self.stock_status, 'secondary'),
+            'delivery_label': delivery_label,
+            'delivery_class': delivery_class,
+            'delivery_date': delivery_date,
+            'latest_picking': latest_picking[0] if latest_picking else False,
+        }
+
+    def action_mark_delivered(self):
+        """Mark order as delivered"""
+        self.ensure_one()
+        self.with_context(skip_auto_state_update=True).write({'auto_state': 'delivered'})
+
+        self.message_post(
+            body=f'Order marked as delivered by {self.env.user.name}',
+            message_type='notification'
+        )
+
+    def action_cancel_order(self):
+        """Cancel order and release stock"""
+        for order in self:
+            order.with_context(skip_auto_state_update=True, skip_edit_restriction=True).write({'auto_state': 'cancel'})
+            order.with_context(skip_edit_restriction=True).action_cancel()
+
+            # Stock is automatically released by Odoo
+
+            order.message_post(
+                body=f'Order cancelled by {self.env.user.name}',
+                message_type='notification'
+            )
+
+
+class SaleOrderLine(models.Model):
+    """Extended Sale Order Line"""
+    _inherit = 'sale.order.line'
+
+    # Line-specific stock info
+    qty_reserved = fields.Float('Cantitate Rezervată', compute='_compute_qty_reserved', store=True)
+    qty_received = fields.Float('Cantitate Recepționată', compute='_compute_qty_received', store=True)
+
+    line_state = fields.Selection([
+        ('incomplete', 'Necompletată'),
+        ('complete', 'Completată'),
+    ], string='Stare Poziție', default='incomplete', compute='_compute_line_state', store=True)
+
+    @api.depends(
+        'state',
+        'product_id',
+        'product_uom_qty',
+        'product_uom',
+        'move_ids',
+        'move_ids.state',
+        'move_ids.scrapped',
+        'move_ids.location_dest_id.usage',
+        'move_ids.quantity',
+        'move_ids.product_uom',
+    )
+    def _compute_qty_reserved(self):
+        """Compute reserved quantity"""
+        for line in self:
+            if line.state not in {'sale', 'done'} or not line.product_id or not line.product_id.is_storable:
+                line.qty_reserved = 0.0
+                continue
+
+            qty = 0.0
+            moves = line.move_ids.filtered(
+                lambda m: m.state not in {'cancel', 'done'}
+                and not m.scrapped
+                and m.location_dest_id.usage == 'customer'
+            )
+            for move in moves:
+                qty += move.product_uom._compute_quantity(move.quantity, line.product_uom, rounding_method='HALF-UP')
+            line.qty_reserved = qty
+
+    @api.depends(
+        'state',
+        'product_id',
+        'product_uom',
+        'move_ids',
+        'move_ids.state',
+        'move_ids.scrapped',
+        'move_ids.location_dest_id.usage',
+        'move_ids.move_orig_ids.state',
+        'move_ids.move_orig_ids.scrapped',
+        'move_ids.move_orig_ids.location_dest_id.usage',
+        'move_ids.move_orig_ids.move_orig_ids.state',
+        'move_ids.move_orig_ids.move_orig_ids.scrapped',
+        'move_ids.move_orig_ids.move_orig_ids.location_dest_id.usage',
+        'move_ids.move_orig_ids.quantity',
+        'move_ids.move_orig_ids.product_uom',
+        'move_ids.move_orig_ids.move_orig_ids.quantity',
+        'move_ids.move_orig_ids.move_orig_ids.product_uom',
+    )
+    def _compute_qty_received(self):
+        for line in self:
+            if line.state not in {'sale', 'done'} or not line.product_id or not line.product_id.is_storable:
+                line.qty_received = 0.0
+                continue
+
+            delivery_moves = line.move_ids.filtered(
+                lambda m: m.state != 'cancel'
+                and not m.scrapped
+                and m.location_dest_id.usage == 'customer'
+            )
+            ancestor_moves = line._collect_origin_moves(delivery_moves)
+            incoming_done_moves = ancestor_moves.filtered(
+                lambda m: m.state == 'done'
+                and not m.scrapped
+                and m.location_dest_id.usage == 'internal'
+            )
+
+            qty = 0.0
+            for move in incoming_done_moves:
+                qty += move.product_uom._compute_quantity(move.quantity, line.product_uom, rounding_method='HALF-UP')
+            line.qty_received = qty
+
+    @api.depends('qty_received', 'qty_reserved', 'product_uom_qty', 'product_uom')
+    def _compute_line_state(self):
+        """Compute if line is complete"""
+        for line in self:
+            ready_qty = line._get_ready_qty()
+            if float_compare(ready_qty, line.product_uom_qty, precision_rounding=line.product_uom.rounding) >= 0:
+                line.line_state = 'complete'
+            else:
+                line.line_state = 'incomplete'
+
+    def _get_ready_qty(self):
+        self.ensure_one()
+        return max(self.qty_reserved, self.qty_received)
+
+    def _collect_origin_moves(self, moves):
+        """Collect upstream moves recursively, keeping only each move once."""
+        all_origins = self.env['stock.move']
+        to_visit = moves.mapped('move_orig_ids')
+        while to_visit:
+            new_moves = to_visit - all_origins
+            if not new_moves:
+                break
+            all_origins |= new_moves
+            to_visit = new_moves.mapped('move_orig_ids')
+        return all_origins

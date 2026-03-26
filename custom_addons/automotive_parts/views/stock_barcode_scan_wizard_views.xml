@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_stock_barcode_scan_wizard_form" model="ir.ui.view">
+        <field name="name">stock.barcode.scan.wizard.form</field>
+        <field name="model">stock.barcode.scan.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Scanare Cod de Bare">
+                <group>
+                    <field name="picking_id" readonly="1"/>
+                    <field name="barcode" required="1" placeholder="Scan barcode..."/>
+                    <field name="product_id" readonly="1"/>
+                    <field name="quantity"/>
+                </group>
+                <group string="Create product (if missing)" invisible="product_id != False">
+                    <field name="create_product_if_missing"/>
+                    <field name="barcode_target" invisible="create_product_if_missing == False"/>
+                    <field name="new_product_name" invisible="create_product_if_missing == False"/>
+                    <field name="new_default_code" invisible="create_product_if_missing == False"/>
+                </group>
+                <footer>
+                    <button name="action_add_and_scan_next" type="object" class="btn-primary" string="Add &amp; Next"/>
+                    <button name="action_add_to_reception" type="object" class="btn-secondary" string="Add &amp; Close"/>
+                    <button special="cancel" class="btn-secondary" string="Cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>

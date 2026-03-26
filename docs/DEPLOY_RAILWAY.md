@@ -1,0 +1,75 @@
+# Railway Deployment (Self-Hosted Odoo)
+
+This project now includes a Railway-ready container setup:
+
+- `Dockerfile`
+- `railway.json`
+- `scripts/railway_start.sh`
+
+## 1. Create Railway resources
+
+1. Create a new Railway project.
+2. Add a **PostgreSQL** service.
+3. Add a **Volume** and mount it at `/data` (required for filestore persistence).
+4. Connect this Git repository as a new service (Railway will detect `Dockerfile`).
+
+## 2. Configure environment variables
+
+Set these on the Odoo service:
+
+- `ODOO_ADMIN_PASSWD` = strong random string
+- `ODOO_DB_NAME` = your DB name (usually same as Railway `PGDATABASE`)
+- `ODOO_LIST_DB` = `False`
+- `ODOO_PROXY_MODE` = `True`
+- `ODOO_WORKERS` = `0` (start with this; increase later if needed)
+- `ODOO_MAX_CRON_THREADS` = `1`
+- `ODOO_INIT_DB` = `true` (first deploy only; auto-initializes DB if missing)
+- `ODOO_INIT_MODULES` = `base,web,automotive_parts` (first deploy only)
+
+Optional first deploy helper:
+
+- `ODOO_AUTO_UPDATE_MODULES` = `true`
+- `ODOO_UPDATE_MODULES` = `automotive_parts`
+
+App secrets used by the custom module:
+
+- `RAPIDAPI_KEY`
+- `ANAF_EFACTURA_ENV`
+- `ANAF_EFACTURA_CUI`
+- `ANAF_OAUTH_CLIENT_ID`
+- `ANAF_OAUTH_CLIENT_SECRET`
+- `ANAF_OAUTH_REDIRECT_URI`
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL` (example: `gpt-4o-mini`)
+
+Railway PostgreSQL variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, or `DATABASE_URL`) are read automatically by `scripts/railway_start.sh`.
+
+Tip: start from `.env.railway.example` and copy values into Railway Variables UI.
+
+## 3. Deploy and initialize
+
+1. Trigger deploy.
+2. Open service logs and wait for Odoo to start on `$PORT`.
+3. Open your Railway public domain in browser.
+4. If DB is missing and `ODOO_INIT_DB=true`, startup initializes it automatically.
+5. If you restore a dump instead, keep `ODOO_INIT_DB=false`.
+6. In Apps, update apps list and install/upgrade `automotive_parts` when needed.
+
+After first successful boot, disable one-time init/update:
+
+- `ODOO_INIT_DB=false`
+- `ODOO_AUTO_UPDATE_MODULES=false`
+
+## 4. Operational notes
+
+- Persistence:
+  - PostgreSQL keeps relational data.
+  - `/data` volume keeps Odoo filestore (attachments).
+- If you scale to multiple replicas, keep a shared filestore volume or object storage strategy.
+- Keep `ODOO_LIST_DB=False` in production.
+- Put Railway service behind a custom domain and enforce HTTPS.
+
+## 5. Known constraints
+
+- This is self-hosted deployment. Odoo Enterprise license is still required if you use Enterprise edition features.
+- `wkhtmltopdf` is not bundled in this container by default; PDF rendering may be limited depending on report usage.

@@ -1,0 +1,582 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- TecDoc Fast: Import Runs -->
+    <record id="view_tecdoc_fast_import_run_list" model="ir.ui.view">
+        <field name="name">tecdoc.fast.import.run.list</field>
+        <field name="model">tecdoc.fast.import.run</field>
+        <field name="arch" type="xml">
+            <list string="TecDoc Fast Import Runs">
+                <field name="name"/>
+                <field name="state"/>
+                <field name="directory"/>
+                <field name="cursor"/>
+                <field name="batch_size"/>
+                <field name="processed"/>
+                <field name="created_products"/>
+                <field name="created_variants"/>
+                <field name="updated_variants"/>
+                <field name="started_at"/>
+                <field name="finished_at"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_fast_import_run_form" model="ir.ui.view">
+        <field name="name">tecdoc.fast.import.run.form</field>
+        <field name="model">tecdoc.fast.import.run</field>
+        <field name="arch" type="xml">
+            <form string="TecDoc Fast Import Run">
+                <header>
+                    <button name="action_start" string="Start" type="object" class="btn-primary"
+                            invisible="state not in ('draft','failed')"/>
+                    <button name="action_reset" string="Reset" type="object" class="btn-secondary"
+                            invisible="state not in ('failed','done')"/>
+                    <button name="action_open_purge_wizard" string="Purge Fast Data" type="object" class="btn-secondary"
+                            invisible="state == 'running'"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,running,done,failed"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group string="Input">
+                            <field name="name"/>
+                            <field name="directory" placeholder="/path/to/tecdoc_data/..."/>
+                            <field name="batch_size"/>
+                            <field name="run_mode"/>
+                            <field name="replace_variant_details"/>
+                            <field name="import_cross_references"/>
+                            <field name="mark_products_managed"/>
+                        </group>
+                        <group string="Progress">
+                            <field name="cursor"/>
+                            <field name="processed"/>
+                            <field name="created_products"/>
+                            <field name="created_variants"/>
+                            <field name="updated_variants"/>
+                            <field name="created_vehicles"/>
+                            <field name="created_oem_numbers"/>
+                            <field name="created_cross_numbers"/>
+                            <field name="started_at"/>
+                            <field name="finished_at"/>
+                        </group>
+                    </group>
+                    <group string="Error" invisible="state != 'failed'">
+                        <field name="last_error" widget="text" readonly="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_tecdoc_fast_import_runs" model="ir.actions.act_window">
+        <field name="name">TecDoc Fast Import</field>
+        <field name="path">fast-import</field>
+        <field name="res_model">tecdoc.fast.import.run</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- TecDoc Fast: Purge Wizard -->
+    <record id="view_tecdoc_fast_purge_wizard_form" model="ir.ui.view">
+        <field name="name">tecdoc.fast.purge.wizard.form</field>
+        <field name="model">tecdoc.fast.purge.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Purge TecDoc Fast Data">
+                <sheet>
+                    <group>
+                        <field name="run_id" readonly="1"/>
+                    </group>
+                    <group string="What to purge">
+                        <field name="purge_fast_tables"/>
+                    </group>
+                    <group string="Products">
+                        <field name="product_scope"/>
+                        <field name="product_action"/>
+                    </group>
+                    <group string="Confirmation">
+                        <label for="confirmation"/>
+                        <div>
+                            <field name="confirmation" placeholder="Type DELETE to confirm..."/>
+                        </div>
+                    </group>
+                    <group>
+                        <p>
+                            This action is destructive. Recommended: choose "Archive Products" unless you are sure.
+                        </p>
+                    </group>
+                </sheet>
+                <footer>
+                    <button name="action_confirm" string="Purge" type="object" class="btn-primary"/>
+                    <button string="Cancel" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <!-- TecDoc Fast: Suppliers -->
+    <record id="view_tecdoc_supplier_list" model="ir.ui.view">
+        <field name="name">tecdoc.supplier.list</field>
+        <field name="model">tecdoc.supplier</field>
+        <field name="arch" type="xml">
+            <list string="TecDoc Suppliers">
+                <field name="supplier_id"/>
+                <field name="name"/>
+                <field name="supplier_match_code" optional="hide"/>
+                <field name="supplier_logo_name" optional="hide"/>
+                <field name="active" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_supplier_form" model="ir.ui.view">
+        <field name="name">tecdoc.supplier.form</field>
+        <field name="model">tecdoc.supplier</field>
+        <field name="arch" type="xml">
+            <form string="TecDoc Supplier">
+                <sheet>
+                    <group>
+                        <field name="supplier_id"/>
+                        <field name="name"/>
+                        <field name="supplier_match_code"/>
+                        <field name="supplier_logo_name"/>
+                        <field name="active"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_tecdoc_fast_suppliers" model="ir.actions.act_window">
+        <field name="name">TecDoc Suppliers</field>
+        <field name="path">suppliers</field>
+        <field name="res_model">tecdoc.supplier</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- TecDoc Fast: Article Variants -->
+    <record id="view_tecdoc_article_variant_search" model="ir.ui.view">
+        <field name="name">tecdoc.article.variant.search</field>
+        <field name="model">tecdoc.article.variant</field>
+        <field name="arch" type="xml">
+            <search string="TecDoc Variants">
+                <field name="name"/>
+                <field name="article_no"/>
+                <field name="supplier_name"/>
+                <field name="supplier_external_id"/>
+                <field name="product_tmpl_id"/>
+                <filter string="Has Vehicles" name="has_vehicles" domain="[('vehicle_count','&gt;',0)]"/>
+                <filter string="Has OEM" name="has_oem" domain="[('oem_count','&gt;',0)]"/>
+                <filter string="Has Cross" name="has_cross" domain="[('cross_count','&gt;',0)]"/>
+            </search>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_article_variant_list" model="ir.ui.view">
+        <field name="name">tecdoc.article.variant.list</field>
+        <field name="model">tecdoc.article.variant</field>
+        <field name="arch" type="xml">
+            <list string="TecDoc Variants">
+                <field name="name"/>
+                <field name="article_id"/>
+                <field name="article_no"/>
+                <field name="supplier_name"/>
+                <field name="article_product_name"/>
+                <field name="vehicle_count"/>
+                <field name="oem_count"/>
+                <field name="criteria_count"/>
+                <field name="cross_count"/>
+                <field name="ean_count"/>
+                <field name="product_tmpl_id"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_article_variant_form" model="ir.ui.view">
+        <field name="name">tecdoc.article.variant.form</field>
+        <field name="model">tecdoc.article.variant</field>
+        <field name="arch" type="xml">
+            <form string="TecDoc Variant">
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_open_vehicles" type="object" class="oe_stat_button" icon="fa-car"
+                                invisible="not vehicle_count">
+                            <field name="vehicle_count" widget="statinfo" string="Vehicles"/>
+                        </button>
+                        <button name="action_open_oem_numbers" type="object" class="oe_stat_button" icon="fa-barcode"
+                                invisible="not oem_count">
+                            <field name="oem_count" widget="statinfo" string="OEM"/>
+                        </button>
+                        <button name="action_open_specs" type="object" class="oe_stat_button" icon="fa-list"
+                                invisible="not criteria_count">
+                            <field name="criteria_count" widget="statinfo" string="Specs"/>
+                        </button>
+                        <button name="action_open_cross_refs" type="object" class="oe_stat_button" icon="fa-random"
+                                invisible="not cross_count">
+                            <field name="cross_count" widget="statinfo" string="Cross"/>
+                        </button>
+                        <button name="action_open_eans" type="object" class="oe_stat_button" icon="fa-qrcode"
+                                invisible="not ean_count">
+                            <field name="ean_count" widget="statinfo" string="EAN"/>
+                        </button>
+                    </div>
+                    <group>
+                        <group string="Identity">
+                            <field name="name" readonly="1"/>
+                            <field name="article_id"/>
+                            <field name="article_no"/>
+                            <field name="supplier_id"/>
+                            <field name="supplier_name"/>
+                            <field name="supplier_external_id"/>
+                            <field name="product_tmpl_id"/>
+                        </group>
+                        <group string="Media">
+                            <field name="image_url" widget="url"/>
+                            <field name="media_type"/>
+                            <field name="media_filename"/>
+                        </group>
+                    </group>
+                    <group string="Product">
+                        <field name="article_product_name"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_tecdoc_fast_variants" model="ir.actions.act_window">
+        <field name="name">TecDoc Variants</field>
+        <field name="path">variants</field>
+        <field name="res_model">tecdoc.article.variant</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="view_tecdoc_article_variant_search"/>
+    </record>
+
+    <!-- TecDoc Fast: Variant child tables (opened via smart buttons) -->
+    <record id="view_tecdoc_article_variant_ean_list" model="ir.ui.view">
+        <field name="name">tecdoc.article.variant.ean.list</field>
+        <field name="model">tecdoc.article.variant.ean</field>
+        <field name="arch" type="xml">
+            <list string="EANs">
+                <field name="variant_id"/>
+                <field name="ean"/>
+                <field name="ean_key"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_article_variant_ean_form" model="ir.ui.view">
+        <field name="name">tecdoc.article.variant.ean.form</field>
+        <field name="model">tecdoc.article.variant.ean</field>
+        <field name="arch" type="xml">
+            <form string="EAN">
+                <sheet>
+                    <group>
+                        <field name="variant_id"/>
+                        <field name="ean"/>
+                        <field name="ean_key" readonly="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_article_variant_criteria_list" model="ir.ui.view">
+        <field name="name">tecdoc.article.variant.criteria.list</field>
+        <field name="model">tecdoc.article.variant.criteria</field>
+        <field name="arch" type="xml">
+            <list string="Specifications">
+                <field name="variant_id"/>
+                <field name="criteria_id"/>
+                <field name="value_text"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_article_variant_criteria_form" model="ir.ui.view">
+        <field name="name">tecdoc.article.variant.criteria.form</field>
+        <field name="model">tecdoc.article.variant.criteria</field>
+        <field name="arch" type="xml">
+            <form string="Specification">
+                <sheet>
+                    <group>
+                        <field name="variant_id"/>
+                        <field name="criteria_id"/>
+                        <field name="value_text"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_article_variant_cross_list" model="ir.ui.view">
+        <field name="name">tecdoc.article.variant.cross.list</field>
+        <field name="model">tecdoc.article.variant.cross</field>
+        <field name="arch" type="xml">
+            <list string="Cross References">
+                <field name="variant_id"/>
+                <field name="cross_number_id"/>
+                <field name="search_level"/>
+                <field name="source_supplier_name"/>
+                <field name="article_brand_root"/>
+                <field name="article_number_root"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_article_variant_cross_form" model="ir.ui.view">
+        <field name="name">tecdoc.article.variant.cross.form</field>
+        <field name="model">tecdoc.article.variant.cross</field>
+        <field name="arch" type="xml">
+            <form string="Cross Reference">
+                <sheet>
+                    <group>
+                        <field name="variant_id"/>
+                        <field name="cross_number_id"/>
+                        <field name="search_level"/>
+                    </group>
+                    <group string="Source">
+                        <field name="source_supplier_id"/>
+                        <field name="source_supplier_name"/>
+                        <field name="article_brand_root"/>
+                        <field name="article_number_root"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- TecDoc Fast: Vehicles -->
+    <record id="view_tecdoc_vehicle_list" model="ir.ui.view">
+        <field name="name">tecdoc.vehicle.list</field>
+        <field name="model">tecdoc.vehicle</field>
+        <field name="arch" type="xml">
+            <list string="TecDoc Vehicles">
+                <field name="vehicle_id"/>
+                <field name="manufacturer_name"/>
+                <field name="model_name"/>
+                <field name="type_engine_name"/>
+                <field name="construction_interval_start"/>
+                <field name="construction_interval_end"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_vehicle_form" model="ir.ui.view">
+        <field name="name">tecdoc.vehicle.form</field>
+        <field name="model">tecdoc.vehicle</field>
+        <field name="arch" type="xml">
+            <form string="TecDoc Vehicle">
+                <sheet>
+                    <group>
+                        <field name="vehicle_id"/>
+                        <field name="model_id"/>
+                        <field name="manufacturer_name"/>
+                        <field name="model_name"/>
+                        <field name="type_engine_name"/>
+                        <field name="construction_interval_start"/>
+                        <field name="construction_interval_end"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_tecdoc_fast_vehicles" model="ir.actions.act_window">
+        <field name="name">TecDoc Vehicles</field>
+        <field name="path">vehicles</field>
+        <field name="res_model">tecdoc.vehicle</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- TecDoc Fast: OEM Numbers -->
+    <record id="view_tecdoc_oem_number_list" model="ir.ui.view">
+        <field name="name">tecdoc.oem.number.list</field>
+        <field name="model">tecdoc.oem.number</field>
+        <field name="arch" type="xml">
+            <list string="OEM Numbers">
+                <field name="brand"/>
+                <field name="display_no"/>
+                <field name="number_key"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_oem_number_form" model="ir.ui.view">
+        <field name="name">tecdoc.oem.number.form</field>
+        <field name="model">tecdoc.oem.number</field>
+        <field name="arch" type="xml">
+            <form string="OEM Number">
+                <sheet>
+                    <group>
+                        <field name="brand"/>
+                        <field name="display_no"/>
+                        <field name="number_key" readonly="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_tecdoc_fast_oem_numbers" model="ir.actions.act_window">
+        <field name="name">OEM Numbers</field>
+        <field name="path">oem</field>
+        <field name="res_model">tecdoc.oem.number</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- TecDoc Fast: Cross Numbers -->
+    <record id="view_tecdoc_cross_number_list" model="ir.ui.view">
+        <field name="name">tecdoc.cross.number.list</field>
+        <field name="model">tecdoc.cross.number</field>
+        <field name="arch" type="xml">
+            <list string="Cross Numbers">
+                <field name="manufacturer"/>
+                <field name="display_no"/>
+                <field name="number_key"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_cross_number_form" model="ir.ui.view">
+        <field name="name">tecdoc.cross.number.form</field>
+        <field name="model">tecdoc.cross.number</field>
+        <field name="arch" type="xml">
+            <form string="Cross Number">
+                <sheet>
+                    <group>
+                        <field name="manufacturer"/>
+                        <field name="display_no"/>
+                        <field name="number_key" readonly="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_tecdoc_fast_cross_numbers" model="ir.actions.act_window">
+        <field name="name">Cross Numbers</field>
+        <field name="path">cross</field>
+        <field name="res_model">tecdoc.cross.number</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- TecDoc Fast: Criteria -->
+    <record id="view_tecdoc_criteria_list" model="ir.ui.view">
+        <field name="name">tecdoc.criteria.list</field>
+        <field name="model">tecdoc.criteria</field>
+        <field name="arch" type="xml">
+            <list string="Specifications (Criteria)">
+                <field name="name"/>
+                <field name="name_key"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_criteria_form" model="ir.ui.view">
+        <field name="name">tecdoc.criteria.form</field>
+        <field name="model">tecdoc.criteria</field>
+        <field name="arch" type="xml">
+            <form string="Criteria">
+                <sheet>
+                    <group>
+                        <field name="name"/>
+                        <field name="name_key" readonly="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_tecdoc_fast_criteria" model="ir.actions.act_window">
+        <field name="name">Specifications</field>
+        <field name="path">specs</field>
+        <field name="res_model">tecdoc.criteria</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- TecDoc Fast: Product search action with TecDoc lookup field -->
+    <record id="view_product_template_search_tecdoc_fast" model="ir.ui.view">
+        <field name="name">product.template.search.tecdoc.fast</field>
+        <field name="model">product.template</field>
+        <field name="arch" type="xml">
+            <search string="Products (TecDoc Fast)">
+                <field name="name"/>
+                <field name="default_code"/>
+                <field name="barcode"/>
+                <field name="tecdoc_article_no"/>
+                <field name="tecdoc_lookup" string="TecDoc Lookup"/>
+                <filter string="Has Variants" name="has_variants" domain="[('tecdoc_variant_ids','!=',False)]"/>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_tecdoc_fast_products" model="ir.actions.act_window">
+        <field name="name">Products (Catalog)</field>
+        <field name="path">products</field>
+        <field name="res_model">product.template</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="view_product_template_search_tecdoc_fast"/>
+        <field name="domain">[('tecdoc_variant_ids','!=',False)]</field>
+    </record>
+
+    <!-- Product Template: TecDoc Fast tab -->
+    <record id="view_product_template_form_tecdoc_fast" model="ir.ui.view">
+        <field name="name">product.template.form.tecdoc.fast</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="automotive_parts.view_product_template_form_automotive"/>
+        <field name="arch" type="xml">
+            <!-- Merge "Fast" info into the existing TecDoc Integration tab to avoid multiple TecDoc tabs -->
+            <xpath expr="//page[@name='tecdoc']" position="inside">
+                <separator string="Catalog Data (preloaded)" colspan="4"/>
+                <div class="oe_button_box" name="button_box">
+                    <button name="action_open_tecdoc_variants" type="object" class="oe_stat_button" icon="fa-cubes"
+                            invisible="not tecdoc_variant_count">
+                        <field name="tecdoc_variant_count" widget="statinfo" string="Variants"/>
+                    </button>
+                </div>
+                <group string="Keys">
+                    <field name="tecdoc_article_no" string="Article No (system)" readonly="1" invisible="1"/>
+                    <field name="tecdoc_article_no_key" readonly="1" invisible="1"/>
+                </group>
+                <group string="Variants (by supplier)">
+                    <field name="tecdoc_variant_ids" nolabel="1">
+                        <list>
+                            <field name="supplier_name"/>
+                            <field name="article_product_name"/>
+                            <field name="vehicle_count"/>
+                            <field name="oem_count"/>
+                            <field name="criteria_count"/>
+                            <field name="cross_count"/>
+                            <field name="ean_count"/>
+                        </list>
+                    </field>
+                </group>
+            </xpath>
+
+            <xpath expr="//notebook" position="inside">
+                <page string="Compatible Cars" name="compatibility_fast">
+                    <group>
+                        <button name="action_open_fast_vehicles" type="object" class="btn-primary"
+                                string="Open Compatible Cars"
+                                invisible="not tecdoc_variant_count"/>
+                        <p invisible="tecdoc_variant_count">
+                            No preloaded compatibility found. Run TecDoc → Fast Import.
+                        </p>
+                    </group>
+                </page>
+
+                <page string="Equivalents" name="equivalents_fast">
+                    <group>
+                        <button name="action_open_fast_oem_numbers" type="object" class="btn-primary"
+                                string="Open OEM Numbers"
+                                invisible="not tecdoc_variant_count"/>
+                        <button name="action_open_fast_cross_numbers" type="object" class="btn-primary"
+                                string="Open Cross Numbers (AM)"
+                                invisible="not tecdoc_variant_count"/>
+                        <button name="action_open_fast_specs" type="object" class="btn-secondary"
+                                string="Open Specifications"
+                                invisible="not tecdoc_variant_count"/>
+                    </group>
+                </page>
+            </xpath>
+        </field>
+    </record>
+</odoo>

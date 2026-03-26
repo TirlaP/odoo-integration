@@ -1,0 +1,337 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Extended Sale Order Form View -->
+    <record id="view_order_form_automotive" model="ir.ui.view">
+        <field name="name">sale.order.form.automotive</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <!-- Add automotive fields after partner_id -->
+            <field name="partner_id" position="after">
+                <field name="order_type"/>
+                <field name="auto_state" widget="statusbar" statusbar_visible="draft,waiting_supply,fully_received,ready_prep,delivered"/>
+            </field>
+
+            <field name="payment_term_id" position="after">
+                <field name="responsible_user_id"/>
+                <field name="estimated_delivery_date"/>
+                <field name="stock_status" widget="badge"
+                       decoration-success="stock_status == 'full'"
+                       decoration-warning="stock_status == 'partial'"
+                       decoration-danger="stock_status == 'none'"/>
+            </field>
+
+            <!-- Add observations field -->
+            <xpath expr="//notebook" position="inside">
+                <page string="Observații" name="observations">
+                    <field name="observations" placeholder="Add internal notes here..."/>
+                </page>
+            </xpath>
+
+            <!-- Add action buttons -->
+            <xpath expr="//header" position="inside">
+                <button name="action_mark_delivered" string="Mark as Delivered"
+                        type="object" class="btn-primary"
+                        invisible="auto_state != 'ready_prep'"/>
+                <button name="action_cancel_order" string="Cancel Order"
+                        type="object" class="btn-secondary"
+                        confirm="Are you sure you want to cancel this order?"
+                        invisible="state in ('cancel', 'done')"/>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Sale Order Line Tree View -->
+    <record id="view_order_line_tree_automotive" model="ir.ui.view">
+        <field name="name">sale.order.line.tree.automotive</field>
+        <field name="model">sale.order.line</field>
+        <field name="inherit_id" ref="sale.view_order_line_tree"/>
+        <field name="arch" type="xml">
+            <field name="price_subtotal" position="after">
+                <field name="qty_reserved"/>
+                <field name="qty_received"/>
+                <field name="line_state" widget="badge"
+                       decoration-success="line_state == 'complete'"
+                       decoration-warning="line_state == 'incomplete'"/>
+            </field>
+        </field>
+    </record>
+
+    <!-- Sale Order Tree View -->
+    <record id="view_order_tree_automotive" model="ir.ui.view">
+        <field name="name">sale.order.tree.automotive</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_quotation_tree"/>
+        <field name="arch" type="xml">
+            <field name="amount_total" position="after">
+                <field name="order_type"/>
+                <field name="auto_state" widget="badge"/>
+                <field name="stock_status" widget="badge"
+                       decoration-success="stock_status == 'full'"
+                       decoration-warning="stock_status == 'partial'"
+                       decoration-danger="stock_status == 'none'"/>
+            </field>
+        </field>
+    </record>
+
+    <!-- Portal home entry point for mechanics -->
+    <template id="portal_my_home_mechanic" name="Mechanic Portal Entry" inherit_id="portal.portal_my_home" priority="30">
+        <xpath expr="//div[hasclass('o_portal_docs')]" position="inside">
+            <t t-if="is_mechanic_portal">
+                <t t-call="portal.portal_docs_entry">
+                    <t t-set="bg_color" t-value="'alert alert-info align-items-center'"/>
+                    <t t-set="placeholder_count" t-value="'mechanic_order_count'"/>
+                    <t t-set="title">Mechanic Portal</t>
+                    <t t-set="url" t-value="'/my/mechanic'"/>
+                    <t t-set="text">Orders, quotations and automotive status in one place.</t>
+                    <t t-set="show_count" t-value="True"/>
+                </t>
+            </t>
+        </xpath>
+    </template>
+
+    <!-- Dedicated mechanic portal dashboard -->
+    <template id="portal_my_mechanic" name="Mechanic Portal">
+        <t t-call="portal.portal_layout">
+            <t t-set="breadcrumbs_searchbar" t-value="True"/>
+
+            <t t-call="portal.portal_searchbar">
+                <t t-set="title">Mechanic Portal</t>
+            </t>
+
+            <div t-if="not is_mechanic_portal" class="alert alert-warning" role="alert">
+                This area is reserved for mechanic portal users.
+            </div>
+
+            <t t-else="">
+                <div class="row g-3 mb-4">
+                    <div class="col-6 col-lg-3">
+                        <div class="card shadow-sm h-100">
+                            <div class="card-body">
+                                <div class="text-muted small">Quotations</div>
+                                <div class="fs-2 fw-semibold"><t t-out="mechanic_quote_count"/></div>
+                                <a href="/my/quotes" class="stretched-link">Open quotations</a>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-lg-3">
+                        <div class="card shadow-sm h-100">
+                            <div class="card-body">
+                                <div class="text-muted small">Orders</div>
+                                <div class="fs-2 fw-semibold"><t t-out="mechanic_order_count"/></div>
+                                <a href="/my/orders" class="stretched-link">Open orders</a>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-12 col-lg-6">
+                        <div class="card shadow-sm h-100">
+                            <div class="card-body">
+                                <div class="text-muted small mb-2">Automotive status summary</div>
+                                <div class="d-flex flex-wrap gap-2">
+                                    <t t-foreach="mechanic_status_counts.items()" t-as="status_item">
+                                        <span class="badge rounded-pill text-bg-light border text-dark">
+                                            <t t-out="mechanic_status_labels.get(status_item[0])"/>:
+                                            <t t-out="status_item[1]"/>
+                                        </span>
+                                    </t>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="row g-4">
+                    <div class="col-12 col-lg-6">
+                        <div class="card shadow-sm h-100">
+                            <div class="card-header bg-transparent">
+                                <div class="d-flex align-items-center justify-content-between">
+                                    <strong>Recent quotations</strong>
+                                    <a href="/my/quotes">See all</a>
+                                </div>
+                            </div>
+                            <div class="table-responsive">
+                                <table class="table table-sm mb-0">
+                                    <thead>
+                                        <tr>
+                                            <th>Quotation</th>
+                                            <th class="text-end">Date</th>
+                                            <th class="text-end">Auto</th>
+                                            <th class="text-end">Stock</th>
+                                            <th class="text-end">Total</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <t t-if="not mechanic_quotes">
+                                            <tr>
+                                                <td colspan="5" class="text-muted p-3">No quotations found.</td>
+                                            </tr>
+                                        </t>
+                                        <t t-foreach="mechanic_quotes" t-as="order">
+                                            <t t-set="status_info" t-value="order._get_portal_mechanic_status()"/>
+                                            <tr>
+                                                <td><a t-att-href="order.get_portal_url()"><t t-out="order.name"/></a></td>
+                                                <td class="text-end"><span t-field="order.date_order" t-options="{'widget': 'date'}"/></td>
+                                                <td class="text-end">
+                                                    <span t-att-class="'badge rounded-pill text-bg-%s' % status_info['auto_state_class']">
+                                                        <span t-field="order.auto_state"/>
+                                                    </span>
+                                                </td>
+                                                <td class="text-end">
+                                                    <span t-att-class="'badge rounded-pill text-bg-%s' % status_info['stock_status_class']">
+                                                        <span t-field="order.stock_status"/>
+                                                    </span>
+                                                </td>
+                                                <td class="text-end"><span t-field="order.amount_total"/></td>
+                                            </tr>
+                                        </t>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-12 col-lg-6">
+                        <div class="card shadow-sm h-100">
+                            <div class="card-header bg-transparent">
+                                <div class="d-flex align-items-center justify-content-between">
+                                    <strong>Recent orders</strong>
+                                    <a href="/my/orders">See all</a>
+                                </div>
+                            </div>
+                            <div class="table-responsive">
+                                <table class="table table-sm mb-0">
+                                    <thead>
+                                        <tr>
+                                            <th>Order</th>
+                                            <th class="text-end">Date</th>
+                                            <th class="text-end">Auto</th>
+                                            <th class="text-end">Stock</th>
+                                            <th class="text-end">ETA</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <t t-if="not mechanic_orders">
+                                            <tr>
+                                                <td colspan="5" class="text-muted p-3">No orders found.</td>
+                                            </tr>
+                                        </t>
+                                        <t t-foreach="mechanic_orders" t-as="order">
+                                            <t t-set="status_info" t-value="order._get_portal_mechanic_status()"/>
+                                            <tr>
+                                                <td><a t-att-href="order.get_portal_url()"><t t-out="order.name"/></a></td>
+                                                <td class="text-end"><span t-field="order.date_order" t-options="{'widget': 'date'}"/></td>
+                                                <td class="text-end">
+                                                    <span t-att-class="'badge rounded-pill text-bg-%s' % status_info['auto_state_class']">
+                                                        <span t-field="order.auto_state"/>
+                                                    </span>
+                                                </td>
+                                                <td class="text-end">
+                                                    <span t-att-class="'badge rounded-pill text-bg-%s' % status_info['stock_status_class']">
+                                                        <span t-field="order.stock_status"/>
+                                                    </span>
+                                                </td>
+                                                <td class="text-end">
+                                                    <t t-if="order.estimated_delivery_date">
+                                                        <span t-field="order.estimated_delivery_date"/>
+                                                    </t>
+                                                    <t t-else="">-</t>
+                                                </td>
+                                            </tr>
+                                        </t>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </t>
+        </t>
+    </template>
+
+    <!-- Portal breadcrumbs entry for the mechanic dashboard -->
+    <template id="portal_mechanic_breadcrumbs" inherit_id="portal.portal_breadcrumbs" priority="30">
+        <xpath expr="//ol[hasclass('o_portal_submenu')]" position="inside">
+            <li t-if="page_name == 'mechanic'" class="breadcrumb-item active">
+                <span>Mechanic Portal</span>
+            </li>
+        </xpath>
+    </template>
+
+    <!-- Add automotive status to the order portal page -->
+    <template id="sale_order_portal_template_mechanic" name="Mechanic Status" inherit_id="sale.sale_order_portal_template" priority="30">
+        <xpath expr="//div[@id='sale_order_sidebar_button']" position="after">
+            <t t-set="status_info" t-value="sale_order._get_portal_mechanic_status()"/>
+            <div class="list-group-item border rounded-3 p-3">
+                <div class="d-flex flex-column gap-2">
+                    <div class="d-flex flex-wrap gap-2 align-items-center">
+                        <span class="text-muted small">Status auto</span>
+                        <span t-att-class="'badge rounded-pill text-bg-%s' % status_info['auto_state_class']">
+                            <span t-field="sale_order.auto_state"/>
+                        </span>
+                        <span class="text-muted small ms-2">Stoc</span>
+                        <span t-att-class="'badge rounded-pill text-bg-%s' % status_info['stock_status_class']">
+                            <span t-field="sale_order.stock_status"/>
+                        </span>
+                        <span t-if="sale_order.estimated_delivery_date" class="text-muted small ms-2">
+                            ETA: <span t-field="sale_order.estimated_delivery_date"/>
+                        </span>
+                    </div>
+                    <div t-if="status_info['delivery_label']" class="small text-muted">
+                        Livrare:
+                        <span t-att-class="'badge rounded-pill text-bg-%s' % status_info['delivery_class']">
+                            <t t-esc="status_info['delivery_label']"/>
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </xpath>
+    </template>
+
+    <!-- Add automotive status columns to portal order lists -->
+    <template id="portal_my_orders_mechanic" name="Mechanic Order Columns" inherit_id="sale.portal_my_orders" priority="30">
+        <xpath expr="//thead/tr/th[last()]" position="before">
+            <th class="text-end">Auto</th>
+            <th class="text-end">Stock</th>
+            <th class="text-end">ETA</th>
+        </xpath>
+        <xpath expr="//t[@t-foreach='orders']/tr/td[last()]" position="before">
+            <t t-set="status_info" t-value="order._get_portal_mechanic_status()"/>
+            <td class="text-end">
+                <span t-att-class="'badge rounded-pill text-bg-%s' % status_info['auto_state_class']">
+                    <span t-field="order.auto_state"/>
+                </span>
+            </td>
+            <td class="text-end">
+                <span t-att-class="'badge rounded-pill text-bg-%s' % status_info['stock_status_class']">
+                    <span t-field="order.stock_status"/>
+                </span>
+            </td>
+            <td class="text-end">
+                <t t-if="order.estimated_delivery_date">
+                    <span t-field="order.estimated_delivery_date"/>
+                </t>
+                <t t-else="">-</t>
+            </td>
+        </xpath>
+    </template>
+
+    <template id="portal_my_quotations_mechanic" name="Mechanic Quotation Columns" inherit_id="sale.portal_my_quotations" priority="30">
+        <xpath expr="//thead/tr/th[last()]" position="before">
+            <th class="text-end">Auto</th>
+            <th class="text-end">Stock</th>
+        </xpath>
+        <xpath expr="//t[@t-foreach='quotations']/tr/td[last()]" position="before">
+            <t t-set="status_info" t-value="quotation._get_portal_mechanic_status()"/>
+            <td class="text-end">
+                <span t-att-class="'badge rounded-pill text-bg-%s' % status_info['auto_state_class']">
+                    <span t-field="quotation.auto_state"/>
+                </span>
+            </td>
+            <td class="text-end">
+                <span t-att-class="'badge rounded-pill text-bg-%s' % status_info['stock_status_class']">
+                    <span t-field="quotation.stock_status"/>
+                </span>
+            </td>
+        </xpath>
+    </template>
+</odoo>

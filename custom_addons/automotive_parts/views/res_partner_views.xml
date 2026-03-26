@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Extended Partner Form View -->
+    <record id="view_partner_form_automotive" model="ir.ui.view">
+        <field name="name">res.partner.form.automotive</field>
+        <field name="model">res.partner</field>
+        <field name="inherit_id" ref="base.view_partner_form"/>
+        <field name="arch" type="xml">
+            <!-- Add after company_type field -->
+            <field name="company_type" position="after">
+                <field name="client_type"/>
+            </field>
+
+            <!-- Add Romanian fields in a new page -->
+            <notebook position="inside">
+                <page string="Informații Auto" name="automotive_info">
+                    <group>
+                        <group string="Identificare Română">
+                            <field name="cui" invisible="client_type != 'company'"/>
+                            <field name="cnp" invisible="client_type != 'individual'"/>
+                            <field name="is_mechanic" readonly="1"/>
+                        </group>
+                        <group string="Financiar">
+                            <field name="current_balance" widget="monetary"/>
+                        </group>
+                        <group string="Portal Mecanic" invisible="client_type != 'mechanic'">
+                            <field name="mechanic_portal_access" readonly="1"/>
+                            <field name="mechanic_portal_user_id" readonly="1" invisible="mechanic_portal_access == False"/>
+                            <button name="action_open_mechanic_portal_wizard"
+                                    type="object"
+                                    string="Administreaza accesul portal"
+                                    class="btn-secondary"
+                                    groups="sales_team.group_sale_manager"/>
+                        </group>
+                    </group>
+
+                    <group string="Audit Trail">
+                        <group>
+                            <field name="create_uid_name"/>
+                            <field name="create_date"/>
+                        </group>
+                        <group>
+                            <field name="write_uid_name"/>
+                            <field name="write_date"/>
+                        </group>
+                    </group>
+                </page>
+            </notebook>
+
+            <!-- Add buttons in header -->
+            <div name="button_box" position="inside">
+                <button class="oe_stat_button" type="object"
+                        name="action_view_orders" icon="fa-shopping-cart">
+                    <field string="Orders" name="sale_order_count" widget="statinfo"/>
+                </button>
+            </div>
+
+            <xpath expr="//header" position="inside">
+                <button name="action_open_mechanic_portal_wizard"
+                        type="object"
+                        string="Mechanic Portal Access"
+                        class="btn-secondary"
+                        groups="sales_team.group_sale_manager"
+                        invisible="client_type != 'mechanic'"/>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Partner Tree View -->
+    <record id="view_partner_tree_automotive" model="ir.ui.view">
+        <field name="name">res.partner.tree.automotive</field>
+        <field name="model">res.partner</field>
+        <field name="inherit_id" ref="base.view_partner_tree"/>
+        <field name="arch" type="xml">
+            <field name="complete_name" position="after">
+                <field name="client_type"/>
+                <field name="cui"/>
+                <field name="current_balance"/>
+            </field>
+        </field>
+    </record>
+</odoo>

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<templates xml:space="preserve">
+    <t t-name="automotive_parts.PdfDropBinaryField">
+        <div class="o_pdf_drop_binary_wrapper">
+            <div
+                t-attf-class="o_pdf_drop_binary_zone #{state.isDragging ? 'o_is_dragging' : ''}"
+                t-on-dragenter.prevent="onDragEnter"
+                t-on-dragover.prevent="onDragEnter"
+                t-on-dragleave.prevent="onDragLeave"
+                t-on-drop.prevent="onDrop"
+            >
+                <div class="o_pdf_drop_binary_title">Drag and drop invoice PDF here</div>
+                <div class="text-muted">or</div>
+                <FileUploader
+                    acceptedFileExtensions="props.acceptedFileExtensions"
+                    onUploaded.bind="onUploaded"
+                    checkSize="true"
+                >
+                    <button type="button" class="btn btn-secondary mt-2">Choose PDF</button>
+                </FileUploader>
+            </div>
+            <div t-if="fileName" class="o_pdf_drop_binary_meta mt-2">
+                <i class="fa fa-file-pdf-o me-1"/>
+                <span t-esc="fileName"/>
+                <button type="button" class="btn btn-link btn-sm ms-2 p-0" t-on-click="onClear">
+                    Remove
+                </button>
+            </div>
+        </div>
+    </t>
+</templates>

@@ -1,0 +1,23 @@
+.o_pdf_drop_binary_zone {
+  border: 2px dashed #b8bfd1;
+  border-radius: 10px;
+  padding: 20px;
+  text-align: center;
+  background: #f9fafc;
+  transition: all 0.2s ease;
+}
+
+.o_pdf_drop_binary_zone.o_is_dragging {
+  border-color: #4a6cf7;
+  background: #eef3ff;
+  box-shadow: 0 0 0 3px rgba(74, 108, 247, 0.15) inset;
+}
+
+.o_pdf_drop_binary_title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.o_pdf_drop_binary_meta {
+  font-size: 0.9rem;
+}

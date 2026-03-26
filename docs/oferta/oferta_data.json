@@ -1,0 +1,70 @@
+{
+  "render": {
+    "strip_diacritics": true
+  },
+  "document": {
+    "title": "OFERTĂ TEHNICĂ ȘI COMERCIALĂ",
+    "subtitle": "Sistem ERP pentru distribuție piese auto (Odoo) — TecDoc, ANAF e-Factura, SAGA, Portal mecanici",
+    "offer_number": "OF-2026-01-23-001",
+    "date": "23.01.2026",
+    "validity_days": 30
+  },
+  "parties": {
+    "provider": {
+      "name": "Prestator: [Numele tău / Firma ta]",
+      "reg": "[CUI / Nr. Reg. Com.]",
+      "address": "[Adresă]",
+      "email": "[Email]",
+      "phone": "[Telefon]"
+    },
+    "beneficiary": {
+      "name": "Beneficiar: [Nume companie client]",
+      "reg": "[CUI / Nr. Reg. Com.]",
+      "address": "[Adresă]",
+      "contact": "[Persoană de contact]"
+    }
+  },
+  "commercial": {
+    "currency": "EUR",
+    "vat_note": "Prețurile sunt exprimate fără TVA (TVA se aplică conform legislației).",
+    "total_price": 6500,
+    "payment_schedule": [
+      { "milestone": "Semnare + pornire proiect", "percent": 30 },
+      { "milestone": "Livrare MVP (flux stoc/comenzi/NIR + audit)", "percent": 40 },
+      { "milestone": "Go-live + stabilizare inițială", "percent": 30 }
+    ],
+    "optional_monthly_support": {
+      "enabled": true,
+      "price": 250,
+      "description": "Suport și mentenanță (SLA best-effort, bugfix, mici ajustări, monitorizare)."
+    }
+  },
+  "scope": {
+    "platform": "Odoo Community (v18.x) + modul custom `automotive_parts`",
+    "in_scope": [
+      "2.1 Management comenzi și clienți (Clienți + Comenzi + stări + restricții editare)",
+      "2.2 Management produse și stocuri (produse, rezervări, disponibil/rezervat, trasabilitate)",
+      "2.3 Recepție marfă (NIR) + scanare cod bare + diferențe + legare documente",
+      "2.4 Integrare TecDoc (date local/sincronizat, compatibilități, metadate tehnice)",
+      "2.5 Automatizări (status „gata”, notificări)",
+      "2.6 Management plăți + alocări + recalcul sold",
+      "2.7 Portal mecanici (autentificare, vizualizare comenzi/sold/documente, cereri)",
+      "2.8 Audit Log (captură acțiuni + valori vechi/noi)",
+      "2.9 Integrare contabilitate SAGA (export recepții/livrări/retururi; sincronizare bidirecțională — etapizat)",
+      "2.10 Documente comerciale + arhivare electronică",
+      "2.11 Integrare stoc/preț furnizori + comenzi către furnizori (unde există API)"
+    ],
+    "out_of_scope": [
+      "Dezvoltarea/mentenanța API-urilor furnizorilor (depinde de terți)",
+      "Achiziția de licențe/subscrieri (TecDoc/RapidAPI, ANAF certificate, SAGA, etc.)",
+      "Hardware și infrastructură fizică (imprimantă etichete, scanner, PC-uri)",
+      "Migrare istoric complet (se poate oferta separat; minim: import produse/parteneri/stoc inițial)"
+    ]
+  },
+  "assumptions": [
+    "Beneficiarul furnizează acces la datele necesare (listă produse, stocuri, furnizori, coduri, formate).",
+    "Beneficiarul furnizează sau procură credențiale/licențe pentru TecDoc/RapidAPI și ANAF (certificat/credite).",
+    "Pentru integrarea SAGA: se validează formatul de import/export acceptat în fluxul contabilului (XML/CSV etc.).",
+    "Etichetele: se confirmă model imprimantă și limbaj (de ex. ZPL/EPL) înainte de implementare."
+  ]
+}

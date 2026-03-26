@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Extended Product Template Form View (this is what Inventory → Products opens) -->
+    <record id="view_product_template_form_automotive" model="ir.ui.view">
+        <field name="name">product.template.form.automotive</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_form_view"/>
+        <field name="arch" type="xml">
+            <!-- Odoo 18 base view doesn't show default_code by default on product.template; inject it. -->
+            <xpath expr="//page[@name='general_information']//group[@name='group_general']" position="inside">
+                <field name="default_code" string="Article No"/>
+                <field name="barcode"/>
+                <field name="barcode_internal"/>
+                <field name="supplier_code"/>
+                <field name="main_supplier_id"/>
+            </xpath>
+
+            <notebook position="inside">
+                <page string="Product Data" name="tecdoc">
+                    <group>
+                        <group string="Supplier">
+                            <field name="tecdoc_supplier_id" string="Supplier ID"/>
+                            <field name="tecdoc_supplier_name" string="Supplier"/>
+                        </group>
+                    </group>
+
+                    <group string="Identifiers">
+                        <field name="default_code" string="Cod Intern"/>
+                        <field name="barcode" string="EAN"/>
+                        <field name="barcode_internal"/>
+                        <field name="supplier_code"/>
+                        <field name="tecdoc_ean" string="EAN TecDoc" readonly="1"/>
+                        <field name="tecdoc_oem_numbers" string="OEM Numbers" widget="text"/>
+                    </group>
+
+                    <group string="Specifications">
+                        <field name="tecdoc_specifications" string="Specifications (legacy)" widget="text" invisible="1"/>
+                    </group>
+
+                    <group string="Vehicle Compatibility">
+                        <field name="tecdoc_compatibility" string="Compatibility (legacy)" widget="text" invisible="1"/>
+                    </group>
+
+                    <group string="Media">
+                        <field name="tecdoc_image_url" string="Image URL (raw)"/>
+                        <field name="tecdoc_media_type" string="Media Type" readonly="1"/>
+                        <field name="tecdoc_media_filename" string="Media Filename" readonly="1"/>
+                    </group>
+
+                    <group>
+                        <group string="Stock">
+                            <field name="stock_available" readonly="1"/>
+                            <field name="stock_reserved" readonly="1"/>
+                        </group>
+                    </group>
+
+                    <group>
+                        <button name="action_sync_from_tecdoc" string="Sync from TecDoc"
+                                type="object" class="btn-primary"
+                                invisible="tecdoc_fast_managed or (not tecdoc_article_no and not tecdoc_id)"/>
+                        <button name="action_view_compatible_vehicles" string="Compatible Vehicles"
+                                type="object" class="btn-secondary"
+                                invisible="not tecdoc_article_no"/>
+                    </group>
+                </page>
+
+                <page string="Stock Alerts" name="stock_alerts">
+                    <field name="product_variant_count" invisible="1"/>
+                    <group invisible="product_variant_count != 1">
+                        <group string="Alert settings">
+                            <field name="stock_alert_enabled"/>
+                            <field name="stock_alert_state" readonly="1"/>
+                            <field name="stock_alert_orderpoint_id" readonly="1"/>
+                        </group>
+                        <group string="Thresholds">
+                            <field name="stock_alert_min_qty"/>
+                            <field name="stock_alert_target_qty"/>
+                            <field name="stock_alert_qty_to_order" readonly="1"/>
+                        </group>
+                        <group string="Default replenishment location">
+                            <field name="stock_alert_warehouse_id" readonly="1"/>
+                            <field name="stock_alert_location_id" readonly="1"/>
+                        </group>
+                        <group string="Actions">
+                            <button name="action_view_stock_alert_orderpoint"
+                                    string="Open linked replenishment"
+                                    type="object"
+                                    class="btn-primary"/>
+                            <button name="action_sync_stock_alert_orderpoint"
+                                    string="Resync alert"
+                                    type="object"
+                                    class="btn-secondary"/>
+                        </group>
+                    </group>
+                    <group invisible="product_variant_count == 1">
+                        <div class="text-muted">
+                            Stock alerts are managed per variant. Open a single-variant product or the variant form to configure the refill rule.
+                        </div>
+                    </group>
+                </page>
+            </notebook>
+        </field>
+    </record>
+
+    <!-- Product Tree View -->
+    <record id="view_product_tree_automotive" model="ir.ui.view">
+        <field name="name">product.product.tree.automotive</field>
+        <field name="model">product.product</field>
+        <field name="inherit_id" ref="product.product_product_tree_view"/>
+        <field name="arch" type="xml">
+            <field name="lst_price" position="after">
+                <field name="default_code"/>
+                <field name="barcode"/>
+                <field name="barcode_internal"/>
+                <field name="supplier_code"/>
+                <field name="tecdoc_article_no"/>
+                <field name="tecdoc_id"/>
+                <field name="stock_available"/>
+                <field name="stock_reserved"/>
+                <field name="stock_alert_enabled"/>
+                <field name="stock_alert_state"/>
+                <field name="stock_alert_min_qty"/>
+                <field name="stock_alert_target_qty"/>
+                <field name="stock_alert_qty_to_order"/>
+                <field name="is_automotive_part"/>
+            </field>
+        </field>
+    </record>
+</odoo>
