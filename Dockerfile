@@ -4,6 +4,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
+ARG ODOO_VERSION=18.0
+
 WORKDIR /app
 
 # System dependencies for Odoo Python packages (ldap/lxml/psycopg2/Pillow/reporting).
@@ -27,14 +29,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Fetch Odoo source during build so deployment does not depend on Git submodule checkout.
+RUN git clone --depth 1 --branch ${ODOO_VERSION} https://github.com/odoo/odoo.git /app/odoo
+
 # Install Python dependencies first for better Docker layer caching.
-COPY odoo/requirements.txt /app/odoo-requirements.txt
 COPY scripts/requirements.txt /app/custom-requirements.txt
 RUN pip install --upgrade pip setuptools wheel && \
-    pip install -r /app/odoo-requirements.txt -r /app/custom-requirements.txt
+    pip install -r /app/odoo/requirements.txt -r /app/custom-requirements.txt
 
 # Copy app source.
-COPY odoo /app/odoo
 COPY custom_addons /app/custom_addons
 COPY scripts /app/scripts
 
