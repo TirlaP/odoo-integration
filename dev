@@ -50,6 +50,7 @@ HTTP_PORT="${HTTP_PORT:-$(conf_get http_port || true)}"
 HTTP_PORT="${HTTP_PORT:-8069}"
 LOG_TO_STDOUT="${LOG_TO_STDOUT:-1}"
 DEFAULT_DEV_MODE="${DEFAULT_DEV_MODE:-reload}"
+DEFAULT_MAX_CRON_THREADS="${DEFAULT_MAX_CRON_THREADS:-0}"
 DATA_DIR="${DATA_DIR:-$(conf_get data_dir || true)}"
 DATA_DIR="${DATA_DIR:-odoo_data}"
 
@@ -58,6 +59,18 @@ has_db_arg() {
   for arg in "$@"; do
     case "$arg" in
       -d|--database|-d*|--database=*)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+has_max_cron_threads_arg() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --max-cron-threads|--max-cron-threads=*)
         return 0
         ;;
     esac
@@ -91,6 +104,8 @@ usage() {
 Usage:
   ./dev start [extra odoo args...]
   ./dev update [extra odoo args...]
+  ./dev stop
+  ./dev status
   ./dev logs
   ./dev open
 
@@ -123,17 +138,22 @@ case "$command" in
       dev_arg=(--dev="${DEFAULT_DEV_MODE}")
     fi
 
+    cron_arg=()
+    if ! has_max_cron_threads_arg "$@"; then
+      cron_arg=(--max-cron-threads="${DEFAULT_MAX_CRON_THREADS}")
+    fi
+
     if [[ "${LOG_TO_STDOUT}" == "1" ]]; then
       if [[ -n "${LOG_FILE}" && "${LOG_FILE}" != "-" ]]; then
         echo "Logs: stdout + ${LOG_FILE} (run: ./dev logs)"
-        "$PYTHON" "$ODOO_BIN" -c "$CONF_FILE" "${dev_arg[@]}" --logfile - "$@" 2>&1 | tee -a "$LOG_FILE"
+        "$PYTHON" "$ODOO_BIN" -c "$CONF_FILE" "${dev_arg[@]}" "${cron_arg[@]}" --logfile - "$@" 2>&1 | tee -a "$LOG_FILE"
         exit "${PIPESTATUS[0]}"
       fi
       echo "Logs: stdout"
-      exec "$PYTHON" "$ODOO_BIN" -c "$CONF_FILE" "${dev_arg[@]}" --logfile - "$@"
+      exec "$PYTHON" "$ODOO_BIN" -c "$CONF_FILE" "${dev_arg[@]}" "${cron_arg[@]}" --logfile - "$@"
     fi
     echo "Logs: ${LOG_FILE} (run: ./dev logs)"
-    exec "$PYTHON" "$ODOO_BIN" -c "$CONF_FILE" "${dev_arg[@]}" "$@"
+    exec "$PYTHON" "$ODOO_BIN" -c "$CONF_FILE" "${dev_arg[@]}" "${cron_arg[@]}" "$@"
     ;;
   update)
     require_file "$PYTHON"
@@ -152,6 +172,24 @@ case "$command" in
       fi
     fi
     exec "$PYTHON" "$ODOO_BIN" -c "$CONF_FILE" "${db_args[@]}" -u "$MODULE" --stop-after-init --no-http --logfile - "$@"
+    ;;
+  stop)
+    pids="$(pgrep -f "$ODOO_BIN -c $CONF_FILE" || true)"
+    if [[ -z "$pids" ]]; then
+      echo "No matching Odoo process found."
+      exit 0
+    fi
+    echo "Stopping Odoo: $pids"
+    kill $pids
+    ;;
+  status)
+    if lsof -nP -iTCP:"$HTTP_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+      echo "Odoo is listening on http://localhost:${HTTP_PORT}"
+      lsof -nP -iTCP:"$HTTP_PORT" -sTCP:LISTEN
+      exit 0
+    fi
+    echo "No process is listening on port ${HTTP_PORT}."
+    exit 1
     ;;
   logs)
     require_file "$LOG_FILE"

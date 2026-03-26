@@ -14,10 +14,13 @@ odoo_data/
 tecdoc_data/
 odoo-venv/
 odoo.log
+odoo.log.*
 odoo_startup.log
 tecdoc_fetch.log
+runtime_trace.log
 
 # Local scratch / exports
+exports/
 ART_*.xml
 INVENTORY_ROLLBACK_*.csv
 remaining_codes.txt
