@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="mail_template_order_ready" model="mail.template">
+        <field name="name">Automotive Order Ready</field>
+        <field name="model_id" ref="sale.model_sale_order"/>
+        <field name="subject">Comanda ${object.name} este gata de pregatire</field>
+        <field name="email_from">${(object.company_id.email_formatted or user.email_formatted or '')|safe}</field>
+        <field name="email_to">${(object.partner_id.email or '')|safe}</field>
+        <field name="description">Sent when an automotive order reaches ready_prep.</field>
+        <field name="body_html" type="html"><![CDATA[
+            <div>
+                <p>Buna, ${object.partner_id.name or ''},</p>
+                <p>Comanda <strong>${object.name}</strong> este gata de pregatire.</p>
+                <p>Data estimata: <strong>${object.estimated_delivery_date or '-'}</strong></p>
+                <p>Responsabil: <strong>${object.user_id.name or ''}</strong></p>
+                <p>Va contactam pentru livrare sau ridicare.</p>
+            </div>
+        ]]></field>
+        <field name="auto_delete" eval="True"/>
+    </record>
+</odoo>

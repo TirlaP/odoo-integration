@@ -38,6 +38,7 @@ class SaleOrder(models.Model):
     ], string='Status Stoc', compute='_compute_stock_status', store=True)
 
     observations = fields.Text('Observații')
+    _READY_ACTIVITY_SUMMARY = 'Comanda gata de pregătire'
 
     def _audit_snapshot(self, field_names):
         self.ensure_one()
@@ -183,6 +184,7 @@ class SaleOrder(models.Model):
     def _update_auto_state(self):
         """Update automatic state based on stock availability"""
         for order in self:
+            previous_state = order.auto_state
             if order.state == 'cancel':
                 desired = 'cancel'
             elif order._is_fully_delivered():
@@ -219,10 +221,89 @@ class SaleOrder(models.Model):
                     else:
                         desired = 'waiting_supply'
 
-            if order.auto_state == desired:
+            if previous_state == desired:
                 continue
 
             order.with_context(skip_auto_state_update=True, skip_audit_log=True).write({'auto_state': desired})
+            order._log_auto_state_transition(previous_state, desired, origin='automatic')
+
+    def _log_auto_state_transition(self, previous_state, new_state, origin='automatic'):
+        self.ensure_one()
+        if previous_state == new_state:
+            return
+        state_labels = dict(self._fields['auto_state'].selection)
+        previous_label = state_labels.get(previous_state, previous_state)
+        new_label = state_labels.get(new_state, new_state)
+        mode_label = 'automat' if origin == 'automatic' else 'manual'
+
+        self.message_post(
+            body=f'Starea comenzii a fost actualizata {mode_label}: {previous_label} -> {new_label}.',
+            message_type='notification',
+        )
+        self.env['automotive.audit.log'].log_change(
+            action='custom',
+            record=self,
+            description=f'Order auto state changed from {previous_label} to {new_label}',
+            old_values={'auto_state': previous_state},
+            new_values={
+                'auto_state': new_state,
+                'stock_status': self.stock_status,
+                'transition_origin': origin,
+            },
+        )
+
+        if new_state == 'ready_prep':
+            self._schedule_ready_activity()
+            self._send_ready_email_notification()
+        else:
+            self._clear_ready_activity()
+
+    def _schedule_ready_activity(self):
+        self.ensure_one()
+        self._clear_ready_activity()
+        user = self.responsible_user_id or self.user_id or self.env.user
+        if not user:
+            return
+
+        self.activity_schedule(
+            act_type_xmlid='mail.mail_activity_data_todo',
+            user_id=user.id,
+            summary=self._READY_ACTIVITY_SUMMARY,
+            note='Comanda este gata de pregătire/livrare.',
+            date_deadline=fields.Date.context_today(self),
+        )
+
+    def _clear_ready_activity(self):
+        self.ensure_one()
+        todo_activity = self.env.ref('mail.mail_activity_data_todo', raise_if_not_found=False)
+        if not todo_activity:
+            return
+        ready_activities = self.activity_ids.filtered(
+            lambda activity: activity.activity_type_id == todo_activity
+            and activity.summary == self._READY_ACTIVITY_SUMMARY
+        )
+        ready_activities.unlink()
+
+    def _send_ready_email_notification(self):
+        self.ensure_one()
+        company = self.company_id or self.env.company
+        if not company.automotive_ready_email_enabled:
+            return
+        if not self.partner_id.email:
+            return
+
+        template = (
+            company.automotive_ready_email_template_id
+            or self.env.ref('automotive_parts.mail_template_order_ready', raise_if_not_found=False)
+        )
+        if not template:
+            return
+
+        self.with_context(force_send=True).message_post_with_source(
+            template,
+            email_layout_xmlid='mail.mail_notification_layout_with_responsible_signature',
+            subtype_xmlid='mail.mt_comment',
+        )
 
     def _is_fully_delivered(self):
         self.ensure_one()
@@ -302,25 +383,17 @@ class SaleOrder(models.Model):
     def action_mark_delivered(self):
         """Mark order as delivered"""
         self.ensure_one()
+        previous_state = self.auto_state
         self.with_context(skip_auto_state_update=True).write({'auto_state': 'delivered'})
-
-        self.message_post(
-            body=f'Order marked as delivered by {self.env.user.name}',
-            message_type='notification'
-        )
+        self._log_auto_state_transition(previous_state, 'delivered', origin='manual')
 
     def action_cancel_order(self):
         """Cancel order and release stock"""
         for order in self:
+            previous_state = order.auto_state
             order.with_context(skip_auto_state_update=True, skip_edit_restriction=True).write({'auto_state': 'cancel'})
             order.with_context(skip_edit_restriction=True).action_cancel()
-
-            # Stock is automatically released by Odoo
-
-            order.message_post(
-                body=f'Order cancelled by {self.env.user.name}',
-                message_type='notification'
-            )
+            order._log_auto_state_transition(previous_state, 'cancel', origin='manual')
 
 
 class SaleOrderLine(models.Model):

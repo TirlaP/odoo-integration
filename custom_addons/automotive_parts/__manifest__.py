@@ -46,8 +46,10 @@
     'data': [
         'security/mechanic_security.xml',
         'security/ir.model.access.csv',
+        'data/mail_templates.xml',
         'views/res_partner_views.xml',
         'views/product_views.xml',
+        'views/res_config_settings_views.xml',
         'views/sale_order_views.xml',
         'views/stock_barcode_scan_wizard_views.xml',
         'views/stock_picking_views.xml',

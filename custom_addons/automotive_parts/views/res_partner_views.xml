@@ -9,6 +9,7 @@
             <!-- Add after company_type field -->
             <field name="company_type" position="after">
                 <field name="client_type"/>
+                <field name="active"/>
             </field>
 
             <!-- Add Romanian fields in a new page -->
@@ -55,14 +56,6 @@
                 </button>
             </div>
 
-            <xpath expr="//header" position="inside">
-                <button name="action_open_mechanic_portal_wizard"
-                        type="object"
-                        string="Mechanic Portal Access"
-                        class="btn-secondary"
-                        groups="sales_team.group_sale_manager"
-                        invisible="client_type != 'mechanic'"/>
-            </xpath>
         </field>
     </record>
 
@@ -73,6 +66,7 @@
         <field name="inherit_id" ref="base.view_partner_tree"/>
         <field name="arch" type="xml">
             <field name="complete_name" position="after">
+                <field name="active" optional="show"/>
                 <field name="client_type"/>
                 <field name="cui"/>
                 <field name="current_balance"/>

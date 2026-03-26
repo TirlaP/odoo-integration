@@ -11,3 +11,4 @@ from . import tecdoc_fast_purge
 from . import anaf_efactura
 from . import invoice_ingest
 from . import audit_log
+from . import res_config_settings

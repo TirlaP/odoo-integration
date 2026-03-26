@@ -8,6 +8,7 @@
         <field name="arch" type="xml">
             <!-- Odoo 18 base view doesn't show default_code by default on product.template; inject it. -->
             <xpath expr="//page[@name='general_information']//group[@name='group_general']" position="inside">
+                <field name="active"/>
                 <field name="default_code" string="Article No"/>
                 <field name="barcode"/>
                 <field name="barcode_internal"/>
@@ -109,6 +110,7 @@
         <field name="inherit_id" ref="product.product_product_tree_view"/>
         <field name="arch" type="xml">
             <field name="lst_price" position="after">
+                <field name="active" optional="show"/>
                 <field name="default_code"/>
                 <field name="barcode"/>
                 <field name="barcode_internal"/>

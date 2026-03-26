@@ -74,15 +74,12 @@ class ResPartner(models.Model):
             partner.mechanic_portal_user_id = portal_user
             partner.mechanic_portal_access = bool(portal_user)
 
-    @api.depends('invoice_ids', 'invoice_ids.amount_total', 'invoice_ids.amount_residual')
+    @api.depends('credit', 'debit')
     def _compute_current_balance(self):
-        """Compute current balance from invoices and payments"""
+        """Compute current balance from the accounting receivable position."""
         for partner in self:
-            invoices = partner.invoice_ids.filtered(lambda inv: inv.state == 'posted')
-
-            # Total owed = sum of unpaid invoices
-            balance = sum(invoices.mapped('amount_residual'))
-            partner.current_balance = balance
+            accounting_partner = partner.commercial_partner_id.sudo().with_company(partner.company_id or self.env.company)
+            partner.current_balance = accounting_partner.credit
 
     @api.depends('create_uid', 'write_uid')
     def _compute_audit_fields(self):
