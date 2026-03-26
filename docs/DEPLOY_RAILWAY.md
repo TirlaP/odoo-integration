@@ -17,8 +17,11 @@ This project now includes a Railway-ready container setup:
 
 Set these on the Odoo service:
 
+- `DATABASE_URL` = reference the Railway Postgres service connection string
 - `ODOO_ADMIN_PASSWD` = strong random string
 - `ODOO_DB_NAME` = your DB name (usually same as Railway `PGDATABASE`)
+- `ODOO_DB_USER` = dedicated app DB user (do not use `postgres` on Odoo 18)
+- `ODOO_DB_PASSWORD` = password for `ODOO_DB_USER`
 - `ODOO_LIST_DB` = `False`
 - `ODOO_PROXY_MODE` = `True`
 - `ODOO_WORKERS` = `0` (start with this; increase later if needed)
@@ -26,10 +29,11 @@ Set these on the Odoo service:
 - `ODOO_INIT_DB` = `true` (first deploy only; auto-initializes DB if missing)
 - `ODOO_INIT_MODULES` = `base,web,automotive_parts` (first deploy only)
 
-Optional first deploy helper:
+Recommended:
 
-- `ODOO_AUTO_UPDATE_MODULES` = `true`
-- `ODOO_UPDATE_MODULES` = `automotive_parts`
+- keep `ODOO_AUTO_UPDATE_MODULES=false` on the live web service
+- run module upgrades as an explicit maintenance step, not inline on every startup
+- if you temporarily enable it for first boot, turn it off again immediately after the upgrade finishes
 
 App secrets used by the custom module:
 
@@ -42,7 +46,7 @@ App secrets used by the custom module:
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL` (example: `gpt-4o-mini`)
 
-Railway PostgreSQL variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, or `DATABASE_URL`) are read automatically by `scripts/railway_start.sh`.
+Railway PostgreSQL variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, or `DATABASE_URL`) are read automatically by `scripts/railway_start.sh`, but Odoo 18 refuses DB user `postgres`. Override with `ODOO_DB_USER` / `ODOO_DB_PASSWORD` for the application connection.
 
 Tip: start from `.env.railway.example` and copy values into Railway Variables UI.
 
@@ -54,6 +58,8 @@ Tip: start from `.env.railway.example` and copy values into Railway Variables UI
 4. If DB is missing and `ODOO_INIT_DB=true`, startup initializes it automatically.
 5. If you restore a dump instead, keep `ODOO_INIT_DB=false`.
 6. In Apps, update apps list and install/upgrade `automotive_parts` when needed.
+
+The service now declares `healthcheckPath=/web/login` in `railway.json` so Railway waits for a real HTTP 200 page before treating the deployment as healthy.
 
 After first successful boot, disable one-time init/update:
 
