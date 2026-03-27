@@ -1067,14 +1067,14 @@ class ANAFInvoiceWizard(models.TransientModel):
     invoice_id = fields.Many2one(
         'account.move',
         'Vendor Bill',
-        domain="[('move_type', 'in', ['in_invoice', 'in_refund'])]",
+        domain="[('move_type', '=', 'in_invoice'), ('company_id', '=', picking_id.company_id)]",
     )
 
     @api.onchange('invoice_number', 'partner_id')
     def _onchange_invoice_number(self):
         if not self.invoice_number:
             return
-        domain = [('move_type', 'in', ['in_invoice', 'in_refund'])]
+        domain = [('move_type', '=', 'in_invoice'), ('company_id', '=', self.picking_id.company_id.id)]
         if self.partner_id:
             domain.append(('partner_id', '=', self.partner_id.id))
         domain += ['|', ('ref', 'ilike', self.invoice_number), ('name', 'ilike', self.invoice_number)]
@@ -1088,7 +1088,7 @@ class ANAFInvoiceWizard(models.TransientModel):
 
         invoice = self.invoice_id
         if not invoice and self.invoice_number:
-            domain = [('move_type', 'in', ['in_invoice', 'in_refund'])]
+            domain = [('move_type', '=', 'in_invoice'), ('company_id', '=', self.picking_id.company_id.id)]
             if self.partner_id:
                 domain.append(('partner_id', '=', self.partner_id.id))
             domain += ['|', ('ref', 'ilike', self.invoice_number), ('name', 'ilike', self.invoice_number)]

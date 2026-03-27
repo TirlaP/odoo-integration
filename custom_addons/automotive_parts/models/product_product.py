@@ -27,8 +27,8 @@ class ProductProduct(models.Model):
     is_automotive_part = fields.Boolean('Este Piesă Auto', default=True)
 
     # Stock and availability
-    stock_available = fields.Float('Stoc Disponibil', compute='_compute_stock_available', store=True)
-    stock_reserved = fields.Float('Stoc Rezervat', compute='_compute_stock_reserved', store=True)
+    stock_available = fields.Float('Stoc Disponibil', compute='_compute_stock_available', store=False)
+    stock_reserved = fields.Float('Stoc Rezervat', compute='_compute_stock_reserved', store=False)
 
     # Supplier information
     main_supplier_id = fields.Many2one('res.partner', 'Furnizor Principal',

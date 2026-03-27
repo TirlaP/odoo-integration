@@ -136,6 +136,10 @@ class AutomotivePaymentAllocation(models.Model):
         ),
     ]
 
+    def _is_counted_as_paid(self):
+        self.ensure_one()
+        return self.active and self.payment_state == 'paid'
+
     @api.depends('payment_id.name', 'sale_order_id.name', 'sale_order_line_id.sequence')
     def _compute_name(self):
         for allocation in self:
@@ -202,6 +206,8 @@ class AutomotivePaymentAllocation(models.Model):
                     raise ValidationError('Invoice/refund currency must match the payment currency.')
                 if allocation.account_move_id.partner_id.commercial_partner_id != payment_partner:
                     raise ValidationError('The selected invoice/refund must belong to the same billing partner as the payment.')
+                if not allocation._invoice_matches_sale_order(allocation.account_move_id, allocation.sale_order_id):
+                    raise ValidationError('The selected invoice/refund must be linked to the selected order.')
 
             total_allocated = sum(
                 allocation.payment_id.automotive_allocation_ids.filtered(lambda item: item.active and item.id != allocation.id).mapped('amount')
@@ -249,6 +255,26 @@ class AutomotivePaymentAllocation(models.Model):
                     precision_rounding=allocation.sale_order_line_id.currency_id.rounding,
                 ) > 0:
                     raise ValidationError('The net allocated amount cannot exceed the selected order line total.')
+
+    def _invoice_matches_sale_order(self, invoice, sale_order):
+        self.ensure_one()
+        if not invoice or not sale_order:
+            return False
+
+        related_orders = invoice.invoice_line_ids.mapped('sale_line_ids.order_id')
+        if related_orders:
+            return sale_order in related_orders
+
+        order_invoices = sale_order.invoice_ids
+        if order_invoices and invoice in order_invoices:
+            return True
+
+        invoice_origin = (invoice.invoice_origin or '').strip()
+        if invoice_origin:
+            origins = {item.strip() for item in invoice_origin.split(',') if item.strip()}
+            return sale_order.name in origins
+
+        return False
 
     def _audit_payload(self):
         self.ensure_one()
@@ -372,7 +398,7 @@ class AccountPayment(models.Model):
             if float_compare(remaining, 0.0, precision_rounding=payment.currency_id.rounding) <= 0:
                 continue
 
-            invoices = (payment.reconciled_invoice_ids | payment.invoice_ids).filtered(
+            invoices = payment.reconciled_invoice_ids.filtered(
                 lambda move: (
                     move.move_type in {'out_invoice', 'out_receipt'} if payment.payment_type == 'inbound'
                     else move.move_type == 'out_refund'
@@ -386,11 +412,23 @@ class AccountPayment(models.Model):
                     break
                 order_amounts = {}
                 for line in invoice.invoice_line_ids:
-                    linked_orders = line.sale_line_ids.mapped('order_id')
+                    sale_lines = line.sale_line_ids.filtered(lambda sale_line: sale_line.order_id)
+                    linked_orders = sale_lines.mapped('order_id')
                     if not linked_orders:
                         continue
-                    share = abs(line.price_total) / len(linked_orders)
+                    line_amount = abs(line.price_total)
+                    total_linked_amount = sum(abs(sale_line.price_total) for sale_line in sale_lines)
+                    if float_compare(total_linked_amount, 0.0, precision_rounding=payment.currency_id.rounding) <= 0:
+                        share_per_order = line_amount / len(linked_orders)
+                        for order in linked_orders:
+                            order_amounts[order] = order_amounts.get(order, 0.0) + share_per_order
+                        continue
                     for order in linked_orders:
+                        order_sale_lines = sale_lines.filtered(lambda sale_line: sale_line.order_id == order)
+                        order_basis = sum(abs(sale_line.price_total) for sale_line in order_sale_lines)
+                        if float_compare(order_basis, 0.0, precision_rounding=payment.currency_id.rounding) <= 0:
+                            continue
+                        share = line_amount * (order_basis / total_linked_amount)
                         order_amounts[order] = order_amounts.get(order, 0.0) + share
                 if not order_amounts and invoice.invoice_origin:
                     order = SaleOrder.search([('name', '=', invoice.invoice_origin)], limit=1)
@@ -477,7 +515,7 @@ class SaleOrder(models.Model):
     def _compute_automotive_payment_summary(self):
         for order in self:
             allocations = order.automotive_payment_allocation_ids.filtered(
-                lambda allocation: allocation.active and allocation.payment_state not in {'draft', 'canceled', 'rejected'}
+                lambda allocation: allocation._is_counted_as_paid()
             )
             paid_amount = sum(allocations.mapped('signed_amount'))
             order.automotive_paid_amount = paid_amount
@@ -535,7 +573,7 @@ class SaleOrderLine(models.Model):
     def _compute_automotive_payment_amounts(self):
         for line in self:
             allocations = line.automotive_payment_allocation_ids.filtered(
-                lambda allocation: allocation.active and allocation.payment_state not in {'draft', 'canceled', 'rejected'}
+                lambda allocation: allocation._is_counted_as_paid()
             )
             paid_amount = sum(allocations.mapped('signed_amount'))
             line.automotive_paid_amount = paid_amount

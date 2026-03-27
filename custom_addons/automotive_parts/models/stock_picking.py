@@ -32,7 +32,7 @@ class StockPicking(models.Model):
 
     # NIR specific fields
     nir_number = fields.Char('Număr NIR', readonly=True, copy=False, index=True)
-    supplier_invoice_id = fields.Many2one('account.move', 'Factură Furnizor')
+    supplier_invoice_id = fields.Many2one('account.move', 'Factură Furnizor', check_company=True)
     supplier_invoice_number = fields.Char('Nr. Factură Furnizor', index=True)
     supplier_invoice_date = fields.Date('Dată Factură', index=True)
 
@@ -106,6 +106,9 @@ class StockPicking(models.Model):
 
             if supplier_invoice and supplier_invoice.move_type != 'in_invoice':
                 raise UserError('The linked supplier document must be a vendor bill.')
+
+            if supplier_invoice and supplier_invoice.company_id != picking.company_id:
+                raise UserError('The linked supplier invoice must belong to the same company as the receipt.')
 
             if supplier_invoice and not picking.partner_id:
                 raise UserError('Set the supplier on the receipt before linking the supplier invoice.')
@@ -459,9 +462,7 @@ class StockBarcodeScanWizard(models.TransientModel):
         line = self._get_or_create_move_line(move)
 
         line.quantity += self.quantity
-
-        if float_is_zero(move.product_uom_qty, precision_rounding=move.product_uom.rounding):
-            move.product_uom_qty = line.quantity
+        move.product_uom_qty = max(move.product_uom_qty, sum(move.move_line_ids.mapped('quantity')))
 
         self.env['automotive.audit.log'].log_change(
             action='custom',

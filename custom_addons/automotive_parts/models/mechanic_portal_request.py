@@ -139,6 +139,8 @@ class MechanicPortalRequest(models.Model):
         for request_record in self:
             if not request_record.sale_order_id:
                 continue
+            if not request_record.sale_order_id.mechanic_partner_id:
+                raise ValidationError(_('The related order is not assigned to a mechanic portal account.'))
             sale_mechanic = request_record.sale_order_id.mechanic_partner_id.commercial_partner_id
             if sale_mechanic and sale_mechanic != request_record.partner_id.commercial_partner_id:
                 raise ValidationError(_('The related order does not belong to this mechanic portal account.'))

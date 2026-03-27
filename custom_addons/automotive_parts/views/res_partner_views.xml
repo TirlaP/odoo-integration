@@ -23,9 +23,9 @@
                         </group>
                         <group string="Financiar">
                             <field name="current_balance" widget="monetary"/>
-                            <field name="automotive_order_total" widget="monetary"/>
-                            <field name="automotive_paid_total" widget="monetary"/>
-                            <field name="automotive_balance_due" widget="monetary"/>
+                            <field name="automotive_order_total" widget="monetary" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                            <field name="automotive_paid_total" widget="monetary" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                            <field name="automotive_balance_due" widget="monetary" groups="account.group_account_user,sales_team.group_sale_manager"/>
                         </group>
                         <group string="Portal Mecanic" invisible="client_type != 'mechanic'">
                             <field name="mechanic_portal_access" readonly="1"/>
@@ -58,7 +58,8 @@
                     <field string="Orders" name="sale_order_count" widget="statinfo"/>
                 </button>
                 <button class="oe_stat_button" type="object"
-                        name="action_view_automotive_payment_allocations" icon="fa-credit-card">
+                        name="action_view_automotive_payment_allocations" icon="fa-credit-card"
+                        groups="account.group_account_user,sales_team.group_sale_manager">
                     <field string="Plăți Auto" name="automotive_payment_count" widget="statinfo"/>
                 </button>
             </div>
@@ -77,7 +78,7 @@
                 <field name="client_type"/>
                 <field name="cui"/>
                 <field name="current_balance"/>
-                <field name="automotive_balance_due" optional="show"/>
+                <field name="automotive_balance_due" optional="show" groups="account.group_account_user,sales_team.group_sale_manager"/>
             </field>
         </field>
     </record>

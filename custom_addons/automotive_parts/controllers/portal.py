@@ -19,8 +19,10 @@ class CustomerPortal(SaleCustomerPortal):
         return [('partner_id', 'child_of', [partner.commercial_partner_id.id])]
 
     def _prepare_mechanic_invoice_domain(self, partner):
+        order_domain = self._prepare_orders_domain(partner)
+        invoice_ids = request.env['sale.order'].search(order_domain).mapped('invoice_ids').ids
         return [
-            ('partner_id', 'child_of', [partner.commercial_partner_id.id]),
+            ('id', 'in', invoice_ids or [0]),
             ('state', 'not in', ('draft', 'cancel')),
             ('move_type', 'in', ('out_invoice', 'out_refund', 'out_receipt')),
         ]
@@ -45,7 +47,7 @@ class CustomerPortal(SaleCustomerPortal):
             return super()._prepare_orders_domain(partner)
         return [
             ('mechanic_partner_id', 'child_of', [partner.commercial_partner_id.id]),
-            ('state', 'in', ['sale', 'cancel']),
+            ('state', 'in', ['sale', 'done', 'cancel']),
         ]
 
     def _prepare_portal_layout_values(self):
@@ -73,8 +75,8 @@ class CustomerPortal(SaleCustomerPortal):
         if 'mechanic_invoice_count' in counters and AccountMove.has_access('read'):
             values['mechanic_invoice_count'] = AccountMove.search_count(self._prepare_mechanic_invoice_domain(partner))
         if 'mechanic_payment_count' in counters and PaymentAllocation.has_access('read'):
-            values['mechanic_payment_count'] = len(
-                PaymentAllocation.search(self._prepare_mechanic_payment_allocation_domain(partner)).mapped('payment_id')
+            values['mechanic_payment_count'] = PaymentAllocation.search_count(
+                self._prepare_mechanic_payment_allocation_domain(partner)
             )
 
         return values
@@ -116,7 +118,7 @@ class CustomerPortal(SaleCustomerPortal):
             'mechanic_invoice_count': AccountMove.search_count(invoice_domain) if AccountMove.has_access('read') else 0,
             'mechanic_overdue_invoice_count': AccountMove.search_count(overdue_invoice_domain) if AccountMove.has_access('read') else 0,
             'mechanic_invoices': AccountMove.search(invoice_domain, order='invoice_date desc, id desc', limit=6) if AccountMove.has_access('read') else AccountMove,
-            'mechanic_payment_count': len(PaymentAllocation.search(payment_domain).mapped('payment_id')) if PaymentAllocation.has_access('read') else 0,
+            'mechanic_payment_count': PaymentAllocation.search_count(payment_domain) if PaymentAllocation.has_access('read') else 0,
             'mechanic_payment_allocations': PaymentAllocation.search(payment_domain, order='payment_date desc, id desc', limit=6) if PaymentAllocation.has_access('read') else PaymentAllocation,
             'mechanic_status_counts': {
                 'waiting_supply': SaleOrder.search_count(order_domain + [('auto_state', '=', 'waiting_supply')]),
@@ -274,7 +276,10 @@ class CustomerPortal(SaleCustomerPortal):
             'page_name': 'mechanic_request_detail',
             'mechanic_request': request_record,
             'mechanic_request_messages': request_record.message_ids.filtered(
-                lambda message: message.message_type in ('comment', 'email')
+                lambda message: (
+                    message.message_type in ('comment', 'email')
+                    and (not message.subtype_id or not message.subtype_id.internal)
+                )
             ).sorted(lambda message: message.date or fields.Datetime.now()),
         })
         return request.render('automotive_parts.portal_my_mechanic_request_detail', values)

@@ -125,5 +125,6 @@
               name="Commercial Documents"
               parent="menu_commercial_documents"
               action="action_commercial_document_archive"
-              sequence="40"/>
+              sequence="40"
+              groups="stock.group_stock_user,account.group_account_user,sales_team.group_sale_manager"/>
 </odoo>

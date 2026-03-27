@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
 from odoo import _, models
 from odoo.exceptions import UserError
@@ -20,34 +21,32 @@ class IrActionsReport(models.Model):
 
     def _get_label_print_settings(self):
         icp = self.env['ir.config_parameter'].sudo()
-        ctx = self.env.context
         return {
-            'enabled': bool(
-                ctx.get('automotive_label_direct_print')
-                or icp.get_param('automotive.label_direct_print_enabled') in {'1', 'true', 'True'}
-            ),
-            'printer_name': (
-                ctx.get('automotive_label_printer_name')
-                or icp.get_param('automotive.label_printer_name')
-                or ''
-            ).strip(),
-            'command': (
-                ctx.get('automotive_label_print_command')
-                or icp.get_param('automotive.label_print_command')
-                or ''
-            ).strip(),
-            'copies': max(int(ctx.get('automotive_label_print_copies') or 1), 1),
+            'enabled': icp.get_param('automotive.label_direct_print_enabled') in {'1', 'true', 'True'},
+            'printer_name': (icp.get_param('automotive.label_printer_name') or '').strip(),
+            'command': (icp.get_param('automotive.label_print_command') or '').strip(),
+            'copies': max(int(self.env.context.get('automotive_label_print_copies') or 1), 1),
             'job_name': (
-                ctx.get('automotive_label_print_job_name')
+                self.env.context.get('automotive_label_print_job_name')
                 or _('Automotive labels')
             ),
-            'strict': bool(ctx.get('automotive_label_direct_print_strict')),
         }
 
     def _get_label_print_command(self, settings):
         command = settings['command']
         if command:
-            return command
+            command_path = Path(command)
+            command_name = command_path.name
+            if command_name not in {'lp', 'lpr'}:
+                raise UserError(_('Only lp or lpr may be configured for server-side label printing.'))
+            if command_path.is_absolute():
+                if not command_path.exists():
+                    raise UserError(_('The configured label print command does not exist on the server.'))
+                return str(command_path)
+            resolved = shutil.which(command_name)
+            if not resolved:
+                raise UserError(_('The configured label print command is not available on the server PATH.'))
+            return resolved
         if shutil.which('lp'):
             return 'lp'
         if shutil.which('lpr'):
@@ -154,9 +153,6 @@ class IrActionsReport(models.Model):
         settings = self._get_label_print_settings()
         if not settings['enabled']:
             return super().report_action(docids, data=data, config=config)
-
-        if settings['strict'] and not settings['printer_name']:
-            raise UserError(_('Direct label printing is enabled in strict mode, but no printer name was provided.'))
 
         pdf_content = self._render_label_report_pdf(data=data)
         return self._dispatch_label_pdf_to_printer(pdf_content, settings)

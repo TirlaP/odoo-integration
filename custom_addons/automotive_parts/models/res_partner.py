@@ -35,7 +35,7 @@ class ResPartner(models.Model):
         'Sold Curent',
         compute='_compute_current_balance',
         currency_field='currency_id',
-        store=True
+        store=False,
     )
     automotive_order_total = fields.Monetary(
         'Total Comenzi Auto',
@@ -93,7 +93,7 @@ class ResPartner(models.Model):
             partner.mechanic_portal_user_id = portal_user
             partner.mechanic_portal_access = bool(portal_user)
 
-    @api.depends('credit', 'debit')
+    @api.depends('credit', 'debit', 'commercial_partner_id.credit', 'company_id')
     def _compute_current_balance(self):
         """Compute current balance from the accounting receivable position."""
         for partner in self:
@@ -108,18 +108,11 @@ class ResPartner(models.Model):
             ('state', 'in', ['sale', 'done']),
             ('auto_state', '!=', 'cancel'),
         ]
-        mechanic_scope = (
-            self.client_type == 'mechanic'
-            or self.mechanic_portal_access
-            or bool(
-                self.with_context(active_test=False).child_ids.filtered(
-                    lambda child: child.client_type == 'mechanic' or child.mechanic_portal_access
-                )
-            )
-        )
-        if mechanic_scope:
-            return base_domain + [('mechanic_partner_id', 'child_of', [commercial_partner.id])]
-        return base_domain + [('partner_id', 'child_of', [commercial_partner.id])]
+        return base_domain + [
+            '|',
+            ('partner_id', 'child_of', [commercial_partner.id]),
+            ('mechanic_partner_id', 'child_of', [commercial_partner.id]),
+        ]
 
     def _get_automotive_allocation_domain(self):
         self.ensure_one()
@@ -128,7 +121,7 @@ class ResPartner(models.Model):
             ('company_id', '=', (self.company_id or self.env.company).id),
             ('partner_id', 'child_of', [commercial_partner.id]),
             ('active', '=', True),
-            ('payment_state', 'not in', ['draft', 'canceled', 'rejected']),
+            ('payment_state', '=', 'paid'),
         ]
 
     def _compute_automotive_financial_summary(self):

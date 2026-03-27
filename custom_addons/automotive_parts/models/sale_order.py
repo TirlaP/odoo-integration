@@ -278,10 +278,10 @@ class SaleOrder(models.Model):
                         all_received = all_received and received_ok
                         any_progress = any_progress or has_progress
 
-                    if all_reserved:
-                        desired = 'ready_prep'
-                    elif all_received:
+                    if all_received and previous_state not in {'ready_prep', 'delivered'}:
                         desired = 'fully_received'
+                    elif all_reserved:
+                        desired = 'ready_prep'
                     elif any_progress:
                         desired = 'partial_received'
                     else:
@@ -462,6 +462,11 @@ class SaleOrder(models.Model):
     def action_mark_delivered(self):
         """Mark order as delivered"""
         self.ensure_one()
+        outgoing_pickings = self.picking_ids.filtered(
+            lambda picking: picking.picking_type_code == 'outgoing' and picking.state == 'done'
+        )
+        if not outgoing_pickings or not self._is_fully_delivered():
+            raise UserError('Order can only be marked as delivered after the related outgoing transfer is completed.')
         previous_state = self.auto_state
         self.with_context(skip_auto_state_update=True).write({'auto_state': 'delivered'})
         self._log_auto_state_transition(previous_state, 'delivered', origin='manual')
@@ -547,16 +552,9 @@ class SaleOrderLine(models.Model):
                 and not m.scrapped
                 and m.location_dest_id.usage == 'customer'
             )
-            ancestor_moves = line._collect_origin_moves(delivery_moves)
-            incoming_done_moves = ancestor_moves.filtered(
-                lambda m: m.state == 'done'
-                and not m.scrapped
-                and m.location_dest_id.usage == 'internal'
-            )
-
             qty = 0.0
-            for move in incoming_done_moves:
-                qty += move.product_uom._compute_quantity(move.quantity, line.product_uom, rounding_method='HALF-UP')
+            for move in delivery_moves:
+                qty += line._get_received_supply_qty_for_delivery_move(move)
             line.qty_received = qty
 
     @api.depends('qty_received', 'qty_reserved', 'product_uom_qty', 'product_uom')
@@ -609,3 +607,32 @@ class SaleOrderLine(models.Model):
             all_origins |= new_moves
             to_visit = new_moves.mapped('move_orig_ids')
         return all_origins
+
+    def _get_received_supply_qty_for_delivery_move(self, delivery_move):
+        self.ensure_one()
+        incoming_qty = 0.0
+        visited = self.env['stock.move']
+        to_visit = delivery_move.move_orig_ids
+        while to_visit:
+            move = to_visit[:1]
+            to_visit -= move
+            if move in visited:
+                continue
+            visited |= move
+            if move.scrapped or move.state == 'cancel':
+                continue
+            if move.state == 'done' and move.location_dest_id.usage == 'internal':
+                incoming_qty += move.product_uom._compute_quantity(
+                    move.quantity,
+                    self.product_uom,
+                    rounding_method='HALF-UP',
+                )
+                continue
+            to_visit |= move.move_orig_ids
+
+        delivery_qty = delivery_move.product_uom._compute_quantity(
+            delivery_move.product_uom_qty,
+            self.product_uom,
+            rounding_method='HALF-UP',
+        )
+        return min(incoming_qty, delivery_qty)

@@ -109,7 +109,15 @@ class CommercialDocumentArchive(models.Model):
             ):
                 raise UserError('The archived attachment must belong to the same company as the archive entry.')
 
-    @api.depends('sale_order_id', 'picking_id', 'account_move_id')
+    @api.depends(
+        'sale_order_id',
+        'sale_order_id.name',
+        'picking_id',
+        'picking_id.name',
+        'account_move_id',
+        'account_move_id.name',
+        'account_move_id.ref',
+    )
     def _compute_source_reference(self):
         for record in self:
             record.source_reference = (
