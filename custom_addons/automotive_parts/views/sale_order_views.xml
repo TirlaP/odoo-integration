@@ -8,8 +8,11 @@
         <field name="arch" type="xml">
             <!-- Add automotive fields after partner_id -->
             <field name="partner_id" position="after">
+                <field name="mechanic_partner_id"
+                       options="{'no_open': False}"
+                       context="{'default_client_type': 'mechanic'}"/>
                 <field name="order_type"/>
-                <field name="auto_state" widget="statusbar" statusbar_visible="draft,waiting_supply,fully_received,ready_prep,delivered"/>
+                <field name="auto_state" widget="statusbar" statusbar_visible="draft,waiting_supply,partial_received,fully_received,ready_prep,delivered,cancel"/>
             </field>
 
             <field name="payment_term_id" position="after">
@@ -64,6 +67,7 @@
         <field name="inherit_id" ref="sale.view_quotation_tree"/>
         <field name="arch" type="xml">
             <field name="amount_total" position="after">
+                <field name="mechanic_partner_id"/>
                 <field name="order_type"/>
                 <field name="auto_state" widget="badge"/>
                 <field name="stock_status" widget="badge"

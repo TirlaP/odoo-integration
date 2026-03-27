@@ -62,6 +62,8 @@
                         <button name="action_view_compatible_vehicles" string="Compatible Vehicles"
                                 type="object" class="btn-secondary"
                                 invisible="not tecdoc_article_no"/>
+                        <button name="action_generate_label" string="Genereaza eticheta"
+                                type="object" class="btn-secondary"/>
                     </group>
                 </page>
 

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="ir_cron_anaf_efactura_fetch" model="ir.cron">
+        <field name="name">ANAF e-Factura Fetch</field>
+        <field name="model_id" ref="model_anaf_efactura"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_fetch_invoices()</field>
+        <field name="interval_number">30</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">True</field>
+    </record>
+</odoo>

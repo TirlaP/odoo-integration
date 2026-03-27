@@ -1,21 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <record id="mail_template_order_ready" model="mail.template">
-        <field name="name">Automotive Order Ready</field>
-        <field name="model_id" ref="sale.model_sale_order"/>
-        <field name="subject">Comanda ${object.name} este gata de pregatire</field>
-        <field name="email_from">${(object.company_id.email_formatted or user.email_formatted or '')|safe}</field>
-        <field name="email_to">${(object.partner_id.email or '')|safe}</field>
-        <field name="description">Sent when an automotive order reaches ready_prep.</field>
-        <field name="body_html" type="html"><![CDATA[
-            <div>
-                <p>Buna, ${object.partner_id.name or ''},</p>
-                <p>Comanda <strong>${object.name}</strong> este gata de pregatire.</p>
-                <p>Data estimata: <strong>${object.estimated_delivery_date or '-'}</strong></p>
-                <p>Responsabil: <strong>${object.user_id.name or ''}</strong></p>
-                <p>Va contactam pentru livrare sau ridicare.</p>
-            </div>
-        ]]></field>
-        <field name="auto_delete" eval="True"/>
-    </record>
+    <data noupdate="1">
+        <record id="mail_template_order_ready" model="mail.template">
+            <field name="name">Automotive Order Ready</field>
+            <field name="model_id" ref="sale.model_sale_order"/>
+            <field name="subject">Comanda {{ object.name or '' }} este gata de pregatire</field>
+            <field name="email_from">{{ object.company_id.email_formatted or user.email_formatted or '' }}</field>
+            <field name="email_to">{{ ctx.get('automotive_ready_email_to') or object._get_ready_notification_email() or '' }}</field>
+            <field name="description">Sent when an automotive order reaches ready_prep.</field>
+            <field name="auto_delete" eval="True"/>
+            <field name="body_html" type="html">
+<div style="margin: 0px; padding: 0px;">
+    <p style="margin: 0px; padding: 0px; font-size: 13px;">
+        Buna, <t t-out="ctx.get('automotive_ready_recipient_name') or object._get_ready_notification_name() or ''"></t>,<br/><br/>
+        Comanda <strong t-out="object.name or ''"></strong> este gata de pregatire.<br/><br/>
+        Data estimata:
+        <strong t-out="object.estimated_delivery_date or '-'"></strong><br/>
+        Responsabil:
+        <strong t-out="object.user_id.name or ''"></strong><br/><br/>
+        Va contactam pentru livrare sau ridicare.
+    </p>
+</div>
+            </field>
+        </record>
+    </data>
 </odoo>

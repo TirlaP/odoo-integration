@@ -2,6 +2,8 @@
 from . import res_partner
 from . import product_product
 from . import sale_order
+from . import stock_move
+from . import stock_move_line
 from . import stock_picking
 from . import tecdoc_api
 from . import tecdoc_cache
@@ -10,5 +12,7 @@ from . import tecdoc_fast_import
 from . import tecdoc_fast_purge
 from . import anaf_efactura
 from . import invoice_ingest
+from . import mechanic_portal_request
 from . import audit_log
 from . import res_config_settings
+from . import label_report

@@ -427,21 +427,60 @@ class ProductProduct(models.Model):
         }
 
     def action_generate_label(self):
-        """Generate product label for printing"""
+        """Generate a printable product label PDF."""
         self.ensure_one()
+        labels = [self._prepare_label_payload()]
+        return self._action_print_labels_report(labels)
 
-        # This is a placeholder - integrate with your label printer
-        # For now, just return product info
+    @api.model
+    def _prepare_label_payload_from_values(
+        self,
+        *,
+        name=None,
+        barcode=None,
+        product_code=None,
+        internal_code=None,
+        price=None,
+        brand=None,
+        qty=1,
+    ):
+        barcode_value = barcode or product_code or internal_code or ''
         return {
-            'type': 'ir.actions.client',
-            'tag': 'display_notification',
-            'params': {
-                'title': 'Label Ready',
-                'message': f'Label for {self.name} (Barcode: {self.barcode or "N/A"})',
-                'type': 'success',
-                'sticky': False,
-            }
+            'denumire': name or '',
+            'barcode': barcode_value,
+            'product_code': product_code or '',
+            'internal_code': internal_code or '',
+            'price': price or 0.0,
+            'brand': brand or '',
+            'qty': max(int(qty or 1), 1),
         }
+
+    def _prepare_label_payload(self, **overrides):
+        self.ensure_one()
+        price = overrides.get('price')
+        if price is None:
+            price = self.lst_price or self.product_tmpl_id.list_price or 0.0
+
+        return self._prepare_label_payload_from_values(
+            name=overrides.get('name') or self.display_name,
+            barcode=overrides.get('barcode') or self.barcode or self.barcode_internal,
+            product_code=overrides.get('product_code') or self.supplier_code or self.default_code or self.tecdoc_article_no,
+            internal_code=overrides.get('internal_code') or self.default_code,
+            price=price,
+            brand=overrides.get('brand') or self.tecdoc_supplier_name or self.main_supplier_id.name,
+            qty=overrides.get('qty') or 1,
+        )
+
+    @api.model
+    def _action_print_labels_report(self, labels):
+        clean_labels = [label for label in (labels or []) if label and label.get('barcode')]
+        if not clean_labels:
+            raise UserError(_('No valid barcode data found for the selected label(s).'))
+        return self.env.ref('automotive_parts.action_report_automotive_label').report_action(
+            None,
+            data={'labels': clean_labels},
+            config=False,
+        )
 
 
 class ProductTemplate(models.Model):

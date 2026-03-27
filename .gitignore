@@ -31,6 +31,7 @@ summary.json
 
 # Editor / local tooling
 .claude/
+agents-plans/
 
 # Nested framework repo metadata will be tracked as a submodule instead
 odoo/.git

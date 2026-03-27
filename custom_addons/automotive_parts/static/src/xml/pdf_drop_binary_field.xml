@@ -16,7 +16,9 @@
                     onUploaded.bind="onUploaded"
                     checkSize="true"
                 >
-                    <button type="button" class="btn btn-secondary mt-2">Choose PDF</button>
+                    <t t-set-slot="toggler">
+                        <button type="button" class="btn btn-secondary mt-2">Choose PDF</button>
+                    </t>
                 </FileUploader>
             </div>
             <div t-if="fileName" class="o_pdf_drop_binary_meta mt-2">

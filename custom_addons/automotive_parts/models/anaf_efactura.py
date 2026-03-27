@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -22,6 +23,29 @@ class ANAFEFactura(models.Model):
     """ANAF e-Factura Integration"""
     _name = 'anaf.efactura'
     _description = 'ANAF e-Factura Integration'
+    _AUDIT_FIELDS = {
+        'name',
+        'active',
+        'environment',
+        'use_oauth',
+        'api_url',
+        'api_token',
+        'oauth_authorize_url',
+        'oauth_token_url',
+        'oauth_client_id',
+        'oauth_client_secret',
+        'oauth_redirect_uri',
+        'oauth_token_content_type',
+        'oauth_authorization_code',
+        'oauth_state',
+        'access_token',
+        'refresh_token',
+        'token_expires_at',
+        'refresh_expires_at',
+        'fetch_days',
+        'fetch_filter',
+        'cui_company',
+    }
 
     _ANAF_AUTHORIZE_URL = 'https://logincert.anaf.ro/anaf-oauth2/v1/authorize'
     _ANAF_TOKEN_URL = 'https://logincert.anaf.ro/anaf-oauth2/v1/token'
@@ -99,6 +123,65 @@ class ANAFEFactura(models.Model):
         default=lambda self: self._normalize_cui(self._env('ANAF_EFACTURA_CUI')),
     )
 
+    def _audit_snapshot(self, field_names=None):
+        self.ensure_one()
+        tracked_fields = field_names or self._AUDIT_FIELDS
+        snapshot = {}
+        for field_name in tracked_fields:
+            if field_name not in self._fields:
+                continue
+            value = self[field_name]
+            if isinstance(value, models.BaseModel):
+                snapshot[field_name] = value.ids
+            else:
+                snapshot[field_name] = value
+        return snapshot
+
+    def _audit_log(self, action, description, old_values=None, new_values=None):
+        self.ensure_one()
+        if self.env.context.get('skip_audit_log') is True:
+            return False
+        return self.env['automotive.audit.log'].log_change(
+            action=action,
+            record=self,
+            description=description,
+            old_values=old_values,
+            new_values=new_values,
+        )
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        records = super().create(vals_list)
+        if self.env.context.get('skip_audit_log') is True:
+            return records
+
+        for record, vals in zip(records, vals_list):
+            tracked_fields = [field_name for field_name in vals.keys() if field_name in record._AUDIT_FIELDS]
+            record._audit_log(
+                action='create',
+                description=f'ANAF e-Factura configuration created: {record.display_name}',
+                new_values=record._audit_snapshot(tracked_fields),
+            )
+        return records
+
+    def write(self, vals):
+        tracked_fields = [field_name for field_name in vals.keys() if field_name in self._AUDIT_FIELDS]
+        old_by_id = {}
+        if tracked_fields and self.env.context.get('skip_audit_log') is not True:
+            old_by_id = {record.id: record._audit_snapshot(tracked_fields) for record in self}
+
+        result = super().write(vals)
+
+        if tracked_fields and self.env.context.get('skip_audit_log') is not True:
+            for record in self:
+                record._audit_log(
+                    action='write',
+                    description=f'ANAF e-Factura configuration updated: {record.display_name}',
+                    old_values=old_by_id.get(record.id),
+                    new_values=record._audit_snapshot(tracked_fields),
+                )
+        return result
+
     @api.model
     def _env(self, key, default=None):
         return os.getenv(key, default)
@@ -146,6 +229,17 @@ class ANAFEFactura(models.Model):
             if vals:
                 rec.write(vals)
                 rec._onchange_environment()
+                rec._audit_log(
+                    action='custom',
+                    description=f'ANAF configuration loaded from environment: {rec.display_name}',
+                    new_values={
+                        'loaded_fields': sorted(vals.keys()),
+                        'environment': rec.environment,
+                        'use_oauth': rec.use_oauth,
+                        'fetch_days': rec.fetch_days,
+                        'fetch_filter': rec.fetch_filter,
+                    },
+                )
 
         return {
             'type': 'ir.actions.client',
@@ -206,6 +300,15 @@ class ANAFEFactura(models.Model):
 
         state = str(uuid.uuid4())
         self.write({'oauth_state': state})
+        self._audit_log(
+            action='custom',
+            description=f'ANAF OAuth authorize URL opened: {self.display_name}',
+            new_values={
+                'oauth_state': state,
+                'oauth_authorize_url': self.oauth_authorize_url or self._ANAF_AUTHORIZE_URL,
+                'oauth_redirect_uri': self.oauth_redirect_uri,
+            },
+        )
         query = urlencode({
             'response_type': 'code',
             'client_id': self.oauth_client_id,
@@ -216,7 +319,7 @@ class ANAFEFactura(models.Model):
         url = f"{(self.oauth_authorize_url or self._ANAF_AUTHORIZE_URL).rstrip('?')}?{query}"
         return {'type': 'ir.actions.act_url', 'url': url, 'target': 'new'}
 
-    def _store_oauth_tokens(self, payload):
+    def _store_oauth_tokens(self, payload, audit_reason=None):
         self.ensure_one()
         expires_in = int(payload.get('expires_in') or 90 * 24 * 3600)
         refresh_expires_in = int(payload.get('refresh_expires_in') or 365 * 24 * 3600)
@@ -230,6 +333,17 @@ class ANAFEFactura(models.Model):
             'oauth_authorization_code': False,
         }
         self.write(vals)
+        if audit_reason:
+            self._audit_log(
+                action='custom',
+                description=f'{audit_reason}: {self.display_name}',
+                new_values={
+                    'has_access_token': bool(self.access_token),
+                    'has_refresh_token': bool(self.refresh_token),
+                    'token_expires_at': self.token_expires_at,
+                    'refresh_expires_at': self.refresh_expires_at,
+                },
+            )
 
     def action_exchange_authorization_code(self):
         for rec in self:
@@ -274,7 +388,7 @@ class ANAFEFactura(models.Model):
         data = response.json()
         if not data.get('access_token'):
             raise UserError(f'ANAF OAuth response has no access_token: {response.text}')
-        self._store_oauth_tokens(data)
+        self._store_oauth_tokens(data, audit_reason='ANAF OAuth authorization code exchanged')
 
     def action_refresh_access_token(self):
         for rec in self:
@@ -315,7 +429,7 @@ class ANAFEFactura(models.Model):
             return False
         data = response.json()
         if data.get('access_token'):
-            self._store_oauth_tokens(data)
+            self._store_oauth_tokens(data, audit_reason='ANAF OAuth access token refreshed')
             return True
         return False
 
@@ -384,8 +498,14 @@ class ANAFEFactura(models.Model):
             _logger.warning("Failed to parse UBL XML: %s", exc)
             return {}
 
+        xml_document_type = root.tag.rsplit('}', 1)[-1]
+        document_type = 'credit_note' if xml_document_type == 'CreditNote' else 'invoice' if xml_document_type == 'Invoice' else xml_document_type.lower()
         invoice_number = self._find_direct_text(root, 'ID')
         issue_date = self._find_direct_text(root, 'IssueDate')
+        supplier_name = (
+            self._find_nested_text(root, ['AccountingSupplierParty', 'Party', 'PartyName', 'Name'])
+            or self._find_nested_text(root, ['AccountingSupplierParty', 'Party', 'PartyLegalEntity', 'RegistrationName'])
+        )
         supplier_cui = (
             self._find_nested_text(root, ['AccountingSupplierParty', 'Party', 'PartyTaxScheme', 'CompanyID'])
             or self._find_nested_text(root, ['AccountingSupplierParty', 'Party', 'PartyLegalEntity', 'CompanyID'])
@@ -399,22 +519,36 @@ class ANAFEFactura(models.Model):
 
         lines = []
         for line_node in root.iter():
-            if line_node.tag.rsplit('}', 1)[-1] != 'InvoiceLine':
+            local_name = line_node.tag.rsplit('}', 1)[-1]
+            if local_name not in {'InvoiceLine', 'CreditNoteLine'}:
                 continue
             description = self._find_nested_text(line_node, ['Item', 'Name']) or 'ANAF invoice line'
+            seller_item_id = self._find_nested_text(line_node, ['Item', 'SellersItemIdentification', 'ID'])
+            standard_item_id = self._find_nested_text(line_node, ['Item', 'StandardItemIdentification', 'ID'])
             quantity = self._to_float(self._find_nested_text(line_node, ['InvoicedQuantity']) or 0.0)
+            if not quantity:
+                quantity = self._to_float(self._find_nested_text(line_node, ['CreditedQuantity']) or 0.0)
             price_unit = self._to_float(self._find_nested_text(line_node, ['Price', 'PriceAmount']) or 0.0)
             line_total = self._to_float(self._find_nested_text(line_node, ['LineExtensionAmount']) or 0.0)
+            vat_rate = self._to_float(
+                self._find_nested_text(line_node, ['Item', 'ClassifiedTaxCategory', 'Percent']) or 0.0
+            )
             lines.append({
                 'description': description,
                 'quantity': quantity or 1.0,
                 'price_unit': price_unit,
                 'line_total': line_total,
+                'product_code_raw': seller_item_id or standard_item_id or description,
+                'product_code': seller_item_id or standard_item_id or False,
+                'vat_rate': vat_rate,
             })
 
         parsed = {
+            'document_type': document_type,
+            'xml_document_type': xml_document_type,
             'invoice_number': invoice_number or False,
             'invoice_date': issue_date or False,
+            'supplier_name': supplier_name or False,
             'supplier_cui': supplier_cui,
             'customer_cui': customer_cui,
             'total_amount': self._to_float(total_node),
@@ -465,6 +599,26 @@ class ANAFEFactura(models.Model):
             or payload_blob.get('document_xml')
         )
         parsed_xml = self._parse_ubl_xml(xml_payload) if xml_payload else {}
+        document_type = (
+            parsed_xml.get('document_type')
+            or invoice_data.get('document_type')
+            or payload_blob.get('document_type')
+            or invoice_data.get('invoice_type')
+            or payload_blob.get('invoice_type')
+            or invoice_data.get('invoiceTypeCode')
+            or payload_blob.get('invoiceTypeCode')
+            or ''
+        )
+        if isinstance(document_type, str):
+            document_type = document_type.strip().lower()
+            if document_type in {'creditnote', 'credit_note', 'credit note', 'refund', 'supplier_credit_note', 'supplier_refund'}:
+                document_type = 'credit_note'
+            elif document_type in {'invoice', 'bill', 'supplier_invoice'}:
+                document_type = 'invoice'
+            else:
+                document_type = document_type or False
+        else:
+            document_type = False
 
         supplier_cui = (
             parsed_xml.get('supplier_cui')
@@ -517,6 +671,9 @@ class ANAFEFactura(models.Model):
 
         return {
             'external_id': str(external_id) if external_id else False,
+            'document_type': document_type or parsed_xml.get('document_type') or 'invoice',
+            'xml_document_type': parsed_xml.get('xml_document_type') or False,
+            'supplier_name': parsed_xml.get('supplier_name') or False,
             'supplier_cui': self._normalize_cui(supplier_cui),
             'invoice_number': (invoice_number or '').strip() or False,
             'invoice_date': self._to_date(invoice_date),
@@ -613,6 +770,8 @@ class ANAFEFactura(models.Model):
             days = int(days_back or rec.fetch_days or 7)
             days = min(max(days, 1), 60)
             filter_code = (message_filter or rec.fetch_filter or 'P').strip().upper()
+            download_failures = 0
+            processing_failures = 0
             params = {
                 'zile': days,
                 'cif': rec._normalize_cui(rec.cui_company),
@@ -633,6 +792,15 @@ class ANAFEFactura(models.Model):
                     'last_sync_message': str(exc),
                     'last_fetch_count': 0,
                 })
+                rec._audit_log(
+                    action='custom',
+                    description=f'ANAF invoice fetch failed: {rec.display_name}',
+                    new_values={
+                        'days_back': days,
+                        'filter_code': filter_code,
+                        'error': str(exc),
+                    },
+                )
                 _logger.error("ANAF list fetch failed: %s", exc)
                 raise UserError(f'ANAF API list fetch failed: {exc}')
 
@@ -652,8 +820,9 @@ class ANAFEFactura(models.Model):
                     if not xml_payloads:
                         continue
                     for xml_payload in xml_payloads:
+                        payload_external_id = f"{message_id}:{hashlib.sha1(xml_payload.encode('utf-8')).hexdigest()}"
                         invoice_data = {
-                            'id': message_id,
+                            'id': payload_external_id,
                             'xml': xml_payload,
                             'payload': msg,
                         }
@@ -664,9 +833,11 @@ class ANAFEFactura(models.Model):
                             created_jobs += 1
                 except requests.exceptions.RequestException as exc:
                     _logger.warning("ANAF message download failed for id=%s: %s", message_id, exc)
+                    download_failures += 1
                     continue
                 except Exception as exc:  # noqa: BLE001 - keep sync resilient to malformed payloads.
                     _logger.warning("ANAF message processing failed for id=%s: %s", message_id, exc)
+                    processing_failures += 1
                     continue
 
             rec.write({
@@ -674,6 +845,19 @@ class ANAFEFactura(models.Model):
                 'last_sync_message': f'Fetched {len(messages)} messages, created {created_jobs} jobs.',
                 'last_fetch_count': created_jobs,
             })
+            rec._audit_log(
+                action='custom',
+                description=f'ANAF invoice fetch completed: {rec.display_name}',
+                new_values={
+                    'days_back': days,
+                    'filter_code': filter_code,
+                    'message_count': len(messages),
+                    'created_jobs': created_jobs,
+                    'download_failures': download_failures,
+                    'processing_failures': processing_failures,
+                    'last_sync_at': rec.last_sync_at,
+                },
+            )
             _logger.info(
                 "ANAF fetch complete for config %s: messages=%s created_jobs=%s",
                 rec.id,
@@ -698,19 +882,6 @@ class ANAFEFactura(models.Model):
         if parsed.get('currency_code'):
             currency = self.env['res.currency'].search([('name', '=', parsed['currency_code'])], limit=1) or currency
 
-        payload = {
-            'parsed': {
-                'external_id': parsed.get('external_id'),
-                'supplier_cui': parsed.get('supplier_cui'),
-                'invoice_number': parsed.get('invoice_number'),
-                'invoice_date': parsed.get('invoice_date').isoformat() if parsed.get('invoice_date') else False,
-                'total_amount': parsed.get('total_amount'),
-                'currency_code': parsed.get('currency_code'),
-                'lines': parsed.get('lines') or [],
-            },
-            'raw': parsed.get('raw_payload'),
-        }
-
         job, created = self.env['invoice.ingest.job'].upsert_invoice_job(
             source='anaf',
             external_id=parsed.get('external_id'),
@@ -719,18 +890,96 @@ class ANAFEFactura(models.Model):
             invoice_date=parsed.get('invoice_date'),
             amount_total=parsed.get('total_amount'),
             currency_id=currency.id if currency else False,
-            payload=payload,
+            document_type=parsed.get('document_type'),
         )
 
         if not supplier:
+            supplier = job._get_or_create_supplier_partner(
+                supplier_name=parsed.get('supplier_name'),
+                supplier_vat=parsed.get('supplier_cui'),
+            )
+        job.write({
+            'partner_id': supplier.id if supplier else False,
+            'document_type': parsed.get('document_type') or 'invoice',
+        })
+
+        normalized_lines = [
+            normalized_line
+            for normalized_line in (
+                job._normalize_payload_line(
+                    line,
+                    supplier=supplier if supplier and supplier.exists() else None,
+                    default_vat_rate=0.0,
+                )
+                for line in parsed.get('lines') or []
+                if isinstance(line, dict)
+            )
+            if normalized_line
+        ]
+
+        payload = {
+            'source': 'anaf',
+            'raw': parsed.get('raw_payload'),
+            'parsed': {
+                'external_id': parsed.get('external_id'),
+                'document_type': parsed.get('document_type'),
+                'xml_document_type': parsed.get('xml_document_type'),
+                'supplier_name': parsed.get('supplier_name'),
+                'supplier_cui': parsed.get('supplier_cui'),
+                'invoice_number': parsed.get('invoice_number'),
+                'invoice_date': parsed.get('invoice_date').isoformat() if parsed.get('invoice_date') else False,
+                'total_amount': parsed.get('total_amount'),
+                'currency_code': parsed.get('currency_code'),
+                'lines': parsed.get('lines') or [],
+            },
+            'openai': {
+                'model': 'ANAF/XML',
+                'raw': {
+                    'source': 'anaf',
+                    'document_type': parsed.get('document_type'),
+                    'xml_document_type': parsed.get('xml_document_type'),
+                    'external_id': parsed.get('external_id'),
+                    'invoice_number': parsed.get('invoice_number'),
+                    'invoice_date': parsed.get('invoice_date').isoformat() if parsed.get('invoice_date') else False,
+                    'invoice_currency': currency.name if currency else self.env.company.currency_id.name,
+                    'invoice_lines': parsed.get('lines') or [],
+                },
+                'normalized': {
+                    'supplier_name': parsed.get('supplier_name') or (supplier.display_name if supplier and supplier.exists() else ''),
+                    'supplier_code': False,
+                    'supplier_vat': parsed.get('supplier_cui'),
+                    'invoice_number': parsed.get('invoice_number'),
+                    'invoice_date': parsed.get('invoice_date').isoformat() if parsed.get('invoice_date') else False,
+                    'invoice_due_date': False,
+                    'invoice_currency': parsed.get('currency_code') or (currency.name if currency else self.env.company.currency_id.name),
+                    'vat_rate': 0.0,
+                    'amount_total': parsed.get('total_amount'),
+                    'confidence': 100.0,
+                    'warnings': [],
+                    'document_type': parsed.get('document_type'),
+                    'invoice_type': parsed.get('document_type'),
+                    'invoice_lines': normalized_lines,
+                },
+            },
+        }
+        job._set_payload_dict(payload)
+        job._replace_lines_from_normalized(normalized_lines)
+
+        warning = False
+        if not supplier:
             warning = f'Unknown supplier CUI: {parsed.get("supplier_cui") or "missing"}'
-            job.write({'state': 'needs_review', 'error': warning})
             _logger.warning(warning)
-            return job, created
 
         if not parsed.get('invoice_number'):
             job.write({'state': 'needs_review', 'error': 'Missing invoice number in ANAF payload.'})
             return job, created
+
+        job.write({
+            'partner_id': supplier.id if supplier else False,
+            'document_type': parsed.get('document_type') or 'invoice',
+            'state': 'needs_review',
+            'error': warning,
+        })
 
         if not job.account_move_id:
             job.action_create_draft_vendor_bill()
@@ -758,14 +1007,14 @@ class ANAFInvoiceWizard(models.TransientModel):
     invoice_id = fields.Many2one(
         'account.move',
         'Vendor Bill',
-        domain="[('move_type', '=', 'in_invoice')]",
+        domain="[('move_type', 'in', ['in_invoice', 'in_refund'])]",
     )
 
     @api.onchange('invoice_number', 'partner_id')
     def _onchange_invoice_number(self):
         if not self.invoice_number:
             return
-        domain = [('move_type', '=', 'in_invoice')]
+        domain = [('move_type', 'in', ['in_invoice', 'in_refund'])]
         if self.partner_id:
             domain.append(('partner_id', '=', self.partner_id.id))
         domain += ['|', ('ref', 'ilike', self.invoice_number), ('name', 'ilike', self.invoice_number)]
@@ -779,7 +1028,7 @@ class ANAFInvoiceWizard(models.TransientModel):
 
         invoice = self.invoice_id
         if not invoice and self.invoice_number:
-            domain = [('move_type', '=', 'in_invoice')]
+            domain = [('move_type', 'in', ['in_invoice', 'in_refund'])]
             if self.partner_id:
                 domain.append(('partner_id', '=', self.partner_id.id))
             domain += ['|', ('ref', 'ilike', self.invoice_number), ('name', 'ilike', self.invoice_number)]

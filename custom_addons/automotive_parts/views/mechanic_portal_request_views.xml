@@ -1,0 +1,372 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_mechanic_portal_request_tree" model="ir.ui.view">
+        <field name="name">mechanic.portal.request.tree</field>
+        <field name="model">mechanic.portal.request</field>
+        <field name="arch" type="xml">
+            <list string="Mechanic Portal Requests">
+                <field name="name"/>
+                <field name="partner_id"/>
+                <field name="sale_order_id"/>
+                <field name="request_type"/>
+                <field name="state"/>
+                <field name="request_user_id"/>
+                <field name="create_date"/>
+                <field name="resolved_on"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_mechanic_portal_request_form" model="ir.ui.view">
+        <field name="name">mechanic.portal.request.form</field>
+        <field name="model">mechanic.portal.request</field>
+        <field name="arch" type="xml">
+            <form string="Mechanic Portal Request">
+                <header>
+                    <button name="action_mark_in_progress" type="object" string="Start" class="btn-primary" invisible="state not in ('new', 'waiting_customer')"/>
+                    <button name="action_mark_waiting_customer" type="object" string="Waiting Customer" invisible="state not in ('new', 'in_progress')"/>
+                    <button name="action_mark_done" type="object" string="Resolve" class="btn-primary" invisible="state in ('done', 'cancelled')"/>
+                    <button name="action_mark_cancelled" type="object" string="Cancel" invisible="state in ('done', 'cancelled')"/>
+                    <field name="state" widget="statusbar" statusbar_visible="new,in_progress,waiting_customer,done,cancelled"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="name"/>
+                            <field name="partner_id"/>
+                            <field name="request_user_id"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                        </group>
+                        <group>
+                            <field name="request_type"/>
+                            <field name="sale_order_id"/>
+                            <field name="create_date" readonly="1"/>
+                            <field name="resolved_on" readonly="1"/>
+                        </group>
+                    </group>
+                    <group>
+                        <field name="description" nolabel="1" placeholder="Describe the mechanic request..."/>
+                    </group>
+                </sheet>
+                <chatter/>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_mechanic_portal_request_search" model="ir.ui.view">
+        <field name="name">mechanic.portal.request.search</field>
+        <field name="model">mechanic.portal.request</field>
+        <field name="arch" type="xml">
+            <search string="Mechanic Portal Requests">
+                <field name="name"/>
+                <field name="partner_id"/>
+                <field name="sale_order_id"/>
+                <field name="request_type"/>
+                <field name="state"/>
+                <filter string="Open" name="open" domain="[('state', 'not in', ['done', 'cancelled'])]"/>
+                <filter string="Resolved" name="resolved" domain="[('state', '=', 'done')]"/>
+                <group expand="0" string="Group By">
+                    <filter string="Mechanic" name="group_partner" context="{'group_by': 'partner_id'}"/>
+                    <filter string="State" name="group_state" context="{'group_by': 'state'}"/>
+                    <filter string="Type" name="group_type" context="{'group_by': 'request_type'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_mechanic_portal_requests" model="ir.actions.act_window">
+        <field name="name">Mechanic Requests</field>
+        <field name="res_model">mechanic.portal.request</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="view_mechanic_portal_request_search"/>
+    </record>
+
+    <menuitem id="menu_mechanic_portal_requests"
+              name="Mechanic Requests"
+              parent="menu_automotive_root"
+              action="action_mechanic_portal_requests"
+              sequence="80"
+              groups="base.group_user"/>
+
+    <template id="portal_my_mechanic_dashboard_extend" inherit_id="automotive_parts.portal_my_mechanic" priority="40">
+        <xpath expr="//div[@class='row g-3 mb-4']" position="inside">
+            <div class="col-6 col-lg-3">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <div class="text-muted small">Sold curent</div>
+                        <div class="fs-5 fw-semibold">
+                            <span t-out="mechanic_balance" t-options="{'widget': 'monetary', 'display_currency': mechanic_balance_currency}"/>
+                        </div>
+                        <a href="/my/invoices?filterby=invoices" class="stretched-link">Open invoices</a>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-lg-3">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <div class="text-muted small">Cereri portal</div>
+                        <div class="fs-2 fw-semibold"><t t-out="mechanic_request_count"/></div>
+                        <div class="small text-muted mb-2">Deschise: <t t-out="mechanic_open_request_count"/></div>
+                        <a href="/my/mechanic/requests" class="stretched-link">Open requests</a>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-lg-3">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <div class="text-muted small">Facturi</div>
+                        <div class="fs-2 fw-semibold"><t t-out="mechanic_invoice_count"/></div>
+                        <div class="small text-muted mb-2">Scadente: <t t-out="mechanic_overdue_invoice_count"/></div>
+                        <a href="/my/invoices?filterby=invoices" class="stretched-link">Open financial docs</a>
+                    </div>
+                </div>
+            </div>
+        </xpath>
+        <xpath expr="//div[@class='row g-4']" position="after">
+            <div class="row g-4 mt-1">
+                <div class="col-12 col-lg-6">
+                    <div class="card shadow-sm h-100">
+                        <div class="card-header bg-transparent d-flex align-items-center justify-content-between">
+                            <strong>Portal requests</strong>
+                            <a href="/my/mechanic/requests/new">New request</a>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>Request</th>
+                                        <th>Tip</th>
+                                        <th>Status</th>
+                                        <th class="text-end">Date</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <t t-if="not mechanic_requests">
+                                        <tr>
+                                            <td colspan="4" class="text-muted p-3">No requests yet.</td>
+                                        </tr>
+                                    </t>
+                                    <t t-foreach="mechanic_requests" t-as="portal_request">
+                                        <tr>
+                                            <td>
+                                                <a t-att-href="portal_request.access_url">
+                                                    <t t-out="portal_request.name"/>
+                                                </a>
+                                            </td>
+                                            <td><t t-out="dict(portal_request._fields['request_type'].selection).get(portal_request.request_type)"/></td>
+                                            <td><span t-field="portal_request.state"/></td>
+                                            <td class="text-end"><span t-field="portal_request.create_date" t-options="{'widget': 'date'}"/></td>
+                                        </tr>
+                                    </t>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-12 col-lg-6">
+                    <div class="card shadow-sm h-100">
+                        <div class="card-header bg-transparent d-flex align-items-center justify-content-between">
+                            <strong>Recent invoices</strong>
+                            <a href="/my/invoices?filterby=invoices">See all</a>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>Invoice</th>
+                                        <th>Date</th>
+                                        <th class="text-end">Due</th>
+                                        <th class="text-end">Residual</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <t t-if="not mechanic_invoices">
+                                        <tr>
+                                            <td colspan="4" class="text-muted p-3">No invoices found.</td>
+                                        </tr>
+                                    </t>
+                                    <t t-foreach="mechanic_invoices" t-as="invoice">
+                                        <tr>
+                                            <td><a t-att-href="invoice.get_portal_url()"><t t-out="invoice.name or invoice.ref"/></a></td>
+                                            <td><span t-field="invoice.invoice_date"/></td>
+                                            <td class="text-end"><span t-field="invoice.invoice_date_due"/></td>
+                                            <td class="text-end">
+                                                <span t-out="-invoice.amount_residual if invoice.move_type == 'out_refund' else invoice.amount_residual"
+                                                      t-options="{'widget': 'monetary', 'display_currency': invoice.currency_id}"/>
+                                            </td>
+                                        </tr>
+                                    </t>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </xpath>
+    </template>
+
+    <template id="portal_mechanic_request_breadcrumbs" inherit_id="portal.portal_breadcrumbs" priority="40">
+        <xpath expr="//ol[hasclass('o_portal_submenu')]" position="inside">
+            <li t-if="page_name == 'mechanic_requests'" class="breadcrumb-item active">
+                <span>Mechanic Requests</span>
+            </li>
+            <li t-if="page_name == 'mechanic_request_form'" class="breadcrumb-item active">
+                <span>New Mechanic Request</span>
+            </li>
+            <li t-if="page_name == 'mechanic_request_detail'" class="breadcrumb-item">
+                <a href="/my/mechanic/requests">Mechanic Requests</a>
+            </li>
+            <li t-if="page_name == 'mechanic_request_detail' and mechanic_request" class="breadcrumb-item active">
+                <span t-out="mechanic_request.name"/>
+            </li>
+        </xpath>
+    </template>
+
+    <template id="portal_my_mechanic_requests" name="Mechanic Requests">
+        <t t-call="portal.portal_layout">
+            <t t-set="breadcrumbs_searchbar" t-value="True"/>
+            <t t-call="portal.portal_searchbar">
+                <t t-set="title">Mechanic Requests</t>
+            </t>
+
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div class="text-muted">Track clarifications, document asks, and payment questions.</div>
+                <a href="/my/mechanic/requests/new" class="btn btn-primary">New request</a>
+            </div>
+
+            <t t-if="not mechanic_requests">
+                <p class="alert alert-warning">No mechanic requests found for this account.</p>
+            </t>
+            <t t-else="" t-call="portal.portal_table">
+                <thead>
+                    <tr>
+                        <th>Request</th>
+                        <th>Type</th>
+                        <th>Order</th>
+                        <th>Status</th>
+                        <th class="text-end">Created</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <t t-foreach="mechanic_requests" t-as="portal_request">
+                        <tr>
+                            <td><a t-att-href="portal_request.access_url"><t t-out="portal_request.name"/></a></td>
+                            <td><t t-out="dict(portal_request._fields['request_type'].selection).get(portal_request.request_type)"/></td>
+                            <td>
+                                <t t-if="portal_request.sale_order_id">
+                                    <a t-att-href="portal_request.sale_order_id.get_portal_url()">
+                                        <t t-out="portal_request.sale_order_id.name"/>
+                                    </a>
+                                </t>
+                                <t t-else="">-</t>
+                            </td>
+                            <td><span t-field="portal_request.state"/></td>
+                            <td class="text-end"><span t-field="portal_request.create_date" t-options="{'widget': 'date'}"/></td>
+                        </tr>
+                    </t>
+                </tbody>
+            </t>
+            <t t-call="portal.portal_pager"/>
+        </t>
+    </template>
+
+    <template id="portal_my_mechanic_request_form" name="New Mechanic Request">
+        <t t-call="portal.portal_layout">
+            <div class="row">
+                <div class="col-12 col-xl-8">
+                    <h2 class="mb-3">New mechanic request</h2>
+                    <t t-if="request_error">
+                        <div class="alert alert-danger" role="alert">
+                            <t t-out="request_error"/>
+                        </div>
+                    </t>
+                    <form action="/my/mechanic/requests/create" method="post" class="card shadow-sm">
+                        <input type="hidden" name="csrf_token" t-att-value="request.csrf_token()"/>
+                        <div class="card-body">
+                            <div class="mb-3">
+                                <label class="form-label" for="request_type">Request type</label>
+                                <select class="form-select" id="request_type" name="request_type" required="required">
+                                    <option value="order" t-att-selected="'selected' if request_form_values.get('request_type') == 'order' else None">Order clarification</option>
+                                    <option value="document" t-att-selected="'selected' if request_form_values.get('request_type') == 'document' else None">Document request</option>
+                                    <option value="payment" t-att-selected="'selected' if request_form_values.get('request_type') == 'payment' else None">Payment / balance</option>
+                                    <option value="general" t-att-selected="'selected' if request_form_values.get('request_type') in (False, '', None, 'general') else None">General request</option>
+                                </select>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label" for="sale_order_id">Related order</label>
+                                <select class="form-select" id="sale_order_id" name="sale_order_id">
+                                    <option value="">No specific order</option>
+                                    <t t-foreach="mechanic_orders_for_request" t-as="order">
+                                        <option t-att-value="order.id"
+                                                t-att-selected="'selected' if str(order.id) == request_form_values.get('sale_order_id') else None">
+                                            <t t-out="order.name"/> - <t t-out="order.partner_id.display_name"/>
+                                        </option>
+                                    </t>
+                                </select>
+                            </div>
+                            <div class="mb-0">
+                                <label class="form-label" for="description">Description</label>
+                                <textarea class="form-control" id="description" name="description" rows="6" required="required"><t t-out="request_form_values.get('description') or ''"/></textarea>
+                            </div>
+                        </div>
+                        <div class="card-footer d-flex justify-content-between">
+                            <a href="/my/mechanic/requests" class="btn btn-light">Cancel</a>
+                            <button type="submit" class="btn btn-primary">Submit request</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </t>
+    </template>
+
+    <template id="portal_my_mechanic_request_detail" name="Mechanic Request Detail">
+        <t t-call="portal.portal_layout">
+            <div class="row g-4">
+                <div class="col-12 col-lg-4">
+                    <div class="card shadow-sm">
+                        <div class="card-body">
+                            <div class="text-muted small">Request</div>
+                            <h3 class="mb-3"><t t-out="mechanic_request.name"/></h3>
+                            <div class="mb-2"><strong>Status:</strong> <span t-field="mechanic_request.state"/></div>
+                            <div class="mb-2"><strong>Type:</strong> <t t-out="dict(mechanic_request._fields['request_type'].selection).get(mechanic_request.request_type)"/></div>
+                            <div class="mb-2"><strong>Created:</strong> <span t-field="mechanic_request.create_date"/></div>
+                            <div class="mb-0"><strong>Resolved:</strong> <span t-field="mechanic_request.resolved_on"/></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-12 col-lg-8">
+                    <div class="card shadow-sm mb-4">
+                        <div class="card-header bg-transparent"><strong>Description</strong></div>
+                        <div class="card-body">
+                            <div style="white-space: pre-wrap;"><t t-out="mechanic_request.description"/></div>
+                            <div t-if="mechanic_request.sale_order_id" class="mt-3">
+                                <strong>Related order:</strong>
+                                <a t-att-href="mechanic_request.sale_order_id.get_portal_url()">
+                                    <t t-out="mechanic_request.sale_order_id.name"/>
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card shadow-sm">
+                        <div class="card-header bg-transparent"><strong>History</strong></div>
+                        <div class="list-group list-group-flush">
+                            <t t-if="not mechanic_request_messages">
+                                <div class="list-group-item text-muted">No responses yet.</div>
+                            </t>
+                            <t t-foreach="mechanic_request_messages" t-as="message">
+                                <div class="list-group-item">
+                                    <div class="small text-muted mb-1">
+                                        <t t-out="message.author_id.name or message.email_from or 'System'"/>
+                                        ·
+                                        <span t-field="message.date"/>
+                                    </div>
+                                    <div t-field="message.body"/>
+                                </div>
+                            </t>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </t>
+    </template>
+</odoo>

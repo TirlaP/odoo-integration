@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+        <record id="paperformat_automotive_label" model="report.paperformat">
+            <field name="name">Automotive Label Large</field>
+            <field name="default" eval="False"/>
+            <field name="format">custom</field>
+            <field name="page_width">423</field>
+            <field name="page_height">280</field>
+            <field name="orientation">Landscape</field>
+            <field name="margin_top">5</field>
+            <field name="margin_bottom">5</field>
+            <field name="margin_left">5</field>
+            <field name="margin_right">5</field>
+            <field name="header_line" eval="False"/>
+            <field name="header_spacing">0</field>
+            <field name="dpi">96</field>
+            <field name="disable_shrinking" eval="True"/>
+        </record>
+
+        <record id="action_report_automotive_label" model="ir.actions.report">
+            <field name="name">Automotive Label</field>
+            <field name="model">invoice.ingest.job.line</field>
+            <field name="report_type">qweb-pdf</field>
+            <field name="report_name">automotive_parts.report_product_label</field>
+            <field name="report_file">automotive_parts.report_product_label</field>
+            <field name="paperformat_id" ref="automotive_parts.paperformat_automotive_label"/>
+            <field name="binding_model_id" ref="model_invoice_ingest_job_line"/>
+            <field name="binding_type">report</field>
+        </record>
+
+        <template id="report_product_label">
+            <t t-call="web.html_container">
+                <t t-foreach="docs" t-as="label">
+                    <div class="page" style="margin: 0; padding: 0;">
+                        <div style="width: 413mm; min-height: 270mm; padding: 5mm; box-sizing: border-box; background: #fff; color: #000; font-family: Arial, sans-serif;">
+                            <div style="text-align: center; font-weight: 700; font-size: 18mm; line-height: 1.05; margin: 0 0 4mm 0; text-transform: uppercase;">
+                                <t t-esc="label.get('denumire')"/>
+                            </div>
+                            <div style="width: 100%; text-align: center; margin: 0 0 4mm 0;">
+                                <t t-if="label.get('barcode')">
+                                    <div t-out="label.get('barcode')" t-options="{'widget': 'barcode', 'quiet': 0, 'symbology': 'Code128', 'img_style': 'width:100%;height:70mm;'}"/>
+                                    <div style="font-size: 6mm; margin-top: 2mm;">
+                                        <t t-esc="label.get('barcode')"/>
+                                    </div>
+                                </t>
+                            </div>
+                            <div style="text-align: center; font-weight: 700; font-size: 16mm; margin: 0 0 16mm 0;">
+                                PRET:
+                                <span t-out="label.get('price', 0.0)" t-options="{'widget': 'monetary', 'display_currency': company.currency_id}"/>
+                                /BUC
+                            </div>
+                            <div style="display: flex; justify-content: space-between; align-items: flex-end; min-height: 70mm; gap: 12mm;">
+                                <div style="flex: 1 1 auto; font-size: 11mm; line-height: 1.35;">
+                                    <div>
+                                        <strong>Cod produs:</strong>
+                                        <t t-esc="label.get('product_code') or '-'"/>
+                                    </div>
+                                    <div>
+                                        <strong>Cod intern:</strong>
+                                        <t t-esc="label.get('internal_code') or '-'"/>
+                                    </div>
+                                    <div>
+                                        <strong>Brand:</strong>
+                                        <t t-esc="label.get('brand') or '-'"/>
+                                    </div>
+                                </div>
+                                <div style="flex: 0 0 110mm; text-align: right;">
+                                    <img t-if="company.logo" t-att-src="image_data_uri(company.logo)" alt="Company Logo" style="max-width: 110mm; max-height: 55mm; object-fit: contain;"/>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </t>
+            </t>
+        </template>
+    </data>
+</odoo>

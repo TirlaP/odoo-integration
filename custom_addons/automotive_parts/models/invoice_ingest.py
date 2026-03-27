@@ -1,11 +1,20 @@
 # -*- coding: utf-8 -*-
 import base64
+import hashlib
 import json
+import logging
 import os
 import re
+import shutil
+import subprocess
+import tempfile
+import threading
+from datetime import datetime
 from io import BytesIO
 from collections import defaultdict
+from xml.etree import ElementTree
 
+import odoo
 import requests
 from PyPDF2 import PdfReader
 from odoo import api, fields, models
@@ -27,11 +36,56 @@ AUTO_MATCH_CONFIDENCE_THRESHOLD = 88.0
 PROGRESSIVE_TRIM_MIN_LEN = 5
 PROGRESSIVE_TRIM_MAX_STEPS = 8
 
+_logger = logging.getLogger(__name__)
+
+
+def _invoice_ingest_background_worker(db_name, job_id):
+    registry = odoo.registry(db_name)
+    try:
+        with registry.cursor() as cr:
+            env = api.Environment(cr, odoo.SUPERUSER_ID, {})
+            job = env['invoice.ingest.job'].browse(job_id).exists()
+            if not job:
+                return
+            job._process_ingest_job()
+            cr.commit()
+    except Exception:
+        _logger.exception("Invoice ingest background worker failed for job_id=%s", job_id)
+
+
+def _start_invoice_ingest_background_worker(db_name, job_id):
+    thread = threading.Thread(
+        target=_invoice_ingest_background_worker,
+        args=(db_name, job_id),
+        name=f"invoice_ingest_job_{job_id}",
+        daemon=True,
+    )
+    thread.start()
+
 
 class InvoiceIngestJob(models.Model):
     _name = 'invoice.ingest.job'
     _description = 'Invoice Ingest Job'
     _order = 'id desc'
+    _AUDIT_FIELDS = {
+        'name',
+        'source',
+        'state',
+        'picking_id',
+        'attachment_id',
+        'partner_id',
+        'invoice_number',
+        'invoice_date',
+        'currency_id',
+        'amount_total',
+        'vat_rate',
+        'document_type',
+        'external_id',
+        'account_move_id',
+        'error',
+        'ai_model',
+        'ai_confidence',
+    }
     _sql_constraints = [
         (
             'invoice_ingest_source_external_unique',
@@ -72,6 +126,12 @@ class InvoiceIngestJob(models.Model):
     currency_id = fields.Many2one('res.currency', default=lambda self: self.env.company.currency_id)
     amount_total = fields.Monetary('Total Amount', currency_field='currency_id')
     vat_rate = fields.Float('VAT Rate (%)')
+    document_type = fields.Selection(
+        [('invoice', 'Invoice'), ('credit_note', 'Credit Note')],
+        string='Document Type',
+        default='invoice',
+        index=True,
+    )
 
     external_id = fields.Char('External ID', help='ANAF message/document identifier (when source=ANAF).')
     payload_json = fields.Text('Payload JSON')
@@ -79,12 +139,130 @@ class InvoiceIngestJob(models.Model):
     account_move_id = fields.Many2one('account.move', string='Vendor Bill')
     error = fields.Text()
     line_ids = fields.One2many('invoice.ingest.job.line', 'job_id', string='Extracted Lines')
+    receipt_sync_state = fields.Selection(
+        [
+            ('not_ready', 'Not Ready'),
+            ('not_synced', 'Not Synced'),
+            ('in_progress', 'In Progress'),
+            ('needs_review', 'Needs Review'),
+            ('synced', 'Synced'),
+            ('cancelled', 'Cancelled'),
+        ],
+        string='Receipt Sync Status',
+        compute='_compute_receipt_sync_state',
+    )
     ai_model = fields.Char(
         'AI Model',
         default=lambda self: self._default_ai_model(),
         help='Used when extracting invoice details with OpenAI.',
     )
     ai_confidence = fields.Float('AI Confidence (%)')
+
+    def _audit_snapshot(self, field_names=None):
+        self.ensure_one()
+        tracked_fields = field_names or self._AUDIT_FIELDS
+        snapshot = {}
+        for field_name in tracked_fields:
+            if field_name not in self._fields:
+                continue
+            value = self[field_name]
+            if isinstance(value, models.BaseModel):
+                snapshot[field_name] = value.ids
+            else:
+                snapshot[field_name] = value
+        return snapshot
+
+    def _audit_line_summary(self):
+        self.ensure_one()
+        matched_lines = self.line_ids.filtered(lambda line: bool(line.product_id))
+        manual_lines = self.line_ids.filtered(lambda line: line.match_status == 'manual')
+        unmatched_lines = self.line_ids.filtered(lambda line: not line.product_id)
+        return {
+            'line_count': len(self.line_ids),
+            'matched_lines': len(matched_lines),
+            'manual_review_lines': len(manual_lines),
+            'unmatched_lines': len(unmatched_lines),
+        }
+
+    def _audit_job_summary(self):
+        self.ensure_one()
+        summary = self._audit_snapshot()
+        summary.update(self._audit_line_summary())
+        summary.update({
+            'receipt_sync_state': self.receipt_sync_state,
+        })
+        return summary
+
+    def _audit_log(self, action, description, old_values=None, new_values=None):
+        self.ensure_one()
+        if self.env.context.get('skip_audit_log') is True:
+            return False
+        return self.env['automotive.audit.log'].log_change(
+            action=action,
+            record=self,
+            description=description,
+            old_values=old_values,
+            new_values=new_values,
+        )
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        jobs = super().create(vals_list)
+        if self.env.context.get('skip_audit_log') is True:
+            return jobs
+
+        for job, vals in zip(jobs, vals_list):
+            tracked_fields = [field_name for field_name in vals.keys() if field_name in job._AUDIT_FIELDS]
+            job._audit_log(
+                action='create',
+                description=f'Invoice ingest job created: {job.display_name}',
+                new_values=job._audit_snapshot(tracked_fields),
+            )
+        return jobs
+
+    def write(self, vals):
+        context = dict(self.env.context or {})
+        tracked_fields = [field_name for field_name in vals.keys() if field_name in self._AUDIT_FIELDS]
+        old_by_id = {}
+        state_before = {}
+        if tracked_fields and context.get('skip_audit_log') is not True:
+            old_by_id = {
+                job.id: job._audit_snapshot(tracked_fields)
+                for job in self
+            }
+        if 'state' in vals and context.get('skip_audit_log') is not True:
+            state_before = {job.id: job.state for job in self}
+
+        result = super().write(vals)
+
+        if tracked_fields and context.get('skip_audit_log') is not True:
+            for job in self:
+                job._audit_log(
+                    action='write',
+                    description=f'Invoice ingest job updated: {job.display_name}',
+                    old_values=old_by_id.get(job.id),
+                    new_values=job._audit_snapshot(tracked_fields),
+                )
+
+        if 'state' in vals and context.get('skip_audit_log') is not True:
+            for job in self:
+                old_state = state_before.get(job.id)
+                if old_state == job.state:
+                    continue
+                job._audit_log(
+                    action='custom',
+                    description=f'Invoice ingest state changed: {old_state or "unknown"} -> {job.state}',
+                    old_values={
+                        'state': old_state,
+                    },
+                    new_values={
+                        'state': job.state,
+                        'error': job.error,
+                        'receipt_sync_state': job.receipt_sync_state,
+                    },
+                )
+
+        return result
 
     def action_open_upload_wizard(self, *args, **kwargs):
         self.ensure_one()
@@ -96,13 +274,31 @@ class InvoiceIngestJob(models.Model):
             'target': 'new',
         }
 
-    def action_open_react_view(self):
-        self.ensure_one()
-        return {
-            'type': 'ir.actions.act_url',
-            'url': f'/automotive/invoice-ingest/react/{self.id}',
-            'target': 'self',
-        }
+    @api.depends(
+        'line_ids',
+        'line_ids.product_id',
+        'line_ids.quantity',
+        'picking_id',
+        'picking_id.state',
+    )
+    def _compute_receipt_sync_state(self):
+        for job in self:
+            has_unmatched_lines = any(
+                self._safe_float(line.quantity, default=0.0) > 0 and not line.product_id
+                for line in job.line_ids
+            )
+            if not job.line_ids:
+                job.receipt_sync_state = 'not_ready'
+            elif not job.picking_id:
+                job.receipt_sync_state = 'not_synced'
+            elif has_unmatched_lines:
+                job.receipt_sync_state = 'needs_review'
+            elif job.picking_id.state == 'done':
+                job.receipt_sync_state = 'synced'
+            elif job.picking_id.state == 'cancel':
+                job.receipt_sync_state = 'cancelled'
+            else:
+                job.receipt_sync_state = 'in_progress'
 
     @api.model
     def _default_ai_model(self):
@@ -122,29 +318,59 @@ class InvoiceIngestJob(models.Model):
 
     @api.model
     def _normalize_invoice_number(self, invoice_number):
-        return (invoice_number or '').strip()
+        return ' '.join((invoice_number or '').split())
 
     @api.model
-    def _find_duplicate_job(self, source, external_id=None, partner_id=None, invoice_number=None, invoice_date=None):
-        source = source or 'manual'
+    def _normalize_invoice_number_key(self, invoice_number):
+        return re.sub(r'[^A-Z0-9]+', '', self._normalize_invoice_number(invoice_number).upper())
+
+    @api.model
+    def _find_duplicate_job(
+        self,
+        source,
+        external_id=None,
+        partner_id=None,
+        invoice_number=None,
+        invoice_date=None,
+        amount_total=None,
+        document_type=None,
+    ):
         if external_id:
-            existing = self.search(
-                [('source', '=', source), ('external_id', '=', external_id)],
-                limit=1,
-            )
+            existing = self.search([('external_id', '=', external_id)], order='id desc', limit=1)
             if existing:
                 return existing
 
         normalized_invoice = self._normalize_invoice_number(invoice_number)
+        normalized_key = self._normalize_invoice_number_key(invoice_number)
         if partner_id and normalized_invoice:
-            domain = [
-                ('source', '=', source),
+            base_domain = [
                 ('partner_id', '=', partner_id),
+                '|',
                 ('invoice_number', '=', normalized_invoice),
+                ('invoice_number', '=ilike', normalized_invoice),
             ]
+            if normalized_key:
+                base_domain = [
+                    ('partner_id', '=', partner_id),
+                    '|',
+                    '|',
+                    ('invoice_number', '=', normalized_invoice),
+                    ('invoice_number', '=ilike', normalized_invoice),
+                    ('invoice_number', '=ilike', normalized_key),
+                ]
+            candidate_domains = [base_domain]
             if invoice_date:
-                domain.append(('invoice_date', '=', invoice_date))
-            return self.search(domain, order='id desc', limit=1)
+                candidate_domains.append(base_domain + [('invoice_date', '=', invoice_date)])
+            if amount_total not in (None, False):
+                candidate_domains.append(base_domain + [('amount_total', '=', amount_total)])
+            if invoice_date and amount_total not in (None, False):
+                candidate_domains.append(base_domain + [('invoice_date', '=', invoice_date), ('amount_total', '=', amount_total)])
+            if document_type:
+                candidate_domains = [domain + [('document_type', '=', document_type)] for domain in candidate_domains]
+            for domain in candidate_domains:
+                existing = self.search(domain, order='id desc', limit=1)
+                if existing:
+                    return existing
 
         return self.browse()
 
@@ -161,6 +387,7 @@ class InvoiceIngestJob(models.Model):
         currency_id=None,
         picking_id=None,
         attachment_id=None,
+        document_type=None,
         payload=None,
     ):
         existing = self._find_duplicate_job(
@@ -169,6 +396,8 @@ class InvoiceIngestJob(models.Model):
             partner_id=partner_id,
             invoice_number=invoice_number,
             invoice_date=invoice_date,
+            amount_total=amount_total,
+            document_type=document_type,
         )
         if existing:
             vals = {}
@@ -188,6 +417,8 @@ class InvoiceIngestJob(models.Model):
                 vals['picking_id'] = picking_id
             if not existing.attachment_id and attachment_id:
                 vals['attachment_id'] = attachment_id
+            if not existing.document_type and document_type:
+                vals['document_type'] = document_type
             if vals:
                 existing.write(vals)
             if payload:
@@ -206,6 +437,7 @@ class InvoiceIngestJob(models.Model):
             'currency_id': currency_id or self.env.company.currency_id.id,
             'picking_id': picking_id,
             'attachment_id': attachment_id,
+            'document_type': document_type,
         }
         job = self.create(vals)
         if payload:
@@ -224,7 +456,14 @@ class InvoiceIngestJob(models.Model):
 
     def action_mark_needs_review(self):
         for job in self:
+            previous_state = job.state
             job.write({'state': 'needs_review'})
+            job._audit_log(
+                action='custom',
+                description=f'Invoice ingest manually marked for review: {job.display_name}',
+                old_values={'state': previous_state},
+                new_values=job._audit_job_summary(),
+            )
 
     def _get_payload_dict(self):
         self.ensure_one()
@@ -240,6 +479,189 @@ class InvoiceIngestJob(models.Model):
         self.ensure_one()
         self._set_payload(payload)
 
+    def _get_normalized_invoice_payload(self):
+        self.ensure_one()
+        payload = self._get_payload_dict()
+        return (
+            (payload.get('openai') or {}).get('normalized')
+            or payload.get('normalized')
+            or {}
+        )
+
+    def _get_duplicate_of_job_id(self):
+        self.ensure_one()
+        payload = self._get_payload_dict()
+        duplicate_of = payload.get('duplicate_of')
+        if duplicate_of:
+            return duplicate_of
+
+        openai_payload = payload.get('openai') or {}
+        duplicate_of = openai_payload.get('duplicate_of')
+        if duplicate_of:
+            return duplicate_of
+
+        normalized = openai_payload.get('normalized') or {}
+        return normalized.get('duplicate_of')
+
+    def _normalize_payload_line(self, line, supplier=None, default_vat_rate=0.0):
+        self.ensure_one()
+        if not isinstance(line, dict):
+            return False
+
+        raw_code = (
+            line.get('product_code_raw')
+            or line.get('product_code')
+            or line.get('description')
+            or line.get('product_description')
+            or ''
+        ).strip()
+        description = (line.get('product_description') or line.get('description') or '').strip()
+        parsed_identity = self._parse_invoice_line_identity(
+            raw_code,
+            product_description=description,
+            supplier_hint=(line.get('supplier_brand') or '').strip(),
+        )
+        parsed_code = parsed_identity.get('product_code_primary') or (line.get('product_code') or '').strip()
+        parsed_supplier_brand = parsed_identity.get('supplier_brand') or (line.get('supplier_brand') or '').strip()
+        product, match_meta = self._match_product_with_meta(
+            parsed_code,
+            supplier=supplier,
+            product_description=description,
+            supplier_brand=parsed_supplier_brand,
+            extra_codes=parsed_identity.get('code_candidates') or [],
+        )
+        if not product and parsed_code:
+            progressive_candidates = self._progressive_tail_trim_candidates(parsed_code)
+            if progressive_candidates:
+                parsed_code = progressive_candidates[-1]
+
+        matched_product_id = (
+            product.id
+            if product and match_meta.get('confidence', 0.0) >= AUTO_MATCH_CONFIDENCE_THRESHOLD
+            else False
+        )
+        supplier_brand_id = False
+        if matched_product_id:
+            canonical_brand, canonical_supplier_id = self._brand_from_matched_product(product)
+            if canonical_brand:
+                parsed_supplier_brand = canonical_brand
+            supplier_brand_id = canonical_supplier_id or False
+
+        quantity = self._safe_float(
+            line.get('quantity') or line.get('invoiced_quantity') or line.get('credited_quantity'),
+            default=1.0,
+        ) or 1.0
+        unit_price = self._safe_float(
+            line.get('unit_price')
+            or line.get('price_unit')
+            or line.get('price'),
+            default=0.0,
+        )
+        line_total = self._safe_float(line.get('line_total'), default=0.0)
+        if not unit_price and line_total and quantity:
+            unit_price = line_total / quantity
+
+        return {
+            'quantity': quantity,
+            'product_code_raw': raw_code,
+            'product_code': parsed_code or False,
+            'supplier_brand': parsed_supplier_brand,
+            'supplier_brand_id': supplier_brand_id,
+            'product_description': description,
+            'unit_price': unit_price,
+            'vat_rate': self._safe_float(line.get('vat_rate'), default=default_vat_rate or self.vat_rate or 0.0),
+            'matched_product_id': matched_product_id,
+            'matched_product_name': product.display_name if product else False,
+            'match_status': 'matched' if matched_product_id else 'not_found',
+            'match_method': match_meta.get('method'),
+            'match_confidence': match_meta.get('confidence', 0.0),
+        }
+
+    @api.model
+    def _infer_document_move_type_from_xml(self, xml_payload):
+        if not xml_payload:
+            return False
+        try:
+            root = ElementTree.fromstring(xml_payload.encode('utf-8') if isinstance(xml_payload, str) else xml_payload)
+        except Exception:
+            return False
+        local_name = root.tag.rsplit('}', 1)[-1]
+        if local_name == 'CreditNote':
+            return 'in_refund'
+        if local_name == 'Invoice':
+            return 'in_invoice'
+        return False
+
+    @api.model
+    def _looks_like_supplier_credit_note_text(self, text):
+        haystack = self._normalize_code_value(text or '').upper()
+        if not haystack:
+            return False
+        tokens = (
+            'CREDIT NOTE',
+            'CREDITNOTE',
+            'NOTA DE CREDITARE',
+            'NOTA CREDITARE',
+            'FACTURA STORNO',
+            'STORNO',
+            'REFUND',
+            'RETUR',
+        )
+        return any(token in haystack for token in tokens)
+
+    def _infer_vendor_bill_move_type(self, payload=None, text_hint=None):
+        self.ensure_one()
+        payload = payload if isinstance(payload, dict) else self._get_payload_dict()
+
+        normalized = (payload.get('openai') or {}).get('normalized') or {}
+        document_type = (normalized.get('document_type') or normalized.get('invoice_type') or '').strip().lower()
+        if document_type in {'creditnote', 'credit_note', 'refund', 'supplier_credit_note', 'supplier_refund'}:
+            return 'in_refund'
+        if document_type in {'invoice', 'bill', 'supplier_invoice'}:
+            return 'in_invoice'
+
+        if self.document_type == 'credit_note':
+            return 'in_refund'
+        if self.document_type == 'invoice':
+            return 'in_invoice'
+
+        raw_openai = (payload.get('openai') or {}).get('raw') or {}
+        if isinstance(raw_openai, dict):
+            document_type = (
+                raw_openai.get('document_type')
+                or raw_openai.get('invoice_type')
+                or raw_openai.get('invoiceTypeCode')
+                or ''
+            )
+            if isinstance(document_type, str):
+                normalized_type = document_type.strip().lower()
+                if normalized_type in {'creditnote', 'credit_note', 'refund'}:
+                    return 'in_refund'
+                if normalized_type in {'invoice', 'bill'}:
+                    return 'in_invoice'
+
+        raw_payload = payload.get('raw')
+        if isinstance(raw_payload, dict):
+            xml_payload = (
+                raw_payload.get('xml')
+                or raw_payload.get('ubl_xml')
+                or raw_payload.get('document_xml')
+                or raw_payload.get('parsed', {}).get('xml_payload')
+                or raw_payload.get('parsed', {}).get('xml')
+            )
+            inferred = self._infer_document_move_type_from_xml(xml_payload)
+            if inferred:
+                return inferred
+
+        if text_hint and self._looks_like_supplier_credit_note_text(text_hint):
+            return 'in_refund'
+
+        # OCR fallback: inspect the extracted text cached in the payload if available.
+        if self._looks_like_supplier_credit_note_text(json.dumps(payload, ensure_ascii=False, default=str)):
+            return 'in_refund'
+
+        return 'in_invoice'
+
     def _extract_pdf_text(self):
         self.ensure_one()
         if not self.attachment_id or not self.attachment_id.datas:
@@ -248,6 +670,10 @@ class InvoiceIngestJob(models.Model):
             raise UserError('The attached file is not a PDF.')
 
         binary = base64.b64decode(self.attachment_id.datas)
+        layout_text = self._extract_pdf_text_with_pdftotext(binary)
+        if layout_text and len(layout_text) >= 20:
+            return layout_text
+
         reader = PdfReader(BytesIO(binary))
         pages = []
         for page in reader.pages:
@@ -257,6 +683,27 @@ class InvoiceIngestJob(models.Model):
                 continue
         text = '\n'.join(pages).strip()
         return text
+
+    @api.model
+    def _extract_pdf_text_with_pdftotext(self, binary):
+        if not binary or not shutil.which('pdftotext'):
+            return ''
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.pdf') as tmp:
+                tmp.write(binary)
+                tmp.flush()
+                result = subprocess.run(
+                    ['pdftotext', '-layout', tmp.name, '-'],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+        except Exception:
+            return ''
+        if result.returncode != 0:
+            return ''
+        return (result.stdout or '').strip()
 
     @api.model
     def _safe_money(self, value, default=0.0):
@@ -414,16 +861,36 @@ class InvoiceIngestJob(models.Model):
     def _safe_date(self, value):
         if not value:
             return False
+        if isinstance(value, datetime):
+            return value.date()
+        raw = str(value).strip()
+        for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d/%m/%y', '%d.%m.%Y', '%d.%m.%y'):
+            try:
+                return datetime.strptime(raw, fmt).date()
+            except Exception:
+                continue
         try:
-            return fields.Date.to_date(value)
+            return fields.Date.to_date(raw)
         except Exception:
             return False
 
-    def _find_supplier_partner(self, supplier_name=None, supplier_code=None):
+    def _find_supplier_partner(self, supplier_name=None, supplier_code=None, supplier_vat=None):
         self.ensure_one()
         Partner = self.env['res.partner']
         if self.partner_id:
             return self.partner_id
+
+        if supplier_vat:
+            clean_vat = self._normalize_cui_digits(supplier_vat)
+            if clean_vat:
+                partner = (
+                    Partner.search([('vat', '=', clean_vat)], limit=1)
+                    or Partner.search([('vat', '=ilike', f'RO{clean_vat}')], limit=1)
+                    or Partner.search([('cui', '=', clean_vat)], limit=1)
+                    or Partner.search([('cui', '=ilike', f'RO{clean_vat}')], limit=1)
+                )
+                if partner:
+                    return partner
 
         # Try exact code first (legacy app seems to use short codes like AD/MT/CX).
         if supplier_code:
@@ -443,6 +910,100 @@ class InvoiceIngestJob(models.Model):
             if partner:
                 return partner
         return Partner
+
+    def _get_or_create_supplier_partner(self, supplier_name=None, supplier_code=None, supplier_vat=None):
+        self.ensure_one()
+        partner = self._find_supplier_partner(
+            supplier_name=supplier_name,
+            supplier_code=supplier_code,
+            supplier_vat=supplier_vat,
+        )
+        if partner:
+            return partner
+
+        clean_name = (supplier_name or '').strip()
+        clean_vat = self._normalize_cui_digits(supplier_vat)
+        if not clean_name and not clean_vat:
+            return self.env['res.partner']
+
+        if not clean_name:
+            clean_name = f'Supplier {clean_vat}'
+
+        vals = {
+            'name': clean_name,
+            'company_type': 'company',
+            'supplier_rank': 1,
+        }
+        if 'client_type' in self.env['res.partner']._fields:
+            vals['client_type'] = 'company'
+        if clean_vat:
+            vals['vat'] = f'RO{clean_vat}'
+            if 'cui' in self.env['res.partner']._fields:
+                vals['cui'] = clean_vat
+
+        partner = self.env['res.partner'].sudo().create(vals)
+        _logger.info(
+            "Auto-created supplier partner id=%s name=%s vat=%s for invoice ingest job id=%s",
+            partner.id,
+            partner.name,
+            vals.get('vat'),
+            self.id,
+        )
+        return partner
+
+    @api.model
+    def _extract_invoice_number_from_filename(self, filename):
+        stem = os.path.splitext(os.path.basename(filename or ''))[0]
+        compact = re.sub(r'[^A-Z0-9]', '', stem.upper())
+        if compact and sum(ch.isdigit() for ch in compact) >= 4:
+            return compact
+        return ''
+
+    @api.model
+    def _extract_invoice_header_from_text(self, text, filename=None):
+        if not text and not filename:
+            return {}
+
+        out = {}
+        raw_lines = [line.rstrip() for line in (text or '').splitlines()]
+        non_empty_lines = [line.strip() for line in raw_lines if line and line.strip()]
+
+        for idx, line in enumerate(non_empty_lines):
+            if re.search(r'\bFurnizor\b', line, re.IGNORECASE):
+                for candidate in non_empty_lines[idx + 1:idx + 5]:
+                    parts = [part.strip() for part in re.split(r'\s{2,}', candidate) if part.strip()]
+                    if parts:
+                        out['supplier_name'] = parts[0]
+                        break
+                if out.get('supplier_name'):
+                    break
+
+        for line in non_empty_lines:
+            if 'C.I.F.' not in line.upper():
+                continue
+            parts = [part.strip() for part in re.split(r'\s{2,}', line) if part.strip()]
+            vat = next((part for part in parts if re.fullmatch(r'RO?\d{2,}', part, re.IGNORECASE)), '')
+            if vat:
+                out['supplier_vat'] = vat
+                break
+
+        dates = re.findall(r'\b\d{2}[./-]\d{2}[./-]\d{2,4}\b', text or '')
+        if dates:
+            out['invoice_date'] = dates[0]
+            if len(dates) > 1:
+                out['invoice_due_date'] = dates[-1]
+
+        invoice_number = self._extract_invoice_number_from_filename(filename)
+        if not invoice_number:
+            scan_area = ''.join(non_empty_lines[:4]).upper()
+            scan_area = re.sub(r'[^A-Z0-9]', '', scan_area)
+            match = re.search(r'(RO\d{6,}|[A-Z]{1,4}\d{6,})', scan_area)
+            if match:
+                invoice_number = match.group(1)
+        if invoice_number:
+            out['invoice_number'] = invoice_number
+
+        return out
 
     @api.model
     def _normalize_cui_digits(self, value):
@@ -464,10 +1025,11 @@ class InvoiceIngestJob(models.Model):
         payload = self._get_payload_dict()
 
         # 2) OpenAI normalized supplier hints.
-        normalized = (payload.get('openai') or {}).get('normalized') or {}
-        supplier = self._find_supplier_partner(
+        normalized = self._get_normalized_invoice_payload()
+        supplier = self._get_or_create_supplier_partner(
             supplier_name=(normalized.get('supplier_name') or '').strip(),
             supplier_code=(normalized.get('supplier_code') or '').strip(),
+            supplier_vat=(normalized.get('supplier_vat') or '').strip(),
         )
         if supplier:
             self.partner_id = supplier.id
@@ -488,18 +1050,28 @@ class InvoiceIngestJob(models.Model):
                 self.partner_id = supplier.id
                 return self.partner_id
 
-        # 4) Infer from matched products if there is exactly one clear supplier.
-        product_suppliers = self.line_ids.mapped('product_id.main_supplier_id').filtered(lambda p: p)
-        if len(product_suppliers) == 1:
-            self.partner_id = product_suppliers.id
-            return self.partner_id
-
-        seller_suppliers = self.line_ids.mapped('product_id.product_tmpl_id.seller_ids.partner_id').filtered(lambda p: p)
-        if len(seller_suppliers) == 1:
-            self.partner_id = seller_suppliers.id
-            return self.partner_id
-
         return self.env['res.partner']
+
+    def _process_ingest_job(self, raise_on_error=False):
+        for job in self:
+            if job.state not in {'pending', 'failed', 'needs_review'}:
+                continue
+            try:
+                job.write({'state': 'running', 'error': False})
+                if job.source == 'ocr' and job.attachment_id:
+                    job.action_extract_with_openai()
+                elif job.account_move_id:
+                    job.write({'state': 'done'})
+                else:
+                    job.write({'state': 'needs_review'})
+            except Exception as exc:  # noqa: BLE001
+                job.write({
+                    'state': 'failed',
+                    'error': str(exc) or repr(exc),
+                })
+                if raise_on_error:
+                    raise
+        return True
 
     @api.model
     def _normalize_code_value(self, value):
@@ -1027,24 +1599,58 @@ class InvoiceIngestJob(models.Model):
 
     def _ensure_receipt(self, supplier):
         self.ensure_one()
+        if not supplier:
+            raise UserError('A supplier is required before reception synchronization can continue.')
+        if not self.invoice_number:
+            raise UserError('Invoice number is required before reception synchronization can continue.')
+
+        normalized_invoice_number = self.env['stock.picking']._normalize_supplier_invoice_reference(self.invoice_number)
         if self.picking_id and self.picking_id.exists() and self.picking_id.state != 'cancel':
             picking = self.picking_id
             vals = {}
-            if supplier and not picking.partner_id:
+            if not picking.partner_id:
                 vals['partner_id'] = supplier.id
             if self.invoice_number and not picking.origin:
                 vals['origin'] = f'Invoice {self.invoice_number}'
+            if self.invoice_number and not picking.supplier_invoice_number:
+                vals['supplier_invoice_number'] = self.invoice_number
+            if self.invoice_date and not picking.supplier_invoice_date:
+                vals['supplier_invoice_date'] = self.invoice_date
             if vals:
-                picking.write(vals)
+                picking.with_context(skip_audit_log=True).write(vals)
             return picking, False
+
+        domain = [
+            ('picking_type_code', '=', 'incoming'),
+            ('partner_id', '=', supplier.id),
+            ('supplier_invoice_number', '!=', False),
+            ('state', '!=', 'cancel'),
+        ]
+        if self.invoice_date:
+            domain.append(('supplier_invoice_date', '=', self.invoice_date))
+        existing = self.env['stock.picking'].search(domain, order='id desc')
+        existing = existing.filtered(
+            lambda picking: self.env['stock.picking']._normalize_supplier_invoice_reference(picking.supplier_invoice_number)
+            == normalized_invoice_number
+        )[:1]
+        if existing:
+            self.picking_id = existing.id
+            vals = {}
+            if self.invoice_date and not existing.supplier_invoice_date:
+                vals['supplier_invoice_date'] = self.invoice_date
+            if vals:
+                existing.with_context(skip_audit_log=True).write(vals)
+            return existing, False
 
         picking_type = self._get_default_incoming_picking_type()
         picking = self.env['stock.picking'].create({
             'picking_type_id': picking_type.id,
-            'partner_id': supplier.id if supplier else False,
+            'partner_id': supplier.id,
             'origin': f'Invoice {self.invoice_number}' if self.invoice_number else self.name,
             'location_id': picking_type.default_location_src_id.id,
             'location_dest_id': picking_type.default_location_dest_id.id,
+            'supplier_invoice_number': self.invoice_number,
+            'supplier_invoice_date': self.invoice_date,
         })
         self.picking_id = picking.id
         return picking, True
@@ -1056,6 +1662,7 @@ class InvoiceIngestJob(models.Model):
 
         Move = self.env['stock.move']
         MoveLine = self.env['stock.move.line']
+        SaleOrderLine = self.env['sale.order.line']
         updated = 0
         for product_id, qty in product_quantities.items():
             if qty <= 0:
@@ -1064,57 +1671,175 @@ class InvoiceIngestJob(models.Model):
             if not product:
                 continue
 
-            move = picking.move_ids_without_package.filtered(
-                lambda m: m.product_id.id == product.id and m.state not in {'done', 'cancel'}
-            )[:1]
+            remaining_qty = qty
+            target_lines = SaleOrderLine.search([
+                ('state', '=', 'sale'),
+                ('product_id', '=', product.id),
+                ('order_id.auto_state', 'not in', ['cancel', 'delivered']),
+                ('company_id', '=', picking.company_id.id),
+            ]).sorted(lambda line: (line.order_id.date_order or fields.Datetime.now(), line.id))
 
-            if move:
-                move.write({
-                    'product_uom_qty': qty,
-                    'quantity': qty,
-                    'product_uom': product.uom_id.id,
-                })
-            else:
-                move = Move.create({
-                    'name': product.display_name,
-                    'product_id': product.id,
-                    'product_uom_qty': qty,
-                    'quantity': qty,
-                    'product_uom': product.uom_id.id,
-                    'picking_id': picking.id,
-                    'location_id': picking.location_id.id,
-                    'location_dest_id': picking.location_dest_id.id,
-                })
-            if move.state == 'draft':
-                move._action_confirm()
-
-            move_line = move.move_line_ids.filtered(
-                lambda l: l.product_id.id == product.id
-                and l.location_id.id == picking.location_id.id
-                and l.location_dest_id.id == picking.location_dest_id.id
-                and not l.lot_id
-            )[:1]
-            if move_line:
-                move_line.write({
-                    'product_uom_id': product.uom_id.id,
-                    'quantity': qty,
-                })
-                extra_lines = (move.move_line_ids - move_line).filtered(
-                    lambda l: l.product_id.id == product.id and not l.lot_id and l.state != 'done'
+            for sale_line in target_lines:
+                if remaining_qty <= 0:
+                    break
+                line_needed_qty = max(sale_line.product_uom_qty - sale_line._get_ready_qty(), 0.0)
+                line_needed_qty = sale_line.product_uom._compute_quantity(
+                    line_needed_qty,
+                    product.uom_id,
+                    rounding_method='HALF-UP',
                 )
-                if extra_lines:
-                    extra_lines.unlink()
-            else:
-                MoveLine.create({
-                    'picking_id': picking.id,
-                    'move_id': move.id,
-                    'product_id': product.id,
-                    'product_uom_id': product.uom_id.id,
-                    'location_id': picking.location_id.id,
-                    'location_dest_id': picking.location_dest_id.id,
-                    'quantity': qty,
-                })
-            updated += 1
+                if line_needed_qty <= 0:
+                    continue
+
+                target_moves = sale_line._get_supply_target_moves(picking.location_dest_id)
+                for target_move in target_moves:
+                    if remaining_qty <= 0 or line_needed_qty <= 0:
+                        break
+
+                    existing_supply_qty = 0.0
+                    for origin_move in target_move.move_orig_ids.filtered(
+                        lambda move: move.state not in {'cancel', 'done'}
+                        and move.product_id == product
+                        and move.location_dest_id == target_move.location_id
+                        and move.picking_id != picking
+                    ):
+                        existing_supply_qty += origin_move.product_uom._compute_quantity(
+                            origin_move.product_uom_qty,
+                            target_move.product_uom,
+                            rounding_method='HALF-UP',
+                        )
+
+                    reserved_qty = target_move.quantity
+                    covered_qty = reserved_qty + existing_supply_qty
+                    needed_qty = max(target_move.product_uom_qty - covered_qty, 0.0)
+                    needed_qty = target_move.product_uom._compute_quantity(
+                        needed_qty,
+                        product.uom_id,
+                        rounding_method='HALF-UP',
+                    )
+                    if needed_qty <= 0:
+                        continue
+
+                    allocated_qty = min(remaining_qty, line_needed_qty, needed_qty)
+                    linked_sale_lines = target_move._get_sale_order_lines()
+                    move = picking.move_ids_without_package.filtered(
+                        lambda move: move.product_id == product
+                        and move.state not in {'done', 'cancel'}
+                        and target_move in move.move_dest_ids
+                    )[:1]
+                    move_vals = {
+                        'product_uom_qty': allocated_qty,
+                        'quantity': allocated_qty,
+                        'product_uom': product.uom_id.id,
+                        'move_dest_ids': [(6, 0, [target_move.id])],
+                    }
+                    if len(linked_sale_lines) == 1:
+                        move_vals['sale_line_id'] = linked_sale_lines.id
+                        move_vals['group_id'] = linked_sale_lines.order_id.procurement_group_id.id
+                    if move:
+                        move.write(move_vals)
+                    else:
+                        move_vals.update({
+                            'name': product.display_name,
+                            'product_id': product.id,
+                            'picking_id': picking.id,
+                            'location_id': picking.location_id.id,
+                            'location_dest_id': picking.location_dest_id.id,
+                        })
+                        move = Move.create(move_vals)
+                    if move.state == 'draft':
+                        move._action_confirm()
+
+                    move_line = move.move_line_ids.filtered(
+                        lambda line: line.product_id.id == product.id
+                        and line.location_id.id == picking.location_id.id
+                        and line.location_dest_id.id == picking.location_dest_id.id
+                        and not line.lot_id
+                    )[:1]
+                    if move_line:
+                        move_line.write({
+                            'product_uom_id': product.uom_id.id,
+                            'quantity': allocated_qty,
+                        })
+                        extra_lines = (move.move_line_ids - move_line).filtered(
+                            lambda line: line.product_id.id == product.id and not line.lot_id and line.state != 'done'
+                        )
+                        if extra_lines:
+                            extra_lines.unlink()
+                    else:
+                        MoveLine.create({
+                            'picking_id': picking.id,
+                            'move_id': move.id,
+                            'product_id': product.id,
+                            'product_uom_id': product.uom_id.id,
+                            'location_id': picking.location_id.id,
+                            'location_dest_id': picking.location_dest_id.id,
+                            'quantity': allocated_qty,
+                        })
+                    updated += 1
+                    remaining_qty -= allocated_qty
+                    line_needed_qty -= allocated_qty
+
+            if remaining_qty > 0:
+                move = picking.move_ids_without_package.filtered(
+                    lambda m: m.product_id.id == product.id
+                    and m.state not in {'done', 'cancel'}
+                    and not m.move_dest_ids
+                )[:1]
+                if move:
+                    move.write({
+                        'product_uom_qty': remaining_qty,
+                        'quantity': remaining_qty,
+                        'product_uom': product.uom_id.id,
+                    })
+                else:
+                    move = Move.create({
+                        'name': product.display_name,
+                        'product_id': product.id,
+                        'product_uom_qty': remaining_qty,
+                        'quantity': remaining_qty,
+                        'product_uom': product.uom_id.id,
+                        'picking_id': picking.id,
+                        'location_id': picking.location_id.id,
+                        'location_dest_id': picking.location_dest_id.id,
+                    })
+                if move.state == 'draft':
+                    move._action_confirm()
+
+                move_line = move.move_line_ids.filtered(
+                    lambda l: l.product_id.id == product.id
+                    and l.location_id.id == picking.location_id.id
+                    and l.location_dest_id.id == picking.location_dest_id.id
+                    and not l.lot_id
+                )[:1]
+                if move_line:
+                    move_line.write({
+                        'product_uom_id': product.uom_id.id,
+                        'quantity': remaining_qty,
+                    })
+                    extra_lines = (move.move_line_ids - move_line).filtered(
+                        lambda l: l.product_id.id == product.id and not l.lot_id and l.state != 'done'
+                    )
+                    if extra_lines:
+                        extra_lines.unlink()
+                else:
+                    MoveLine.create({
+                        'picking_id': picking.id,
+                        'move_id': move.id,
+                        'product_id': product.id,
+                        'product_uom_id': product.uom_id.id,
+                        'location_id': picking.location_id.id,
+                        'location_dest_id': picking.location_dest_id.id,
+                        'quantity': remaining_qty,
+                    })
+                updated += 1
+
+        affected_orders = self.env['sale.order']
+        for move in picking.move_ids_without_package:
+            affected_orders |= move._get_sale_order_lines().mapped('order_id')
+            affected_orders |= move.sale_line_id.order_id
+        if affected_orders:
+            affected_orders._refresh_automotive_stock_state()
 
         return updated
 
@@ -1127,11 +1852,19 @@ class InvoiceIngestJob(models.Model):
             picking.action_confirm()
         result = picking.button_validate()
         if isinstance(result, dict) and result.get('res_model') == 'stock.backorder.confirmation' and result.get('res_id'):
-            self.env['stock.backorder.confirmation'].browse(result['res_id']).process_cancel_backorder()
+            self.env['stock.backorder.confirmation'].browse(result['res_id']).process()
         return picking.state == 'done'
 
     def _auto_create_or_update_receipt(self, supplier):
         self.ensure_one()
+        if self._infer_vendor_bill_move_type() == 'in_refund':
+            return {
+                'created': False,
+                'updated_lines': 0,
+                'validated': False,
+                'unmatched_count': 0,
+                'reason': 'credit_note',
+            }
         product_quantities, unmatched_count = self._collect_receipt_quantities()
         if not product_quantities:
             return {
@@ -1144,13 +1877,18 @@ class InvoiceIngestJob(models.Model):
 
         picking, created = self._ensure_receipt(supplier=supplier)
         updated_lines = self._sync_receipt_moves(picking, product_quantities)
-        validated = self._validate_receipt(picking)
+        validated = False
+        reason = ''
+        if unmatched_count:
+            reason = 'unmatched_lines'
+        else:
+            validated = self._validate_receipt(picking)
         return {
             'created': created,
             'updated_lines': updated_lines,
             'validated': validated,
             'unmatched_count': unmatched_count,
-            'reason': '',
+            'reason': reason,
         }
 
     def action_extract_with_openai(self):
@@ -1167,12 +1905,19 @@ class InvoiceIngestJob(models.Model):
                     'PDF text extraction returned no usable text. Use ANAF XML import or connect an OCR provider.'
                 )
             pdf_totals = job._extract_invoice_totals_from_text(text)
+            pdf_header = job._extract_invoice_header_from_text(
+                text,
+                filename=job.attachment_id.name if job.attachment_id else job.name,
+            )
 
             prompt = (
                 "Extract invoice data from Romanian automotive supplier invoice text. "
                 "Return strict JSON with keys: "
                 "supplier_name, supplier_code, invoice_number, invoice_date, invoice_due_date, "
-                "invoice_currency, vat_rate, amount_total, confidence, warnings, invoice_lines. "
+                "invoice_currency, vat_rate, amount_total, confidence, warnings, document_type, invoice_lines. "
+                "supplier_name must be the invoice issuer/vendor from the Furnizor or supplier section, never the client/customer. "
+                "invoice_number must be the exact invoice number shown on the document header. "
+                "document_type must be one of invoice, credit_note, refund, or unknown when the document is clearly a supplier credit note or refund. "
                 "invoice_lines is an array of objects with: "
                 "quantity, product_code, product_code_raw, supplier_brand, product_description, unit_price. "
                 "product_code must be the main article code only (e.g. GDB1956, 56789, VKBA 6649). "
@@ -1185,7 +1930,14 @@ class InvoiceIngestJob(models.Model):
                 'response_format': {'type': 'json_object'},
                 'messages': [
                     {'role': 'system', 'content': 'You are a strict invoice extraction engine. Output valid JSON only.'},
-                    {'role': 'user', 'content': f'{prompt}\n\nINVOICE_TEXT:\n{text[:120000]}'},
+                    {
+                        'role': 'user',
+                        'content': (
+                            f'{prompt}\n\n'
+                            f'FILENAME: {(job.attachment_id.name if job.attachment_id else job.name) or ""}\n\n'
+                            f'INVOICE_TEXT:\n{text[:120000]}'
+                        ),
+                    },
                 ],
             }
             response = requests.post(
@@ -1211,11 +1963,6 @@ class InvoiceIngestJob(models.Model):
             if not isinstance(parsed, dict):
                 raise UserError('OpenAI response is not a JSON object.')
 
-            supplier = job._find_supplier_partner(
-                supplier_name=parsed.get('supplier_name'),
-                supplier_code=parsed.get('supplier_code'),
-            )
-
             ai_lines = parsed.get('invoice_lines') or []
             fallback_lines = job._extract_invoice_lines_from_text(
                 text,
@@ -1223,6 +1970,98 @@ class InvoiceIngestJob(models.Model):
             )
             lines = ai_lines
             warnings = parsed.get('warnings') if isinstance(parsed.get('warnings'), list) else []
+            supplier_name = (parsed.get('supplier_name') or pdf_header.get('supplier_name') or '').strip()
+            invoice_number = self._normalize_invoice_number(
+                parsed.get('invoice_number') or pdf_header.get('invoice_number')
+            )
+            invoice_date_value = parsed.get('invoice_date') or pdf_header.get('invoice_date')
+            invoice_due_date_value = parsed.get('invoice_due_date') or pdf_header.get('invoice_due_date')
+            currency = self.env.company.currency_id
+            currency_name = (parsed.get('invoice_currency') or '').strip().upper()
+            if currency_name:
+                currency = self.env['res.currency'].search([('name', '=', currency_name)], limit=1) or currency
+            if not parsed.get('supplier_name') and supplier_name:
+                warnings.append('Supplier name recovered from the PDF header.')
+            if not parsed.get('invoice_number') and invoice_number:
+                warnings.append(f'Invoice number recovered from the file/header: {invoice_number}.')
+            if not parsed.get('invoice_date') and invoice_date_value:
+                warnings.append('Invoice date recovered from the PDF header.')
+            supplier = job._get_or_create_supplier_partner(
+                supplier_name=supplier_name,
+                supplier_code=parsed.get('supplier_code'),
+                supplier_vat=pdf_header.get('supplier_vat'),
+            )
+            document_type = (parsed.get('document_type') or '').strip().lower()
+            if not document_type and self._looks_like_supplier_credit_note_text(text):
+                document_type = 'credit_note'
+            if document_type in {'refund', 'credit_note', 'creditnote'}:
+                warnings.append('Supplier credit note / refund detected.')
+
+            duplicate = job._find_duplicate_job(
+                source=job.source,
+                partner_id=supplier.id if supplier else False,
+                invoice_number=invoice_number,
+                invoice_date=self._safe_date(invoice_date_value),
+                amount_total=pdf_totals.get('amount_total') or self._safe_float(parsed.get('amount_total')),
+                document_type=document_type or 'invoice',
+            )
+            if duplicate and duplicate.id != job.id:
+                job.write({
+                    'state': 'needs_review',
+                    'partner_id': supplier.id if supplier else False,
+                    'invoice_number': invoice_number,
+                    'invoice_date': self._safe_date(invoice_date_value),
+                    'amount_total': pdf_totals.get('amount_total') or self._safe_float(parsed.get('amount_total')),
+                    'vat_rate': pdf_totals.get('vat_rate') or self._safe_float(parsed.get('vat_rate')),
+                    'currency_id': currency.id,
+                    'ai_confidence': self._safe_float(parsed.get('confidence')),
+                    'error': f'Duplicate supplier invoice already exists: {duplicate.display_name}',
+                })
+                job._set_payload_dict({
+                    'openai': {
+                        'model': job.ai_model or job._default_ai_model(),
+                        'raw': parsed,
+                        'normalized': {
+                            'supplier_name': supplier_name,
+                            'supplier_code': parsed.get('supplier_code'),
+                            'supplier_vat': pdf_header.get('supplier_vat'),
+                            'invoice_number': invoice_number,
+                            'invoice_date': invoice_date_value,
+                            'invoice_due_date': invoice_due_date_value,
+                            'invoice_currency': currency_name or currency.name,
+                            'vat_rate': pdf_totals.get('vat_rate') or self._safe_float(parsed.get('vat_rate')),
+                            'amount_total': pdf_totals.get('amount_total') or self._safe_float(parsed.get('amount_total')),
+                            'confidence': self._safe_float(parsed.get('confidence')),
+                            'warnings': warnings,
+                            'document_type': document_type or 'invoice',
+                            'invoice_lines': [],
+                        },
+                        'pdf_header': pdf_header,
+                        'pdf_reconciliation': {
+                            'total_excl_vat': pdf_totals.get('total_excl_vat'),
+                            'vat_amount': pdf_totals.get('vat_amount'),
+                            'amount_total': pdf_totals.get('amount_total'),
+                            'fallback_line_count': len(fallback_lines),
+                            'ai_line_count': len(ai_lines),
+                        },
+                        'duplicate_of': duplicate.id,
+                    }
+                })
+                job._audit_log(
+                    action='custom',
+                    description=f'Invoice OCR extraction flagged as duplicate: {job.display_name}',
+                    new_values={
+                        'duplicate_of_job_id': duplicate.id,
+                        'duplicate_of_name': duplicate.display_name,
+                        'ai_model': job.ai_model or job._default_ai_model(),
+                        'partner_id': supplier.id if supplier else False,
+                        'invoice_number': invoice_number,
+                        'invoice_date': self._safe_date(invoice_date_value),
+                        'amount_total': pdf_totals.get('amount_total') or self._safe_float(parsed.get('amount_total')),
+                        'warnings': warnings,
+                    },
+                )
+                return
             if len(fallback_lines) > len(ai_lines):
                 lines = fallback_lines
                 warnings.append(
@@ -1274,35 +2113,31 @@ class InvoiceIngestJob(models.Model):
                     'unit_price': self._safe_float(line.get('unit_price'), default=0.0),
                     'matched_product_id': matched_product_id,
                     'matched_product_name': product.display_name if product else False,
-                    'match_status': (
-                        'matched' if matched_product_id else 'not_found'
-                    ),
+                    'match_status': 'matched' if matched_product_id else 'not_found',
                     'match_method': match_meta.get('method'),
                     'match_confidence': match_meta.get('confidence'),
                 })
-
-            currency = self.env.company.currency_id
-            currency_name = (parsed.get('invoice_currency') or '').strip().upper()
-            if currency_name:
-                currency = self.env['res.currency'].search([('name', '=', currency_name)], limit=1) or currency
 
             payload = job._get_payload_dict()
             payload['openai'] = {
                 'model': job.ai_model or job._default_ai_model(),
                 'raw': parsed,
                 'normalized': {
-                    'supplier_name': parsed.get('supplier_name'),
+                    'supplier_name': supplier_name,
                     'supplier_code': parsed.get('supplier_code'),
-                    'invoice_number': parsed.get('invoice_number'),
-                    'invoice_date': parsed.get('invoice_date'),
-                    'invoice_due_date': parsed.get('invoice_due_date'),
+                    'supplier_vat': pdf_header.get('supplier_vat'),
+                    'invoice_number': invoice_number,
+                    'invoice_date': invoice_date_value,
+                    'invoice_due_date': invoice_due_date_value,
                     'invoice_currency': currency_name or currency.name,
                     'vat_rate': pdf_totals.get('vat_rate') or self._safe_float(parsed.get('vat_rate')),
                     'amount_total': pdf_totals.get('amount_total') or self._safe_float(parsed.get('amount_total')),
                     'confidence': self._safe_float(parsed.get('confidence')),
                     'warnings': warnings,
+                    'document_type': document_type or 'invoice',
                     'invoice_lines': normalized_lines,
                 },
+                'pdf_header': pdf_header,
                 'pdf_reconciliation': {
                     'total_excl_vat': pdf_totals.get('total_excl_vat'),
                     'vat_amount': pdf_totals.get('vat_amount'),
@@ -1314,38 +2149,55 @@ class InvoiceIngestJob(models.Model):
             vals = {
                 'state': 'needs_review',
                 'partner_id': supplier.id if supplier else False,
-                'invoice_number': self._normalize_invoice_number(parsed.get('invoice_number')),
-                'invoice_date': self._safe_date(parsed.get('invoice_date')),
+                'invoice_number': invoice_number,
+                'invoice_date': self._safe_date(invoice_date_value),
                 'amount_total': pdf_totals.get('amount_total') or self._safe_float(parsed.get('amount_total')),
                 'vat_rate': pdf_totals.get('vat_rate') or self._safe_float(parsed.get('vat_rate')),
                 'currency_id': currency.id,
+                'document_type': document_type or 'invoice',
                 'ai_confidence': self._safe_float(parsed.get('confidence')),
                 'error': False,
             }
             job.write(vals)
             job._set_payload_dict(payload)
             job._replace_lines_from_normalized(normalized_lines)
+            job._audit_log(
+                action='custom',
+                description=f'Invoice OCR extraction completed: {job.display_name}',
+                new_values={
+                    'ai_model': job.ai_model or job._default_ai_model(),
+                    'ai_confidence': job.ai_confidence,
+                    'partner_id': supplier.id if supplier else False,
+                    'document_type': job.document_type,
+                    'used_pdf_fallback_lines': len(fallback_lines) > len(ai_lines),
+                    'warning_count': len(warnings),
+                    'warnings': warnings,
+                    **job._audit_line_summary(),
+                },
+            )
 
     def action_run(self):
+        old_states = {job.id: job.state for job in self}
+        self._process_ingest_job(raise_on_error=True)
         for job in self:
-            if job.state not in {'pending', 'failed', 'needs_review'}:
-                continue
-            job.write({'state': 'running', 'error': False})
-
-            # For now this is scaffolding: OCR/ANAF extraction should set header/lines,
-            # then create a draft bill and route to "needs_review".
-            if job.account_move_id:
-                job.write({'state': 'done'})
-            else:
-                job.write({'state': 'needs_review'})
+            job._audit_log(
+                action='custom',
+                description=f'Invoice ingest processing retried: {job.display_name}',
+                old_values={'state': old_states.get(job.id)},
+                new_values=job._audit_job_summary(),
+            )
+        return True
 
     def action_create_draft_vendor_bill(self):
         notifications = []
         for job in self:
+            duplicate_of = job._get_duplicate_of_job_id()
+            if duplicate_of:
+                raise UserError('This ingest job is flagged as a duplicate. Resolve the original invoice before creating a bill.')
+
             supplier = job._resolve_supplier_for_billing()
             if not supplier:
-                payload = job._get_payload_dict()
-                normalized = (payload.get('openai') or {}).get('normalized') or {}
+                normalized = job._get_normalized_invoice_payload()
                 hinted_name = (normalized.get('supplier_name') or '').strip()
                 hint = f' Extracted invoice supplier hint: {hinted_name}.' if hinted_name else ''
                 raise UserError(
@@ -1356,12 +2208,22 @@ class InvoiceIngestJob(models.Model):
             if not job.invoice_number:
                 raise UserError('Set invoice number first.')
 
+            payload = job._get_payload_dict()
+            move_type = job._infer_vendor_bill_move_type(payload=payload)
+            bill_origin = 'existing_linked'
+
             if job.account_move_id:
                 move = job.account_move_id
+                if move.move_type != move_type:
+                    if move.state != 'draft':
+                        raise UserError(
+                            'The linked vendor bill is already posted and its type does not match the imported document.'
+                        )
+                    move.write({'move_type': move_type})
             else:
                 existing_move = self.env['account.move'].search(
                     [
-                        ('move_type', '=', 'in_invoice'),
+                        ('move_type', '=', move_type),
                         ('partner_id', '=', supplier.id),
                         ('ref', '=', job.invoice_number),
                         ('state', '!=', 'cancel'),
@@ -1371,6 +2233,7 @@ class InvoiceIngestJob(models.Model):
                 )
                 if existing_move:
                     move = existing_move
+                    bill_origin = 'reused_existing'
                 else:
                     line_vals = []
                     if job.line_ids:
@@ -1389,12 +2252,7 @@ class InvoiceIngestJob(models.Model):
                                 vals['product_id'] = line.product_id.id
                             line_vals.append((0, 0, vals))
                     else:
-                        payload = job._get_payload_dict()
-                        parsed_lines = (
-                            payload.get('openai', {})
-                            .get('normalized', {})
-                            .get('invoice_lines', [])
-                        )
+                        parsed_lines = job._get_normalized_invoice_payload().get('invoice_lines', [])
                         for line in parsed_lines:
                             if not isinstance(line, dict):
                                 continue
@@ -1424,32 +2282,62 @@ class InvoiceIngestJob(models.Model):
                         ]
 
                     move = self.env['account.move'].create({
-                        'move_type': 'in_invoice',
+                        'move_type': move_type,
                         'partner_id': supplier.id,
                         'ref': job.invoice_number,
                         'invoice_date': job.invoice_date,
                         'invoice_line_ids': line_vals,
                     })
+                    bill_origin = 'created'
 
             job.write({'account_move_id': move.id, 'state': 'needs_review'})
 
-            receipt_info = job._auto_create_or_update_receipt(supplier=supplier)
+            if move_type == 'in_refund':
+                receipt_info = {
+                    'created': False,
+                    'updated_lines': 0,
+                    'validated': False,
+                    'reason': 'credit_note',
+                }
+            else:
+                receipt_info = job._auto_create_or_update_receipt(supplier=supplier)
 
-            if job.picking_id:
+            if job.picking_id and move_type != 'in_refund':
                 job.picking_id.with_context(skip_audit_log=True).write({
                     'supplier_invoice_id': move.id,
                     'supplier_invoice_number': job.invoice_number,
                     'supplier_invoice_date': job.invoice_date,
                 })
-            if receipt_info.get('reason') == 'no_matched_products':
+            if receipt_info.get('reason') == 'credit_note':
+                notifications.append(
+                    f"{job.invoice_number or job.id}: credit note / refund bill created; receipt sync skipped."
+                )
+            elif receipt_info.get('reason') == 'no_matched_products':
                 notifications.append(
                     f"{job.invoice_number or job.id}: bill created, but receipt skipped (no matched products)."
+                )
+            elif receipt_info.get('reason') == 'unmatched_lines':
+                notifications.append(
+                    f"{job.invoice_number or job.id}: bill ready; receipt has unmatched lines and was left open for review."
                 )
             else:
                 notifications.append(
                     f"{job.invoice_number or job.id}: bill ready; receipt {'created' if receipt_info.get('created') else 'updated'} "
                     f"({receipt_info.get('updated_lines', 0)} lines), validated={bool(receipt_info.get('validated'))}."
                 )
+            job._audit_log(
+                action='custom',
+                description=f'Invoice ingest vendor bill prepared: {job.display_name}',
+                new_values={
+                    'account_move_id': move.id,
+                    'move_type': move.move_type,
+                    'bill_origin': bill_origin,
+                    'partner_id': supplier.id,
+                    'picking_id': job.picking_id.id if job.picking_id else False,
+                    'receipt_info': receipt_info,
+                    **job._audit_line_summary(),
+                },
+            )
 
         if len(self) == 1 and notifications:
             return {
@@ -1460,6 +2348,7 @@ class InvoiceIngestJob(models.Model):
                     'message': notifications[0],
                     'type': 'success',
                     'sticky': False,
+                    'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
                 },
             }
         return True
@@ -1467,21 +2356,52 @@ class InvoiceIngestJob(models.Model):
     def action_sync_receipt_stock(self):
         notifications = []
         for job in self:
+            duplicate_of = job._get_duplicate_of_job_id()
+            if duplicate_of:
+                raise UserError('This ingest job is flagged as a duplicate. Resolve the original invoice before syncing receipt stock.')
+
             supplier = job._resolve_supplier_for_billing() or job.partner_id
-            receipt_info = job._auto_create_or_update_receipt(supplier=supplier)
-            if job.account_move_id and job.picking_id:
+            move_type = job._infer_vendor_bill_move_type()
+            if move_type == 'in_refund':
+                receipt_info = {
+                    'created': False,
+                    'updated_lines': 0,
+                    'validated': False,
+                    'reason': 'credit_note',
+                }
+            else:
+                receipt_info = job._auto_create_or_update_receipt(supplier=supplier)
+            if job.account_move_id and job.picking_id and move_type != 'in_refund':
                 job.picking_id.with_context(skip_audit_log=True).write({
                     'supplier_invoice_id': job.account_move_id.id,
                     'supplier_invoice_number': job.invoice_number,
                     'supplier_invoice_date': job.invoice_date,
                 })
-            if receipt_info.get('reason') == 'no_matched_products':
+            if receipt_info.get('reason') == 'credit_note':
+                notifications.append(f"{job.invoice_number or job.id}: receipt sync skipped for credit note / refund.")
+            elif receipt_info.get('reason') == 'no_matched_products':
                 notifications.append(f"{job.invoice_number or job.id}: no matched lines, nothing received.")
+            elif receipt_info.get('reason') == 'unmatched_lines':
+                notifications.append(
+                    f"{job.invoice_number or job.id}: receipt updated, but unmatched lines remain; validation left pending review."
+                )
             else:
                 notifications.append(
                     f"{job.invoice_number or job.id}: receipt {'created' if receipt_info.get('created') else 'updated'} "
                     f"({receipt_info.get('updated_lines', 0)} lines), validated={bool(receipt_info.get('validated'))}."
                 )
+            job._audit_log(
+                action='custom',
+                description=f'Invoice ingest receipt sync executed: {job.display_name}',
+                new_values={
+                    'partner_id': supplier.id if supplier else False,
+                    'move_type': move_type,
+                    'picking_id': job.picking_id.id if job.picking_id else False,
+                    'account_move_id': job.account_move_id.id if job.account_move_id else False,
+                    'receipt_info': receipt_info,
+                    **job._audit_line_summary(),
+                },
+            )
 
         if len(self) == 1 and notifications:
             return {
@@ -1492,21 +2412,38 @@ class InvoiceIngestJob(models.Model):
                     'message': notifications[0],
                     'type': 'success',
                     'sticky': False,
+                    'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
                 },
             }
         return True
 
     @api.model
     def cron_process_jobs(self):
-        job = self.search([('state', '=', 'pending')], order='id asc', limit=1)
+        job = self.search([('state', 'in', ['pending', 'failed'])], order='id asc', limit=1)
         if job:
-            job.action_run()
+            job._process_ingest_job()
 
 
 class InvoiceIngestJobLine(models.Model):
     _name = 'invoice.ingest.job.line'
     _description = 'Invoice Ingest Job Line'
     _order = 'sequence, id'
+    _AUDIT_FIELDS = {
+        'sequence',
+        'quantity',
+        'product_code',
+        'product_code_raw',
+        'supplier_brand',
+        'supplier_brand_id',
+        'product_description',
+        'unit_price',
+        'discount_percent',
+        'vat_rate',
+        'markup_percent',
+        'product_id',
+        'match_method',
+        'match_confidence',
+    }
 
     job_id = fields.Many2one('invoice.ingest.job', required=True, ondelete='cascade')
     sequence = fields.Integer(default=10)
@@ -1577,6 +2514,14 @@ class InvoiceIngestJobLine(models.Model):
         string='Cod Intern',
         readonly=True,
     )
+    label_display_name = fields.Char(
+        string='Denumire',
+        compute='_compute_label_display_fields',
+    )
+    label_barcode_value = fields.Char(
+        string='Cod de bare',
+        compute='_compute_label_display_fields',
+    )
     match_method = fields.Char('Match Method')
     match_confidence = fields.Float('Match Confidence (%)')
     match_status = fields.Selection(
@@ -1588,6 +2533,53 @@ class InvoiceIngestJobLine(models.Model):
         compute='_compute_match_status',
         store=True,
     )
+
+    def _audit_snapshot(self, field_names=None):
+        self.ensure_one()
+        tracked_fields = field_names or self._AUDIT_FIELDS
+        snapshot = {}
+        for field_name in tracked_fields:
+            if field_name not in self._fields:
+                continue
+            value = self[field_name]
+            if isinstance(value, models.BaseModel):
+                snapshot[field_name] = value.ids
+            else:
+                snapshot[field_name] = value
+        return snapshot
+
+    def write(self, vals):
+        context = dict(self.env.context or {})
+        tracked_fields = [field_name for field_name in vals.keys() if field_name in self._AUDIT_FIELDS]
+        old_by_id = {}
+        if tracked_fields and context.get('skip_audit_log') is not True:
+            old_by_id = {line.id: line._audit_snapshot(tracked_fields) for line in self}
+
+        result = super().write(vals)
+
+        if tracked_fields and context.get('skip_audit_log') is not True:
+            for line in self.filtered('job_id'):
+                old_values = dict(old_by_id.get(line.id) or {})
+                new_values = line._audit_snapshot(tracked_fields)
+                line.job_id._audit_log(
+                    action='custom',
+                    description=(
+                        f'Invoice ingest line updated: {line.job_id.display_name} / '
+                        f'line {line.sequence}'
+                    ),
+                    old_values={
+                        'line_id': line.id,
+                        'sequence': old_values.get('sequence', line.sequence),
+                        **old_values,
+                    },
+                    new_values={
+                        'line_id': line.id,
+                        'sequence': line.sequence,
+                        **new_values,
+                    },
+                )
+
+        return result
 
     @api.model
     def _default_markup_percent(self):
@@ -1639,6 +2631,27 @@ class InvoiceIngestJobLine(models.Model):
                     line.match_status = 'manual'
             else:
                 line.match_status = 'not_found'
+
+    @api.depends(
+        'product_id',
+        'product_id.display_name',
+        'product_id.barcode',
+        'product_id.barcode_internal',
+        'product_description',
+        'product_code',
+        'product_code_raw',
+    )
+    def _compute_label_display_fields(self):
+        for line in self:
+            line.label_display_name = line.product_id.display_name or line.product_description or ''
+            line.label_barcode_value = (
+                line.product_id.barcode
+                or line.product_id.barcode_internal
+                or line.product_code
+                or line.product_code_raw
+                or line.product_id.default_code
+                or ''
+            )
 
     @api.onchange('product_code')
     def _onchange_product_code(self):
@@ -1720,7 +2733,7 @@ class InvoiceIngestJobLine(models.Model):
             if product_id:
                 canonical_brand, canonical_supplier_id = line.job_id._brand_from_matched_product(product)
                 canonical_brand = canonical_brand or parsed_supplier_brand
-            line.write({
+            line.with_context(skip_audit_log=True).write({
                 'product_code_raw': line.product_code_raw or parsed.get('product_code_raw') or line.product_code,
                 'product_code': parsed_code,
                 'supplier_brand': canonical_brand,
@@ -1729,16 +2742,80 @@ class InvoiceIngestJobLine(models.Model):
                 'match_method': meta.get('method'),
                 'match_confidence': meta.get('confidence', 0.0),
             })
+            line.job_id._audit_log(
+                action='custom',
+                description=f'Invoice ingest line match attempted: {line.job_id.display_name} / line {line.sequence}',
+                new_values={
+                    'line_id': line.id,
+                    'sequence': line.sequence,
+                    'product_code': line.product_code,
+                    'supplier_brand': line.supplier_brand,
+                    'product_id': line.product_id.id if line.product_id else False,
+                    'match_method': line.match_method,
+                    'match_confidence': line.match_confidence,
+                    'match_status': line.match_status,
+                },
+            )
         return True
 
     def action_clear_match(self):
-        self.write({
+        snapshots = {
+            line.id: {
+                'job_id': line.job_id.id if line.job_id else False,
+                'sequence': line.sequence,
+                'product_id': line.product_id.id if line.product_id else False,
+                'supplier_brand_id': line.supplier_brand_id,
+                'match_method': line.match_method,
+                'match_confidence': line.match_confidence,
+            }
+            for line in self
+        }
+        self.with_context(skip_audit_log=True).write({
             'product_id': False,
             'supplier_brand_id': False,
             'match_method': False,
             'match_confidence': 0.0,
         })
+        for line in self.filtered('job_id'):
+            line.job_id._audit_log(
+                action='custom',
+                description=f'Invoice ingest line match cleared: {line.job_id.display_name} / line {line.sequence}',
+                old_values=snapshots.get(line.id),
+                new_values={
+                    'line_id': line.id,
+                    'sequence': line.sequence,
+                    'product_id': False,
+                    'supplier_brand_id': False,
+                    'match_method': False,
+                    'match_confidence': 0.0,
+                    'match_status': line.match_status,
+                },
+            )
         return True
+
+    def action_generate_label(self):
+        self.ensure_one()
+        product_model = self.env['product.product']
+        product = self.product_id
+        if product:
+            label = product._prepare_label_payload(
+                name=self.product_description or product.display_name,
+                barcode=self.label_barcode_value,
+                product_code=self.product_code or self.product_code_raw or product.supplier_code or product.default_code,
+                internal_code=self.matched_internal_code or product.default_code,
+                price=self.sale_price_incl_vat,
+                brand=self.supplier_brand or product.tecdoc_supplier_name or product.main_supplier_id.name,
+            )
+        else:
+            label = product_model._prepare_label_payload_from_values(
+                name=self.product_description,
+                barcode=self.label_barcode_value,
+                product_code=self.product_code or self.product_code_raw,
+                internal_code='',
+                price=self.sale_price_incl_vat,
+                brand=self.supplier_brand,
+            )
+        return product_model._action_print_labels_report([label])
 
 
 class InvoiceIngestUploadWizard(models.TransientModel):
@@ -1748,15 +2825,6 @@ class InvoiceIngestUploadWizard(models.TransientModel):
     pdf_file = fields.Binary('PDF File', required=True)
     pdf_filename = fields.Char('Filename')
     supplier_id = fields.Many2one('res.partner', string='Supplier (Optional)')
-    ai_model = fields.Char(
-        string='AI Model',
-        default=lambda self: self.env['invoice.ingest.job']._default_ai_model(),
-    )
-    auto_extract = fields.Boolean(
-        string='Run AI Extraction Immediately',
-        default=True,
-        help='If enabled, the system will run OpenAI extraction right after upload.',
-    )
 
     def action_import_pdf(self):
         self.ensure_one()
@@ -1764,33 +2832,50 @@ class InvoiceIngestUploadWizard(models.TransientModel):
             raise UserError('Please upload a PDF first.')
         filename = (self.pdf_filename or 'invoice.pdf').strip()
         mimetype = 'application/pdf' if filename.lower().endswith('.pdf') else 'application/octet-stream'
+        file_checksum = hashlib.sha256(base64.b64decode(self.pdf_file)).hexdigest()
 
-        job = self.env['invoice.ingest.job'].create({
-            'name': f'OCR - {filename}',
-            'source': 'ocr',
-            'state': 'pending',
-            'partner_id': self.supplier_id.id if self.supplier_id else False,
-            'ai_model': self.ai_model or self.env['invoice.ingest.job']._default_ai_model(),
-        })
+        job = self.env['invoice.ingest.job'].search([
+            ('source', '=', 'ocr'),
+            ('external_id', '=', file_checksum),
+        ], limit=1)
+        reused_existing_job = bool(job)
+        if not job:
+            job = self.env['invoice.ingest.job'].create({
+                'name': f'OCR - {filename}',
+                'source': 'ocr',
+                'external_id': file_checksum,
+                'state': 'pending',
+                'partner_id': self.supplier_id.id if self.supplier_id else False,
+                'ai_model': self.env['invoice.ingest.job']._default_ai_model(),
+            })
 
-        attachment = self.env['ir.attachment'].create({
-            'name': filename,
-            'type': 'binary',
-            'datas': self.pdf_file,
-            'mimetype': mimetype,
-            'res_model': 'invoice.ingest.job',
-            'res_id': job.id,
-        })
-        job.write({'attachment_id': attachment.id})
+        if not job.attachment_id:
+            attachment = self.env['ir.attachment'].create({
+                'name': filename,
+                'type': 'binary',
+                'datas': self.pdf_file,
+                'mimetype': mimetype,
+                'res_model': 'invoice.ingest.job',
+                'res_id': job.id,
+            })
+            job.write({'attachment_id': attachment.id})
 
-        if self.auto_extract:
-            try:
-                job.action_extract_with_openai()
-            except Exception as exc:  # noqa: BLE001
-                job.write({
-                    'state': 'failed',
-                    'error': f'AI extraction failed after upload: {exc}',
-                })
+        job._audit_log(
+            action='custom',
+            description=f'Invoice OCR import queued: {job.display_name}',
+            new_values={
+                'source': job.source,
+                'attachment_id': job.attachment_id.id if job.attachment_id else False,
+                'partner_id': job.partner_id.id if job.partner_id else False,
+                'external_id': job.external_id,
+                'reused_existing_job': reused_existing_job,
+            },
+        )
+
+        db_name = self.env.cr.dbname
+        self.env.cr.postcommit.add(
+            lambda db_name=db_name, job_id=job.id: _start_invoice_ingest_background_worker(db_name, job_id)
+        )
 
         return {
             'name': 'Invoice Ingest Job',

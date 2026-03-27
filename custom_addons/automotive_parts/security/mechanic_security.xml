@@ -14,7 +14,7 @@
     <record id="rule_mechanic_portal_sale_order" model="ir.rule">
         <field name="name">Mechanic Portal Sales Orders</field>
         <field name="model_id" ref="sale.model_sale_order"/>
-        <field name="domain_force">[('message_partner_ids', 'child_of', [user.commercial_partner_id.id])]</field>
+        <field name="domain_force">[('mechanic_partner_id', 'child_of', [user.commercial_partner_id.id])]</field>
         <field name="groups" eval="[(4, ref('automotive_parts.group_mechanic_portal'))]"/>
         <field name="perm_read" eval="True"/>
         <field name="perm_write" eval="False"/>
@@ -25,11 +25,22 @@
     <record id="rule_mechanic_portal_sale_order_line" model="ir.rule">
         <field name="name">Mechanic Portal Sales Order Lines</field>
         <field name="model_id" ref="sale.model_sale_order_line"/>
-        <field name="domain_force">[('order_id.message_partner_ids', 'child_of', [user.commercial_partner_id.id])]</field>
+        <field name="domain_force">[('order_id.mechanic_partner_id', 'child_of', [user.commercial_partner_id.id])]</field>
         <field name="groups" eval="[(4, ref('automotive_parts.group_mechanic_portal'))]"/>
         <field name="perm_read" eval="True"/>
         <field name="perm_write" eval="False"/>
         <field name="perm_create" eval="False"/>
+        <field name="perm_unlink" eval="False"/>
+    </record>
+
+    <record id="rule_mechanic_portal_request" model="ir.rule">
+        <field name="name">Mechanic Portal Requests</field>
+        <field name="model_id" ref="model_mechanic_portal_request"/>
+        <field name="domain_force">[('partner_id', 'child_of', [user.commercial_partner_id.id])]</field>
+        <field name="groups" eval="[(4, ref('automotive_parts.group_mechanic_portal'))]"/>
+        <field name="perm_read" eval="True"/>
+        <field name="perm_write" eval="False"/>
+        <field name="perm_create" eval="True"/>
         <field name="perm_unlink" eval="False"/>
     </record>
 </odoo>

@@ -284,9 +284,11 @@
         <field name="arch" type="xml">
             <list string="Audit Log" create="false" delete="false">
                 <field name="create_date"/>
+                <field name="company_id" optional="hide"/>
                 <field name="user_id"/>
                 <field name="action"/>
-                <field name="model_name"/>
+                <field name="model_description"/>
+                <field name="record_display_name"/>
                 <field name="record_id"/>
                 <field name="description"/>
             </list>
@@ -302,9 +304,12 @@
                 <sheet>
                     <group>
                         <group>
+                            <field name="company_id"/>
                             <field name="user_id"/>
                             <field name="action"/>
                             <field name="model_name"/>
+                            <field name="model_description"/>
+                            <field name="record_display_name"/>
                             <field name="record_id"/>
                         </group>
                         <group>
@@ -321,11 +326,43 @@
         </field>
     </record>
 
+    <record id="view_audit_log_search" model="ir.ui.view">
+        <field name="name">automotive.audit.log.search</field>
+        <field name="model">automotive.audit.log</field>
+        <field name="arch" type="xml">
+            <search string="Audit Log">
+                <field name="create_date"/>
+                <field name="company_id"/>
+                <field name="user_id"/>
+                <field name="action"/>
+                <field name="model_name"/>
+                <field name="record_display_name"/>
+                <filter string="Invoice Ingest" name="invoice_ingest"
+                        domain="[('model_name', 'in', ['invoice.ingest.job', 'invoice.ingest.job.line'])]"/>
+                <filter string="Mechanic Requests" name="mechanic_requests"
+                        domain="[('model_name', '=', 'mechanic.portal.request')]"/>
+                <filter string="ANAF" name="anaf"
+                        domain="[('model_name', '=', 'anaf.efactura')]"/>
+                <filter string="Creates" name="creates" domain="[('action', '=', 'create')]"/>
+                <filter string="Changes" name="changes" domain="[('action', '=', 'write')]"/>
+                <filter string="Custom Actions" name="custom_actions" domain="[('action', '=', 'custom')]"/>
+                <group expand="0" string="Group By">
+                    <filter string="Company" name="group_company" context="{'group_by': 'company_id'}"/>
+                    <filter string="User" name="group_user" context="{'group_by': 'user_id'}"/>
+                    <filter string="Model" name="group_model" context="{'group_by': 'model_name'}"/>
+                    <filter string="Action" name="group_action" context="{'group_by': 'action'}"/>
+                    <filter string="Date" name="group_date" context="{'group_by': 'create_date:day'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
     <!-- Audit Log Action -->
     <record id="action_audit_log" model="ir.actions.act_window">
         <field name="name">Audit Log</field>
         <field name="path">automotive-audit-log</field>
         <field name="res_model">automotive.audit.log</field>
         <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="view_audit_log_search"/>
     </record>
 </odoo>

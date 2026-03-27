@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
+import re
 from odoo import models, fields, api
 from odoo.exceptions import UserError
 from odoo.tools.float_utils import float_compare, float_is_zero
+from math import ceil
 
 
 class StockPicking(models.Model):
@@ -37,6 +39,52 @@ class StockPicking(models.Model):
 
     # Quantity differences
     has_differences = fields.Boolean('Are Diferențe', compute='_compute_has_differences')
+
+    @api.model
+    def _normalize_supplier_invoice_reference(self, value):
+        return re.sub(r'[^A-Z0-9]+', '', (value or '').strip().upper())
+
+    def _is_automotive_incoming_receipt(self):
+        self.ensure_one()
+        return self.picking_type_code == 'incoming' and bool(
+            self.supplier_invoice_id
+            or self.supplier_invoice_number
+            or self.supplier_invoice_date
+        )
+
+    def _check_supplier_invoice_integrity(self):
+        """Keep NIR/supplier invoice links coherent on incoming receipts."""
+        for picking in self.filtered(lambda p: p.picking_type_code == 'incoming'):
+            supplier_invoice = picking.supplier_invoice_id
+
+            if not picking._is_automotive_incoming_receipt():
+                continue
+
+            if supplier_invoice and supplier_invoice.move_type != 'in_invoice':
+                raise UserError('The linked supplier document must be a vendor bill.')
+
+            if supplier_invoice and not picking.partner_id:
+                raise UserError('Set the supplier on the receipt before linking the supplier invoice.')
+
+            if supplier_invoice and picking.partner_id and supplier_invoice.partner_id != picking.partner_id:
+                raise UserError('The linked supplier invoice must belong to the same supplier as the receipt.')
+
+            if supplier_invoice and picking.supplier_invoice_number:
+                invoice_references = {
+                    self._normalize_supplier_invoice_reference(supplier_invoice.name),
+                    self._normalize_supplier_invoice_reference(supplier_invoice.ref),
+                }
+                picking_reference = self._normalize_supplier_invoice_reference(picking.supplier_invoice_number)
+                if picking_reference and picking_reference not in invoice_references:
+                    raise UserError('The supplier invoice number does not match the linked vendor bill.')
+
+            if supplier_invoice and picking.supplier_invoice_date and supplier_invoice.invoice_date:
+                if picking.supplier_invoice_date != supplier_invoice.invoice_date:
+                    raise UserError('The supplier invoice date does not match the linked vendor bill.')
+
+            if not supplier_invoice and (picking.supplier_invoice_number or picking.supplier_invoice_date):
+                if not picking.partner_id:
+                    raise UserError('Set the supplier before recording supplier invoice details on an incoming receipt.')
 
     def _audit_snapshot(self, field_names):
         self.ensure_one()
@@ -108,6 +156,10 @@ class StockPicking(models.Model):
                 new_values=picking._audit_snapshot(tracked_fields),
             )
 
+        incoming_pickings = pickings.filtered(lambda picking: picking._is_automotive_incoming_receipt())
+        if incoming_pickings:
+            incoming_pickings._check_supplier_invoice_integrity()
+
         return pickings
 
     def action_scan_barcode(self):
@@ -124,26 +176,17 @@ class StockPicking(models.Model):
         }
 
     def action_print_labels(self):
-        """Print labels for received products"""
+        """Print labels for the products on this reception."""
         self.ensure_one()
-
-        # This will trigger label printing for all products in this reception
-        labels_count = 0
-
+        labels = []
+        product_model = self.env['product.product']
         for move in self.move_ids_without_package:
             if move.product_id:
-                # Generate label (placeholder - integrate with real printer)
-                labels_count += 1
-
-        return {
-            'type': 'ir.actions.client',
-            'tag': 'display_notification',
-            'params': {
-                'title': 'Labels Generated',
-                'message': f'{labels_count} labels ready for printing',
-                'type': 'success',
-            }
-        }
+                qty_source = move.quantity or move.product_uom_qty or 0.0
+                copies = max(1, int(ceil(qty_source))) if qty_source else 1
+                for _idx in range(copies):
+                    labels.append(move.product_id._prepare_label_payload())
+        return product_model._action_print_labels_report(labels)
 
     def action_link_invoice(self):
         """Link supplier invoice from ANAF"""
@@ -160,6 +203,16 @@ class StockPicking(models.Model):
 
     def button_validate(self):
         """Override validate to update order statuses"""
+        incoming_without_supplier = self.filtered(
+            lambda picking: picking.picking_type_code == 'incoming' and picking.state not in {'done', 'cancel'} and not picking.partner_id
+        )
+        if incoming_without_supplier:
+            raise UserError('Incoming receptions require a supplier before validation.')
+
+        incoming_pickings = self.filtered(lambda picking: picking._is_automotive_incoming_receipt())
+        if incoming_pickings:
+            incoming_pickings._check_supplier_invoice_integrity()
+
         result = super(StockPicking, self).button_validate()
 
         # Update related sales orders
@@ -206,6 +259,10 @@ class StockPicking(models.Model):
                     old_values=old_by_id.get(picking.id),
                     new_values=picking._audit_snapshot(tracked_fields),
                 )
+
+        incoming_pickings = self.filtered(lambda picking: picking._is_automotive_incoming_receipt())
+        if incoming_pickings:
+            incoming_pickings._check_supplier_invoice_integrity()
 
         return result
 

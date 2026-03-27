@@ -27,16 +27,12 @@
                 <header>
                     <button name="action_open_upload_wizard" type="object" class="btn-primary"
                             string="Import AI (PDF)"/>
-                    <button name="action_open_react_view" type="object" class="btn-secondary"
-                            string="Modern React View"/>
-                    <button name="action_run" type="object" class="btn-primary" string="Run"
-                            invisible="state not in ('pending','failed','needs_review')"/>
-                    <button name="action_extract_with_openai" type="object" class="btn-primary"
-                            string="Extract with OpenAI" invisible="attachment_id == False"/>
+                    <button name="action_run" type="object" class="btn-primary" string="Retry Processing"
+                            invisible="state not in ('pending','failed')"/>
                     <button name="action_create_draft_vendor_bill" type="object" class="btn-secondary"
                             string="Create Draft Vendor Bill" invisible="account_move_id != False"/>
                     <button name="action_sync_receipt_stock" type="object" class="btn-secondary"
-                            string="Sync Receipt + Stock" invisible="not line_ids"/>
+                            string="Sync Receipt + Stock" invisible="not line_ids or receipt_sync_state == 'synced'"/>
                     <field name="state" widget="statusbar" statusbar_visible="pending,running,needs_review,done,failed"/>
                 </header>
                 <sheet>
@@ -44,9 +40,10 @@
                         <group>
                             <field name="name"/>
                             <field name="source"/>
-                            <field name="picking_id"/>
+                            <field name="document_type"/>
+                            <field name="picking_id" string="Stock Receipt (Optional)"/>
+                            <field name="receipt_sync_state" readonly="1"/>
                             <field name="attachment_id"/>
-                            <field name="ai_model"/>
                             <field name="ai_confidence" readonly="1"/>
                         </group>
                         <group>
@@ -55,33 +52,30 @@
                             <field name="invoice_date"/>
                             <field name="vat_rate"/>
                             <field name="amount_total"/>
-                            <field name="account_move_id"/>
+                            <field name="account_move_id" string="Linked Vendor Bill"/>
                         </group>
                     </group>
                     <group string="Extracted Lines" class="o_invoice_ingest_lines_wrap" invisible="not line_ids">
                         <field name="line_ids" nolabel="1">
                             <list editable="bottom" class="o_invoice_ingest_lines_table">
                                 <field name="sequence" widget="handle"/>
-                                <field name="product_code"/>
+                                <field name="label_display_name" string="Denumire" readonly="1"/>
+                                <field name="label_barcode_value" string="Cod de bare" readonly="1"/>
+                                <field name="product_code" string="Cod produs"/>
+                                <field name="matched_internal_code" string="Cod intern" readonly="1"/>
                                 <field name="supplier_brand"/>
                                 <field name="supplier_brand_id" optional="hide"/>
-                                <field name="product_description"/>
+                                <field name="product_description" optional="hide"/>
                                 <field name="quantity"/>
                                 <field name="unit_price"/>
                                 <field name="unit_price_incl_vat" readonly="1"/>
-                                <field name="matched_ean" readonly="1"/>
-                                <field name="matched_internal_code" readonly="1"/>
                                 <field name="product_id"/>
                                 <field name="match_status" readonly="1"/>
                                 <button name="action_try_match" type="object" icon="fa-search" string="" title="Try match"/>
                                 <button name="action_clear_match" type="object" icon="fa-eraser" string="" title="Clear match"/>
+                                <button name="action_generate_label" type="object" string="Genereaza eticheta" title="Genereaza eticheta"/>
                             </list>
                         </field>
-                    </group>
-                    <group string="Diagnostics" invisible="payload_json == False and error == False">
-                        <field name="external_id"/>
-                        <field name="error" widget="text"/>
-                        <field name="payload_json" widget="text"/>
                     </group>
                 </sheet>
             </form>
@@ -108,11 +102,9 @@
                     </group>
                     <group>
                         <field name="supplier_id"/>
-                        <field name="ai_model"/>
-                        <field name="auto_extract"/>
                     </group>
                     <div class="text-muted">
-                        Drop one PDF and click Import. AI extraction can run automatically.
+                        Drop one PDF and click Import. The default AI extraction runs automatically in the background.
                     </div>
                 </sheet>
                 <footer>

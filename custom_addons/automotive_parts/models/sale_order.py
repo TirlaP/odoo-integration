@@ -24,6 +24,13 @@ class SaleOrder(models.Model):
         ('internal', 'Comandă Internă'),
         ('external', 'Comandă Externă'),
     ], string='Tip Comandă', default='external')
+    mechanic_partner_id = fields.Many2one(
+        'res.partner',
+        string='Mecanic',
+        domain="[('client_type', '=', 'mechanic'), ('active', '=', True)]",
+        index=True,
+        help='Mechanic who should see this quotation/order in the dedicated portal.',
+    )
 
     # Delivery information
     estimated_delivery_date = fields.Date('Dată Livrare Estimată')
@@ -97,9 +104,18 @@ class SaleOrder(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         """Override create to reserve stock"""
+        partner_model = self.env['res.partner']
+        for vals in vals_list:
+            if vals.get('mechanic_partner_id') or not vals.get('partner_id'):
+                continue
+            partner = partner_model.browse(vals['partner_id'])
+            if partner.client_type == 'mechanic':
+                vals['mechanic_partner_id'] = partner.commercial_partner_id.id
+
         orders = super().create(vals_list)
 
         for order in orders:
+            order._sync_mechanic_followers()
             # Reserve stock automatically
             if order.state in ['sale', 'done']:
                 order._reserve_stock()
@@ -126,8 +142,15 @@ class SaleOrder(models.Model):
         old_by_id = {}
         if context.get('skip_audit_log') is not True:
             old_by_id = {order.id: order._audit_snapshot(tracked_fields) for order in self}
+        old_mechanic_partner_ids = {}
+        if 'mechanic_partner_id' in vals:
+            old_mechanic_partner_ids = {
+                order.id: order._get_mechanic_portal_partner().id for order in self
+            }
 
         result = super().write(vals)
+        if 'mechanic_partner_id' in vals:
+            self._sync_mechanic_followers(old_mechanic_partner_ids=old_mechanic_partner_ids)
 
         skip_auto_state_update = context.get('skip_auto_state_update') is True or 'auto_state' in vals
         if not skip_auto_state_update:
@@ -153,6 +176,7 @@ class SaleOrder(models.Model):
             'order_type',
             'estimated_delivery_date',
             'responsible_user_id',
+            'mechanic_partner_id',
             'observations',
             'pricelist_id',
             'payment_term_id',
@@ -165,6 +189,48 @@ class SaleOrder(models.Model):
             if order.auto_state in {'ready_prep', 'delivered'}:
                 raise UserError('Comanda nu mai poate fi modificată după starea „Gata de pregătire”.')
 
+    @api.onchange('partner_id')
+    def _onchange_partner_id_set_mechanic(self):
+        for order in self:
+            if order.partner_id and order.partner_id.client_type == 'mechanic':
+                order.mechanic_partner_id = order.partner_id.commercial_partner_id
+
+    def _get_mechanic_portal_partner(self):
+        self.ensure_one()
+        return self.mechanic_partner_id.commercial_partner_id
+
+    def _sync_mechanic_followers(self, old_mechanic_partner_ids=None):
+        old_mechanic_partner_ids = old_mechanic_partner_ids or {}
+        for order in self:
+            new_partner = order._get_mechanic_portal_partner()
+            old_partner_id = old_mechanic_partner_ids.get(order.id)
+            if old_partner_id and old_partner_id != new_partner.id:
+                order.message_unsubscribe(partner_ids=[old_partner_id])
+            if new_partner and new_partner not in order.message_partner_ids:
+                order.message_subscribe(partner_ids=[new_partner.id])
+
+    def _post_portal_visible_event(self, body):
+        self.ensure_one()
+        self.message_post(
+            body=body,
+            message_type='comment',
+            subtype_xmlid='mail.mt_comment',
+        )
+
+    def _get_ready_notification_partner(self):
+        self.ensure_one()
+        return self.mechanic_partner_id or self.partner_id
+
+    def _get_ready_notification_email(self):
+        self.ensure_one()
+        partner = self._get_ready_notification_partner()
+        return (partner.email or '').strip()
+
+    def _get_ready_notification_name(self):
+        self.ensure_one()
+        partner = self._get_ready_notification_partner()
+        return partner.name or ''
+
     def _reserve_stock(self):
         """Reserve stock for order lines"""
         for order in self:
@@ -174,11 +240,11 @@ class SaleOrder(models.Model):
                     available = line.product_id.stock_available
 
                     if available < line.product_uom_qty:
-                        # Create notification
-                        order.message_post(
-                            body=f'Insufficient stock for {line.product_id.name}. '
-                                 f'Available: {available}, Required: {line.product_uom_qty}',
-                            message_type='notification'
+                        order._post_portal_visible_event(
+                            body=(
+                                f'Stoc insuficient pentru {line.product_id.name}. '
+                                f'Disponibil: {available}, necesar: {line.product_uom_qty}.'
+                            )
                         )
 
     def _update_auto_state(self):
@@ -236,9 +302,8 @@ class SaleOrder(models.Model):
         new_label = state_labels.get(new_state, new_state)
         mode_label = 'automat' if origin == 'automatic' else 'manual'
 
-        self.message_post(
+        self._post_portal_visible_event(
             body=f'Starea comenzii a fost actualizata {mode_label}: {previous_label} -> {new_label}.',
-            message_type='notification',
         )
         self.env['automotive.audit.log'].log_change(
             action='custom',
@@ -289,7 +354,8 @@ class SaleOrder(models.Model):
         company = self.company_id or self.env.company
         if not company.automotive_ready_email_enabled:
             return
-        if not self.partner_id.email:
+        recipient_email = self._get_ready_notification_email()
+        if not recipient_email:
             return
 
         template = (
@@ -299,7 +365,11 @@ class SaleOrder(models.Model):
         if not template:
             return
 
-        self.with_context(force_send=True).message_post_with_source(
+        self.with_context(
+            force_send=True,
+            automotive_ready_email_to=recipient_email,
+            automotive_ready_recipient_name=self._get_ready_notification_name(),
+        ).message_post_with_source(
             template,
             email_layout_xmlid='mail.mail_notification_layout_with_responsible_signature',
             subtype_xmlid='mail.mt_comment',
@@ -320,6 +390,15 @@ class SaleOrder(models.Model):
             if float_compare(delivered, needed, precision_rounding=rounding) < 0:
                 return False
         return True
+
+    def _refresh_automotive_stock_state(self):
+        lines = self.mapped('order_line').filtered(lambda line: line.product_id and line.product_id.is_storable)
+        if lines:
+            lines._compute_qty_reserved()
+            lines._compute_qty_received()
+            lines._compute_line_state()
+        self._compute_stock_status()
+        self._update_auto_state()
 
     def _get_portal_mechanic_status(self):
         """Return portal-ready automotive status metadata for website pages."""
@@ -493,6 +572,31 @@ class SaleOrderLine(models.Model):
     def _get_ready_qty(self):
         self.ensure_one()
         return max(self.qty_reserved, self.qty_received)
+
+    def _get_supply_target_moves(self, receipt_location):
+        self.ensure_one()
+        if not self.product_id or not self.product_id.is_storable:
+            return self.env['stock.move']
+
+        receipt_location = receipt_location if receipt_location and receipt_location.exists() else False
+        if not receipt_location:
+            return self.env['stock.move']
+
+        delivery_moves = self.move_ids.filtered(
+            lambda move: move.state not in {'done', 'cancel'}
+            and not move.scrapped
+            and move.location_dest_id.usage == 'customer'
+        )
+        if not delivery_moves:
+            return self.env['stock.move']
+
+        candidates = delivery_moves | self._collect_origin_moves(delivery_moves)
+        return candidates.filtered(
+            lambda move: move.state not in {'done', 'cancel'}
+            and not move.scrapped
+            and move.product_id == self.product_id
+            and move.location_id == receipt_location
+        ).sorted(lambda move: (move.priority or '0', move.date or fields.Datetime.now(), move.id))
 
     def _collect_origin_moves(self, moves):
         """Collect upstream moves recursively, keeping only each move once."""
