@@ -12,6 +12,7 @@ from . import tecdoc_fast_import
 from . import tecdoc_fast_purge
 from . import anaf_efactura
 from . import invoice_ingest
+from . import automotive_payment_allocation
 from . import mechanic_portal_request
 from . import commercial_document_archive
 from . import audit_log

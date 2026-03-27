@@ -15,6 +15,10 @@
                         invisible="invoice_count == 0">
                     <field name="invoice_count" widget="statinfo" string="Facturi"/>
                 </button>
+                <button name="action_view_automotive_payment_allocations" type="object" class="oe_stat_button" icon="fa-credit-card"
+                        invisible="automotive_payment_count == 0">
+                    <field name="automotive_payment_count" widget="statinfo" string="Plăți Auto"/>
+                </button>
             </xpath>
 
             <!-- Add automotive fields after partner_id -->
@@ -33,6 +37,12 @@
                        decoration-success="stock_status == 'full'"
                        decoration-warning="stock_status == 'partial'"
                        decoration-danger="stock_status == 'none'"/>
+                <field name="automotive_payment_status" widget="badge"
+                       decoration-success="automotive_payment_status == 'paid'"
+                       decoration-warning="automotive_payment_status == 'partial'"
+                       decoration-danger="automotive_payment_status == 'unpaid'"/>
+                <field name="automotive_paid_amount" widget="monetary"/>
+                <field name="automotive_amount_due" widget="monetary"/>
             </field>
 
             <!-- Add observations field -->
@@ -83,6 +93,34 @@
                         </field>
                     </group>
                 </page>
+                <page string="Plăți" name="automotive_payments">
+                    <group>
+                        <group string="Rezumat plăți">
+                            <field name="amount_total" readonly="1"/>
+                            <field name="automotive_paid_amount" readonly="1"/>
+                            <field name="automotive_amount_due" readonly="1"/>
+                            <field name="automotive_payment_status" readonly="1"/>
+                        </group>
+                        <group string="Legături operaționale">
+                            <field name="mechanic_partner_id" readonly="1"/>
+                            <field name="invoice_count" readonly="1"/>
+                            <field name="delivery_count" readonly="1"/>
+                            <field name="auto_state" readonly="1"/>
+                        </group>
+                    </group>
+                    <field name="automotive_payment_allocation_ids" nolabel="1" readonly="1">
+                        <list create="0" edit="0" delete="0" open_form_view="1">
+                            <field name="payment_date"/>
+                            <field name="payment_id"/>
+                            <field name="payment_type"/>
+                            <field name="account_move_id" optional="show"/>
+                            <field name="sale_order_line_id" optional="show"/>
+                            <field name="delivery_count" optional="show"/>
+                            <field name="signed_amount"/>
+                            <field name="payment_state"/>
+                        </list>
+                    </field>
+                </page>
             </xpath>
 
             <!-- Add action buttons -->
@@ -107,6 +145,8 @@
             <field name="price_subtotal" position="after">
                 <field name="qty_reserved"/>
                 <field name="qty_received"/>
+                <field name="automotive_paid_amount" optional="show"/>
+                <field name="automotive_amount_due" optional="show"/>
                 <field name="line_state" widget="badge"
                        decoration-success="line_state == 'complete'"
                        decoration-warning="line_state == 'incomplete'"/>
@@ -124,6 +164,8 @@
                 <field name="mechanic_partner_id"/>
                 <field name="order_type"/>
                 <field name="auto_state" widget="badge"/>
+                <field name="automotive_payment_status" widget="badge" optional="show"/>
+                <field name="automotive_amount_due" optional="show"/>
                 <field name="stock_status" widget="badge"
                        decoration-success="stock_status == 'full'"
                        decoration-warning="stock_status == 'partial'"

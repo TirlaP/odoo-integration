@@ -70,6 +70,7 @@
         'views/action_paths.xml',
         'views/menu_views.xml',
         'views/mechanic_portal_request_views.xml',
+        'views/payment_views.xml',
         'views/commercial_document_views.xml',
         'data/product_data.xml',
         'data/invoice_ingest_cron.xml',

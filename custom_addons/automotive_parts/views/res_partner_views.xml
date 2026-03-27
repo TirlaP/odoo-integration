@@ -23,6 +23,9 @@
                         </group>
                         <group string="Financiar">
                             <field name="current_balance" widget="monetary"/>
+                            <field name="automotive_order_total" widget="monetary"/>
+                            <field name="automotive_paid_total" widget="monetary"/>
+                            <field name="automotive_balance_due" widget="monetary"/>
                         </group>
                         <group string="Portal Mecanic" invisible="client_type != 'mechanic'">
                             <field name="mechanic_portal_access" readonly="1"/>
@@ -54,6 +57,10 @@
                         name="action_view_orders" icon="fa-shopping-cart">
                     <field string="Orders" name="sale_order_count" widget="statinfo"/>
                 </button>
+                <button class="oe_stat_button" type="object"
+                        name="action_view_automotive_payment_allocations" icon="fa-credit-card">
+                    <field string="Plăți Auto" name="automotive_payment_count" widget="statinfo"/>
+                </button>
             </div>
 
         </field>
@@ -70,6 +77,7 @@
                 <field name="client_type"/>
                 <field name="cui"/>
                 <field name="current_balance"/>
+                <field name="automotive_balance_due" optional="show"/>
             </field>
         </field>
     </record>

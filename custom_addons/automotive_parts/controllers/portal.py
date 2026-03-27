@@ -25,6 +25,13 @@ class CustomerPortal(SaleCustomerPortal):
             ('move_type', 'in', ('out_invoice', 'out_refund', 'out_receipt')),
         ]
 
+    def _prepare_mechanic_payment_allocation_domain(self, partner):
+        return [
+            ('partner_id', 'child_of', [partner.commercial_partner_id.id]),
+            ('active', '=', True),
+            ('payment_state', 'not in', ('draft', 'canceled', 'rejected')),
+        ]
+
     def _prepare_quotations_domain(self, partner):
         if not self._is_mechanic_portal_user():
             return super()._prepare_quotations_domain(partner)
@@ -55,6 +62,7 @@ class CustomerPortal(SaleCustomerPortal):
         SaleOrder = request.env['sale.order']
         PortalRequest = request.env['mechanic.portal.request']
         AccountMove = request.env['account.move']
+        PaymentAllocation = request.env['automotive.payment.allocation']
 
         if 'mechanic_order_count' in counters:
             values['mechanic_order_count'] = SaleOrder.search_count(self._prepare_orders_domain(partner))
@@ -64,6 +72,10 @@ class CustomerPortal(SaleCustomerPortal):
             values['mechanic_request_count'] = PortalRequest.search_count(self._prepare_mechanic_request_domain(partner))
         if 'mechanic_invoice_count' in counters and AccountMove.has_access('read'):
             values['mechanic_invoice_count'] = AccountMove.search_count(self._prepare_mechanic_invoice_domain(partner))
+        if 'mechanic_payment_count' in counters and PaymentAllocation.has_access('read'):
+            values['mechanic_payment_count'] = len(
+                PaymentAllocation.search(self._prepare_mechanic_payment_allocation_domain(partner)).mapped('payment_id')
+            )
 
         return values
 
@@ -76,10 +88,12 @@ class CustomerPortal(SaleCustomerPortal):
         SaleOrder = request.env['sale.order']
         PortalRequest = request.env['mechanic.portal.request']
         AccountMove = request.env['account.move']
+        PaymentAllocation = request.env['automotive.payment.allocation']
         quote_domain = self._prepare_quotations_domain(partner)
         order_domain = self._prepare_orders_domain(partner)
         request_domain = self._prepare_mechanic_request_domain(partner)
         invoice_domain = self._prepare_mechanic_invoice_domain(partner)
+        payment_domain = self._prepare_mechanic_payment_allocation_domain(partner)
         overdue_invoice_domain = invoice_domain + [
             ('payment_state', 'not in', ('in_payment', 'paid', 'reversed', 'blocked', 'invoicing_legacy')),
             ('invoice_date_due', '<', fields.Date.today()),
@@ -97,9 +111,13 @@ class CustomerPortal(SaleCustomerPortal):
             'mechanic_requests': PortalRequest.search(request_domain, order='create_date desc, id desc', limit=6) if PortalRequest.has_access('read') else PortalRequest,
             'mechanic_balance': partner.current_balance,
             'mechanic_balance_currency': partner.currency_id or request.env.company.currency_id,
+            'mechanic_automotive_balance': partner.automotive_balance_due,
+            'mechanic_automotive_paid_total': partner.automotive_paid_total,
             'mechanic_invoice_count': AccountMove.search_count(invoice_domain) if AccountMove.has_access('read') else 0,
             'mechanic_overdue_invoice_count': AccountMove.search_count(overdue_invoice_domain) if AccountMove.has_access('read') else 0,
             'mechanic_invoices': AccountMove.search(invoice_domain, order='invoice_date desc, id desc', limit=6) if AccountMove.has_access('read') else AccountMove,
+            'mechanic_payment_count': len(PaymentAllocation.search(payment_domain).mapped('payment_id')) if PaymentAllocation.has_access('read') else 0,
+            'mechanic_payment_allocations': PaymentAllocation.search(payment_domain, order='payment_date desc, id desc', limit=6) if PaymentAllocation.has_access('read') else PaymentAllocation,
             'mechanic_status_counts': {
                 'waiting_supply': SaleOrder.search_count(order_domain + [('auto_state', '=', 'waiting_supply')]),
                 'partial_received': SaleOrder.search_count(order_domain + [('auto_state', '=', 'partial_received')]),
@@ -118,6 +136,40 @@ class CustomerPortal(SaleCustomerPortal):
             },
         })
         return request.render('automotive_parts.portal_my_mechanic', values)
+
+    @http.route(['/my/mechanic/payments', '/my/mechanic/payments/page/<int:page>'], type='http', auth='user', website=True)
+    def portal_my_mechanic_payments(self, page=1, **kwargs):
+        if not self._is_mechanic_portal_user():
+            return request.redirect('/my/home')
+
+        partner = self._get_mechanic_partner()
+        PaymentAllocation = request.env['automotive.payment.allocation']
+        if not PaymentAllocation.has_access('read'):
+            return request.redirect('/my/mechanic')
+
+        domain = self._prepare_mechanic_payment_allocation_domain(partner)
+        total = PaymentAllocation.search_count(domain)
+        pager = portal_pager(
+            url='/my/mechanic/payments',
+            total=total,
+            page=page,
+            step=self._items_per_page,
+        )
+        values = self._prepare_portal_layout_values()
+        values.update({
+            'page_name': 'mechanic_payments',
+            'mechanic_payment_allocations': PaymentAllocation.search(
+                domain,
+                order='payment_date desc, id desc',
+                limit=self._items_per_page,
+                offset=pager['offset'],
+            ),
+            'mechanic_automotive_balance': partner.automotive_balance_due,
+            'mechanic_automotive_paid_total': partner.automotive_paid_total,
+            'mechanic_balance_currency': partner.currency_id or request.env.company.currency_id,
+            'pager': pager,
+        })
+        return request.render('automotive_parts.portal_my_mechanic_payments', values)
 
     @http.route(['/my/mechanic/requests', '/my/mechanic/requests/page/<int:page>'], type='http', auth='user', website=True)
     def portal_my_mechanic_requests(self, page=1, **kwargs):

@@ -1,0 +1,316 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_automotive_payment_allocation_tree" model="ir.ui.view">
+        <field name="name">automotive.payment.allocation.tree</field>
+        <field name="model">automotive.payment.allocation</field>
+        <field name="arch" type="xml">
+            <list string="Automotive Payment Allocations">
+                <field name="payment_date"/>
+                <field name="payment_id"/>
+                <field name="partner_id"/>
+                <field name="sale_order_id"/>
+                <field name="sale_order_line_id" optional="show"/>
+                <field name="account_move_id" optional="show"/>
+                <field name="payment_type"/>
+                <field name="amount"/>
+                <field name="signed_amount"/>
+                <field name="payment_state"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_automotive_payment_allocation_form" model="ir.ui.view">
+        <field name="name">automotive.payment.allocation.form</field>
+        <field name="model">automotive.payment.allocation</field>
+        <field name="arch" type="xml">
+            <form string="Automotive Payment Allocation">
+                <header>
+                    <button name="action_open_deliveries" type="object" string="Open Deliveries"
+                            class="btn-secondary" invisible="delivery_count == 0"/>
+                    <field name="payment_state" widget="badge"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="payment_id"/>
+                            <field name="payment_date" readonly="1"/>
+                            <field name="payment_type" readonly="1"/>
+                            <field name="billing_partner_id" readonly="1"/>
+                            <field name="partner_id" readonly="1"/>
+                        </group>
+                        <group>
+                            <field name="sale_order_id"/>
+                            <field name="sale_order_line_id"/>
+                            <field name="account_move_id"/>
+                            <field name="amount"/>
+                            <field name="signed_amount" readonly="1"/>
+                        </group>
+                    </group>
+                    <group>
+                        <field name="note" placeholder="Explain what this payment allocation covers..."/>
+                    </group>
+                    <group string="Operational linkage">
+                        <field name="delivery_picking_ids" readonly="1" widget="many2many_tags"/>
+                    </group>
+                    <chatter/>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_automotive_payment_allocation_search" model="ir.ui.view">
+        <field name="name">automotive.payment.allocation.search</field>
+        <field name="model">automotive.payment.allocation</field>
+        <field name="arch" type="xml">
+            <search string="Automotive Payment Allocations">
+                <field name="payment_id"/>
+                <field name="partner_id"/>
+                <field name="sale_order_id"/>
+                <field name="sale_order_line_id"/>
+                <field name="account_move_id"/>
+                <filter string="Active" name="active" domain="[('active', '=', True)]"/>
+                <filter string="Paid" name="paid" domain="[('payment_state', '=', 'paid')]"/>
+                <filter string="In Process" name="in_process" domain="[('payment_state', '=', 'in_process')]"/>
+                <group expand="0" string="Group By">
+                    <filter string="Mechanic / Customer" name="group_partner" context="{'group_by': 'partner_id'}"/>
+                    <filter string="Order" name="group_order" context="{'group_by': 'sale_order_id'}"/>
+                    <filter string="Payment" name="group_payment" context="{'group_by': 'payment_id'}"/>
+                    <filter string="State" name="group_state" context="{'group_by': 'payment_state'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_automotive_payment_allocations" model="ir.actions.act_window">
+        <field name="name">Payment Allocations</field>
+        <field name="res_model">automotive.payment.allocation</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="view_automotive_payment_allocation_search"/>
+    </record>
+
+    <menuitem id="menu_automotive_payment_allocations"
+              name="Payment Allocations"
+              parent="menu_automotive_root"
+              action="action_automotive_payment_allocations"
+              sequence="75"
+              groups="base.group_user"/>
+
+    <record id="view_account_payment_form_automotive" model="ir.ui.view">
+        <field name="name">account.payment.form.automotive</field>
+        <field name="model">account.payment</field>
+        <field name="inherit_id" ref="account.view_account_payment_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//div[@name='button_box']" position="inside">
+                <button name="action_view_automotive_allocations" type="object"
+                        class="oe_stat_button" icon="fa-credit-card"
+                        invisible="automotive_order_count == 0">
+                    <field name="automotive_order_count" widget="statinfo" string="Comenzi Auto"/>
+                </button>
+            </xpath>
+            <xpath expr="//group[@name='group2']" position="inside">
+                <field name="automotive_allocated_amount" widget="monetary" readonly="1"/>
+                <field name="automotive_unallocated_amount" widget="monetary" readonly="1"/>
+            </xpath>
+            <xpath expr="//notebook[@name='payment_notebook']" position="inside">
+                <page string="Automotive Allocations" name="automotive_allocations" invisible="partner_type != 'customer'">
+                    <div class="d-flex gap-2 mb-3">
+                        <button name="action_generate_automotive_allocations" type="object" string="Generate From Invoices"
+                                class="btn-primary" invisible="state == 'canceled'"/>
+                    </div>
+                    <field name="automotive_allocation_ids" nolabel="1"
+                           context="{'default_payment_id': id, 'default_company_id': company_id}">
+                        <list editable="bottom">
+                            <field name="sale_order_id"/>
+                            <field name="sale_order_line_id" optional="show"/>
+                            <field name="account_move_id" optional="show"/>
+                            <field name="partner_id" optional="show" readonly="1"/>
+                            <field name="amount"/>
+                            <field name="signed_amount" readonly="1"/>
+                            <field name="payment_state" readonly="1" optional="show"/>
+                            <field name="delivery_count" readonly="1" optional="show"/>
+                        </list>
+                    </field>
+                </page>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_account_payment_tree_automotive" model="ir.ui.view">
+        <field name="name">account.payment.tree.automotive</field>
+        <field name="model">account.payment</field>
+        <field name="inherit_id" ref="account.view_account_payment_tree"/>
+        <field name="arch" type="xml">
+            <field name="amount_company_currency_signed" position="after">
+                <field name="automotive_allocated_amount" optional="show"/>
+                <field name="automotive_unallocated_amount" optional="show"/>
+            </field>
+        </field>
+    </record>
+
+    <template id="portal_my_home_mechanic_payments" inherit_id="automotive_parts.portal_my_home_mechanic" priority="35">
+        <xpath expr="//div[hasclass('o_portal_docs')]" position="inside">
+            <t t-if="is_mechanic_portal">
+                <t t-call="portal.portal_docs_entry">
+                    <t t-set="bg_color" t-value="'alert alert-light border align-items-center'"/>
+                    <t t-set="placeholder_count" t-value="'mechanic_payment_count'"/>
+                    <t t-set="title">Payment History</t>
+                    <t t-set="url" t-value="'/my/mechanic/payments'"/>
+                    <t t-set="text">Allocated payments, balances, and order coverage.</t>
+                    <t t-set="show_count" t-value="True"/>
+                </t>
+            </t>
+        </xpath>
+    </template>
+
+    <template id="portal_my_mechanic_dashboard_payments" inherit_id="automotive_parts.portal_my_mechanic_dashboard_extend" priority="45">
+        <xpath expr="//div[@class='row g-3 mb-4']" position="inside">
+            <div class="col-6 col-lg-3">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <div class="text-muted small">Sold operațional</div>
+                        <div class="fs-5 fw-semibold">
+                            <span t-out="mechanic_automotive_balance" t-options="{'widget': 'monetary', 'display_currency': mechanic_balance_currency}"/>
+                        </div>
+                        <a href="/my/mechanic/payments" class="stretched-link">Open payment history</a>
+                    </div>
+                </div>
+            </div>
+        </xpath>
+        <xpath expr="//div[@class='row g-4 mt-1']" position="after">
+            <div class="row g-4 mt-1">
+                <div class="col-12">
+                    <div class="card shadow-sm h-100">
+                        <div class="card-header bg-transparent d-flex align-items-center justify-content-between">
+                            <strong>Recent payment allocations</strong>
+                            <a href="/my/mechanic/payments">See all</a>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>Payment</th>
+                                        <th>Order</th>
+                                        <th>Invoice</th>
+                                        <th class="text-end">Deliveries</th>
+                                        <th class="text-end">Amount</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <t t-if="not mechanic_payment_allocations">
+                                        <tr>
+                                            <td colspan="5" class="text-muted p-3">No automotive payment allocations yet.</td>
+                                        </tr>
+                                    </t>
+                                    <t t-foreach="mechanic_payment_allocations" t-as="allocation">
+                                        <tr>
+                                            <td>
+                                                <div><t t-out="allocation.payment_name or allocation.name"/></div>
+                                                <div class="small text-muted"><span t-field="allocation.payment_date"/></div>
+                                            </td>
+                                            <td><a t-att-href="allocation.sale_order_id.get_portal_url()"><t t-out="allocation.sale_order_id.name"/></a></td>
+                                            <td>
+                                                <t t-if="allocation.account_move_id">
+                                                    <a t-att-href="allocation.account_move_id.get_portal_url()"><t t-out="allocation.account_move_id.name or allocation.account_move_id.ref"/></a>
+                                                </t>
+                                                <t t-else="">-</t>
+                                            </td>
+                                            <td class="text-end"><t t-out="allocation.delivery_count"/></td>
+                                            <td class="text-end">
+                                                <span t-out="allocation.signed_amount" t-options="{'widget': 'monetary', 'display_currency': allocation.currency_id}"/>
+                                            </td>
+                                        </tr>
+                                    </t>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </xpath>
+    </template>
+
+    <template id="portal_mechanic_payment_breadcrumbs" inherit_id="portal.portal_breadcrumbs" priority="41">
+        <xpath expr="//ol[hasclass('o_portal_submenu')]" position="inside">
+            <li t-if="page_name == 'mechanic_payments'" class="breadcrumb-item active">
+                <span>Payment History</span>
+            </li>
+        </xpath>
+    </template>
+
+    <template id="portal_my_mechanic_payments" name="Mechanic Payment History">
+        <t t-call="portal.portal_layout">
+            <t t-set="breadcrumbs_searchbar" t-value="True"/>
+            <t t-call="portal.portal_searchbar">
+                <t t-set="title">Payment History</t>
+            </t>
+
+            <div class="row g-3 mb-4">
+                <div class="col-12 col-lg-4">
+                    <div class="card shadow-sm h-100">
+                        <div class="card-body">
+                            <div class="text-muted small">Sold operațional</div>
+                            <div class="fs-4 fw-semibold">
+                                <span t-out="mechanic_automotive_balance" t-options="{'widget': 'monetary', 'display_currency': mechanic_balance_currency}"/>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-12 col-lg-4">
+                    <div class="card shadow-sm h-100">
+                        <div class="card-body">
+                            <div class="text-muted small">Plăți alocate</div>
+                            <div class="fs-4 fw-semibold">
+                                <span t-out="mechanic_automotive_paid_total" t-options="{'widget': 'monetary', 'display_currency': mechanic_balance_currency}"/>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <t t-if="not mechanic_payment_allocations">
+                <p class="alert alert-warning">No automotive payment history found for this account.</p>
+            </t>
+            <t t-else="" t-call="portal.portal_table">
+                <thead>
+                    <tr>
+                        <th>Payment</th>
+                        <th>Order</th>
+                        <th>Invoice</th>
+                        <th>Status</th>
+                        <th class="text-end">Deliveries</th>
+                        <th class="text-end">Amount</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <t t-foreach="mechanic_payment_allocations" t-as="allocation">
+                        <tr>
+                            <td>
+                                <div><t t-out="allocation.payment_name or allocation.name"/></div>
+                                <div class="small text-muted"><span t-field="allocation.payment_date"/></div>
+                            </td>
+                            <td>
+                                <a t-att-href="allocation.sale_order_id.get_portal_url()">
+                                    <t t-out="allocation.sale_order_id.name"/>
+                                </a>
+                            </td>
+                            <td>
+                                <t t-if="allocation.account_move_id">
+                                    <a t-att-href="allocation.account_move_id.get_portal_url()">
+                                        <t t-out="allocation.account_move_id.name or allocation.account_move_id.ref"/>
+                                    </a>
+                                </t>
+                                <t t-else="">-</t>
+                            </td>
+                            <td><span t-field="allocation.payment_state"/></td>
+                            <td class="text-end"><t t-out="allocation.delivery_count"/></td>
+                            <td class="text-end">
+                                <span t-out="allocation.signed_amount" t-options="{'widget': 'monetary', 'display_currency': allocation.currency_id}"/>
+                            </td>
+                        </tr>
+                    </t>
+                </tbody>
+            </t>
+            <t t-call="portal.portal_pager"/>
+        </t>
+    </template>
+</odoo>

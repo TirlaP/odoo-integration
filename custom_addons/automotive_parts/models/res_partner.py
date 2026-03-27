@@ -37,6 +37,25 @@ class ResPartner(models.Model):
         currency_field='currency_id',
         store=True
     )
+    automotive_order_total = fields.Monetary(
+        'Total Comenzi Auto',
+        compute='_compute_automotive_financial_summary',
+        currency_field='currency_id',
+    )
+    automotive_paid_total = fields.Monetary(
+        'Total Plăți Alocate',
+        compute='_compute_automotive_financial_summary',
+        currency_field='currency_id',
+    )
+    automotive_balance_due = fields.Monetary(
+        'Sold Operațional',
+        compute='_compute_automotive_financial_summary',
+        currency_field='currency_id',
+    )
+    automotive_payment_count = fields.Integer(
+        'Plăți Auto',
+        compute='_compute_automotive_financial_summary',
+    )
 
     # Mechanic portal access
     is_mechanic = fields.Boolean('Este Mecanic', compute='_compute_is_mechanic', store=True)
@@ -80,6 +99,48 @@ class ResPartner(models.Model):
         for partner in self:
             accounting_partner = partner.commercial_partner_id.sudo().with_company(partner.company_id or self.env.company)
             partner.current_balance = accounting_partner.credit
+
+    def _get_automotive_order_domain(self):
+        self.ensure_one()
+        commercial_partner = self.commercial_partner_id
+        base_domain = [
+            ('company_id', '=', (self.company_id or self.env.company).id),
+            ('state', 'in', ['sale', 'done']),
+            ('auto_state', '!=', 'cancel'),
+        ]
+        mechanic_scope = (
+            self.client_type == 'mechanic'
+            or self.mechanic_portal_access
+            or bool(
+                self.with_context(active_test=False).child_ids.filtered(
+                    lambda child: child.client_type == 'mechanic' or child.mechanic_portal_access
+                )
+            )
+        )
+        if mechanic_scope:
+            return base_domain + [('mechanic_partner_id', 'child_of', [commercial_partner.id])]
+        return base_domain + [('partner_id', 'child_of', [commercial_partner.id])]
+
+    def _get_automotive_allocation_domain(self):
+        self.ensure_one()
+        commercial_partner = self.commercial_partner_id
+        return [
+            ('company_id', '=', (self.company_id or self.env.company).id),
+            ('partner_id', 'child_of', [commercial_partner.id]),
+            ('active', '=', True),
+            ('payment_state', 'not in', ['draft', 'canceled', 'rejected']),
+        ]
+
+    def _compute_automotive_financial_summary(self):
+        SaleOrder = self.env['sale.order']
+        Allocation = self.env['automotive.payment.allocation']
+        for partner in self:
+            orders = SaleOrder.search(partner._get_automotive_order_domain())
+            allocations = Allocation.search(partner._get_automotive_allocation_domain())
+            partner.automotive_order_total = sum(orders.mapped('amount_total'))
+            partner.automotive_paid_total = sum(allocations.mapped('signed_amount'))
+            partner.automotive_balance_due = partner.automotive_order_total - partner.automotive_paid_total
+            partner.automotive_payment_count = len(allocations.mapped('payment_id'))
 
     @api.depends('create_uid', 'write_uid')
     def _compute_audit_fields(self):
@@ -186,6 +247,20 @@ class ResPartner(models.Model):
             'view_mode': 'list,form',
             'domain': [('partner_id', '=', self.id), ('move_type', '=', 'out_invoice')],
             'context': {'default_partner_id': self.id}
+        }
+
+    def action_view_automotive_payment_allocations(self):
+        self.ensure_one()
+        return {
+            'name': 'Automotive Payment Allocations',
+            'type': 'ir.actions.act_window',
+            'res_model': 'automotive.payment.allocation',
+            'view_mode': 'list,form',
+            'domain': self._get_automotive_allocation_domain(),
+            'context': {
+                'search_default_group_partner': 1,
+                'default_partner_id': self.commercial_partner_id.id,
+            },
         }
 
     def action_open_mechanic_portal_wizard(self):
