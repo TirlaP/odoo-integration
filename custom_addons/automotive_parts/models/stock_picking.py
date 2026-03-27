@@ -9,6 +9,9 @@ from math import ceil
 class StockPicking(models.Model):
     """Extended Stock Picking for NIR (Nota de Intrare-Recepție)"""
     _inherit = 'stock.picking'
+    _sql_constraints = [
+        ('stock_picking_nir_unique', 'unique(nir_number)', 'NIR number must be unique.'),
+    ]
 
     _AUDIT_FIELDS = {
         'partner_id',
@@ -43,6 +46,47 @@ class StockPicking(models.Model):
     @api.model
     def _normalize_supplier_invoice_reference(self, value):
         return re.sub(r'[^A-Z0-9]+', '', (value or '').strip().upper())
+
+    @api.model
+    def _sanitize_supplier_invoice_reference(self, value):
+        cleaned = ' '.join((value or '').split())
+        return cleaned or False
+
+    def _next_nir_number(self):
+        self.ensure_one()
+        return self.env['ir.sequence'].next_by_code('stock.picking.nir') or f'NIR/{self.id}'
+
+    def _get_linked_supplier_invoice_reference(self):
+        self.ensure_one()
+        supplier_invoice = self.supplier_invoice_id
+        if not supplier_invoice:
+            return False
+        return self._sanitize_supplier_invoice_reference(
+            supplier_invoice.ref or supplier_invoice.name
+        )
+
+    def _sync_commercial_document_fields(self):
+        for picking in self.filtered(lambda p: p.picking_type_code == 'incoming'):
+            vals = {}
+            if not picking.nir_number:
+                vals['nir_number'] = picking._next_nir_number()
+
+            supplier_invoice = picking.supplier_invoice_id
+            if supplier_invoice:
+                invoice_reference = picking._get_linked_supplier_invoice_reference()
+                if invoice_reference and not picking.supplier_invoice_number:
+                    vals['supplier_invoice_number'] = invoice_reference
+                if supplier_invoice.invoice_date and not picking.supplier_invoice_date:
+                    vals['supplier_invoice_date'] = supplier_invoice.invoice_date
+                if not picking.partner_id and supplier_invoice.partner_id:
+                    vals['partner_id'] = supplier_invoice.partner_id.id
+            elif picking.supplier_invoice_number:
+                sanitized_reference = picking._sanitize_supplier_invoice_reference(picking.supplier_invoice_number)
+                if sanitized_reference != picking.supplier_invoice_number:
+                    vals['supplier_invoice_number'] = sanitized_reference
+
+            if vals:
+                picking.with_context(skip_audit_log=True, skip_document_sync=True).write(vals)
 
     def _is_automotive_incoming_receipt(self):
         self.ensure_one()
@@ -137,12 +181,14 @@ class StockPicking(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         """Generate NIR number on create"""
+        for vals in vals_list:
+            if vals.get('supplier_invoice_number'):
+                vals['supplier_invoice_number'] = self._sanitize_supplier_invoice_reference(vals['supplier_invoice_number'])
         pickings = super().create(vals_list)
 
-        # Generate NIR number for incoming shipments
-        for picking in pickings:
-            if picking.picking_type_code == 'incoming' and not picking.nir_number:
-                picking.nir_number = self.env['ir.sequence'].next_by_code('stock.picking.nir') or 'NIR/NEW'
+        incoming_pickings = pickings.filtered(lambda picking: picking.picking_type_code == 'incoming')
+        if incoming_pickings:
+            incoming_pickings._sync_commercial_document_fields()
 
         audit_log = self.env['automotive.audit.log']
         for picking, vals in zip(pickings, vals_list):
@@ -156,9 +202,9 @@ class StockPicking(models.Model):
                 new_values=picking._audit_snapshot(tracked_fields),
             )
 
-        incoming_pickings = pickings.filtered(lambda picking: picking._is_automotive_incoming_receipt())
-        if incoming_pickings:
-            incoming_pickings._check_supplier_invoice_integrity()
+        automotive_incoming_pickings = pickings.filtered(lambda picking: picking._is_automotive_incoming_receipt())
+        if automotive_incoming_pickings:
+            automotive_incoming_pickings._check_supplier_invoice_integrity()
 
         return pickings
 
@@ -209,11 +255,19 @@ class StockPicking(models.Model):
         if incoming_without_supplier:
             raise UserError('Incoming receptions require a supplier before validation.')
 
-        incoming_pickings = self.filtered(lambda picking: picking._is_automotive_incoming_receipt())
+        incoming_pickings = self.filtered(lambda picking: picking.picking_type_code == 'incoming')
         if incoming_pickings:
-            incoming_pickings._check_supplier_invoice_integrity()
+            incoming_pickings._sync_commercial_document_fields()
+
+        automotive_incoming_pickings = incoming_pickings.filtered(lambda picking: picking._is_automotive_incoming_receipt())
+        if automotive_incoming_pickings:
+            automotive_incoming_pickings._check_supplier_invoice_integrity()
 
         result = super(StockPicking, self).button_validate()
+
+        incoming_pickings = self.filtered(lambda picking: picking.picking_type_code == 'incoming')
+        if incoming_pickings:
+            incoming_pickings._check_supplier_invoice_integrity()
 
         # Update related sales orders
         for picking in self:
@@ -242,6 +296,9 @@ class StockPicking(models.Model):
 
     def write(self, vals):
         context = dict(self.env.context or {})
+        vals = dict(vals)
+        if vals.get('supplier_invoice_number'):
+            vals['supplier_invoice_number'] = self._sanitize_supplier_invoice_reference(vals['supplier_invoice_number'])
         tracked_fields = [f for f in vals.keys() if f in self._AUDIT_FIELDS]
         old_by_id = {}
         if tracked_fields and context.get('skip_audit_log') is not True:
@@ -260,9 +317,13 @@ class StockPicking(models.Model):
                     new_values=picking._audit_snapshot(tracked_fields),
                 )
 
-        incoming_pickings = self.filtered(lambda picking: picking._is_automotive_incoming_receipt())
-        if incoming_pickings:
-            incoming_pickings._check_supplier_invoice_integrity()
+        incoming_pickings = self.filtered(lambda picking: picking.picking_type_code == 'incoming')
+        if incoming_pickings and context.get('skip_document_sync') is not True:
+            incoming_pickings._sync_commercial_document_fields()
+
+        automotive_incoming_pickings = incoming_pickings.filtered(lambda picking: picking._is_automotive_incoming_receipt())
+        if automotive_incoming_pickings:
+            automotive_incoming_pickings._check_supplier_invoice_integrity()
 
         return result
 

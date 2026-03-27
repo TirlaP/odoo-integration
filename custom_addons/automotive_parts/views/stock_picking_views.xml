@@ -6,6 +6,16 @@
         <field name="model">stock.picking</field>
         <field name="inherit_id" ref="stock.view_picking_form"/>
         <field name="arch" type="xml">
+            <xpath expr="//sheet//div[@name='button_box']" position="inside">
+                <button name="action_link_invoice" type="object" class="oe_stat_button" icon="fa-link"
+                        invisible="picking_type_code != 'incoming'">
+                    <div class="o_stat_info">
+                        <span class="o_stat_text">Asociază</span>
+                        <span class="o_stat_text">Factura furnizor</span>
+                    </div>
+                </button>
+            </xpath>
+
             <!-- Add NIR fields -->
             <field name="origin" position="after">
                 <field name="nir_number" readonly="1"
@@ -37,6 +47,36 @@
                                 type="object" class="btn-secondary" icon="fa-print"/>
                         <button name="action_link_invoice" string="Link Vendor Bill"
                                 type="object" class="btn-secondary" icon="fa-link"/>
+                    </group>
+                </page>
+                <page string="Commercial Documents" name="commercial_documents">
+                    <group>
+                        <group string="Document Routing">
+                            <field name="partner_id" readonly="1"/>
+                            <field name="origin" readonly="1"/>
+                            <field name="sale_id" readonly="1"/>
+                            <field name="backorder_id" readonly="1"/>
+                        </group>
+                        <group string="Supplier Document">
+                            <field name="nir_number" readonly="1"
+                                   invisible="picking_type_code != 'incoming'"/>
+                            <field name="supplier_invoice_id" readonly="1"
+                                   invisible="picking_type_code != 'incoming'"/>
+                            <field name="supplier_invoice_number" readonly="1"
+                                   invisible="picking_type_code != 'incoming'"/>
+                            <field name="supplier_invoice_date" readonly="1"
+                                   invisible="picking_type_code != 'incoming'"/>
+                        </group>
+                    </group>
+                    <group string="Backorders" invisible="not backorder_ids">
+                        <field name="backorder_ids" readonly="1" nolabel="1">
+                            <list create="0" edit="0" delete="0" open_form_view="1">
+                                <field name="name"/>
+                                <field name="scheduled_date"/>
+                                <field name="state"/>
+                                <field name="partner_id"/>
+                            </list>
+                        </field>
                     </group>
                 </page>
             </xpath>

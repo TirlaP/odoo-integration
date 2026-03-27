@@ -131,11 +131,43 @@ class ANAFEFactura(models.Model):
             if field_name not in self._fields:
                 continue
             value = self[field_name]
-            if isinstance(value, models.BaseModel):
+            if field_name in {
+                'api_token',
+                'oauth_client_secret',
+                'oauth_authorization_code',
+                'oauth_state',
+                'access_token',
+                'refresh_token',
+            }:
+                snapshot[field_name] = bool(value)
+            elif isinstance(value, models.BaseModel):
                 snapshot[field_name] = value.ids
             else:
                 snapshot[field_name] = value
         return snapshot
+
+    def _audit_secretless_state(self):
+        self.ensure_one()
+        return {
+            'environment': self.environment,
+            'use_oauth': self.use_oauth,
+            'api_url': self.api_url,
+            'oauth_authorize_url': self.oauth_authorize_url,
+            'oauth_token_url': self.oauth_token_url,
+            'oauth_client_id_set': bool(self.oauth_client_id),
+            'oauth_client_secret_set': bool(self.oauth_client_secret),
+            'oauth_redirect_uri': self.oauth_redirect_uri,
+            'oauth_token_content_type': self.oauth_token_content_type,
+            'oauth_authorization_code_set': bool(self.oauth_authorization_code),
+            'oauth_state_set': bool(self.oauth_state),
+            'access_token_set': bool(self.access_token),
+            'refresh_token_set': bool(self.refresh_token),
+            'token_expires_at': self.token_expires_at,
+            'refresh_expires_at': self.refresh_expires_at,
+            'fetch_days': self.fetch_days,
+            'fetch_filter': self.fetch_filter,
+            'cui_company': self.cui_company,
+        }
 
     def _audit_log(self, action, description, old_values=None, new_values=None):
         self.ensure_one()
@@ -232,13 +264,7 @@ class ANAFEFactura(models.Model):
                 rec._audit_log(
                     action='custom',
                     description=f'ANAF configuration loaded from environment: {rec.display_name}',
-                    new_values={
-                        'loaded_fields': sorted(vals.keys()),
-                        'environment': rec.environment,
-                        'use_oauth': rec.use_oauth,
-                        'fetch_days': rec.fetch_days,
-                        'fetch_filter': rec.fetch_filter,
-                    },
+                    new_values={'loaded_fields': sorted(vals.keys()), **rec._audit_secretless_state()},
                 )
 
         return {
@@ -304,7 +330,7 @@ class ANAFEFactura(models.Model):
             action='custom',
             description=f'ANAF OAuth authorize URL opened: {self.display_name}',
             new_values={
-                'oauth_state': state,
+                'oauth_state_set': True,
                 'oauth_authorize_url': self.oauth_authorize_url or self._ANAF_AUTHORIZE_URL,
                 'oauth_redirect_uri': self.oauth_redirect_uri,
             },
@@ -338,8 +364,8 @@ class ANAFEFactura(models.Model):
                 action='custom',
                 description=f'{audit_reason}: {self.display_name}',
                 new_values={
-                    'has_access_token': bool(self.access_token),
-                    'has_refresh_token': bool(self.refresh_token),
+                    'access_token_set': bool(self.access_token),
+                    'refresh_token_set': bool(self.refresh_token),
                     'token_expires_at': self.token_expires_at,
                     'refresh_expires_at': self.refresh_expires_at,
                 },
@@ -384,6 +410,15 @@ class ANAFEFactura(models.Model):
             timeout=60,
         )
         if response.status_code >= 400:
+            self._audit_log(
+                action='custom',
+                description=f'ANAF OAuth authorization code exchange failed: {self.display_name}',
+                new_values={
+                    'error_status': response.status_code,
+                    'oauth_client_id_set': bool(self.oauth_client_id),
+                    'oauth_redirect_uri': self.oauth_redirect_uri,
+                },
+            )
             raise UserError(f'ANAF OAuth code exchange failed: {response.text}')
         data = response.json()
         if not data.get('access_token'):
@@ -407,6 +442,11 @@ class ANAFEFactura(models.Model):
         self.ensure_one()
         if not self.refresh_token:
             if raise_if_missing:
+                self._audit_log(
+                    action='custom',
+                    description=f'ANAF OAuth refresh skipped: missing refresh token on {self.display_name}',
+                    new_values={'refresh_token_set': False},
+                )
                 raise UserError('Missing refresh token. Run OAuth authorization code flow first.')
             return False
 
@@ -424,6 +464,14 @@ class ANAFEFactura(models.Model):
             timeout=60,
         )
         if response.status_code >= 400:
+            self._audit_log(
+                action='custom',
+                description=f'ANAF OAuth refresh failed: {self.display_name}',
+                new_values={
+                    'error_status': response.status_code,
+                    'refresh_token_set': bool(self.refresh_token),
+                },
+            )
             if raise_if_missing:
                 raise UserError(f'ANAF OAuth refresh failed: {response.text}')
             return False
@@ -980,6 +1028,18 @@ class ANAFEFactura(models.Model):
             'state': 'needs_review',
             'error': warning,
         })
+        job._audit_log(
+            action='custom',
+            description=f'ANAF invoice payload processed: {job.display_name}',
+            new_values={
+                'document_type': parsed.get('document_type') or 'invoice',
+                'supplier_found': bool(supplier),
+                'supplier_cui_set': bool(parsed.get('supplier_cui')),
+                'invoice_number_set': bool(parsed.get('invoice_number')),
+                'line_count': len(normalized_lines),
+                'warning_set': bool(warning),
+            },
+        )
 
         if not job.account_move_id:
             job.action_create_draft_vendor_bill()
@@ -1045,6 +1105,16 @@ class ANAFInvoiceWizard(models.TransientModel):
         if invoice.partner_id and not self.picking_id.partner_id:
             vals['partner_id'] = invoice.partner_id.id
         self.picking_id.write(vals)
+        self.picking_id._audit_log(
+            action='custom',
+            description=f'ANAF invoice linked to reception via wizard: {self.picking_id.display_name}',
+            new_values={
+                'supplier_invoice_id': invoice.id,
+                'supplier_invoice_number_set': bool(vals.get('supplier_invoice_number')),
+                'supplier_invoice_date': vals.get('supplier_invoice_date'),
+                'partner_id_set': bool(vals.get('partner_id')),
+            },
+        )
 
         return {
             'type': 'ir.actions.client',

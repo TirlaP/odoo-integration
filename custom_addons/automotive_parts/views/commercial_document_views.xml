@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_commercial_document_archive_tree" model="ir.ui.view">
+        <field name="name">commercial.document.archive.tree</field>
+        <field name="model">commercial.document.archive</field>
+        <field name="arch" type="xml">
+            <tree string="Commercial Documents" default_order="archived_at desc, id desc">
+                <field name="name"/>
+                <field name="document_type"/>
+                <field name="state"/>
+                <field name="partner_id"/>
+                <field name="source_reference"/>
+                <field name="attachment_name"/>
+                <field name="archived_at"/>
+                <field name="archived_by"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_commercial_document_archive_search" model="ir.ui.view">
+        <field name="name">commercial.document.archive.search</field>
+        <field name="model">commercial.document.archive</field>
+        <field name="arch" type="xml">
+            <search string="Commercial Document Archive">
+                <field name="name"/>
+                <field name="document_type"/>
+                <field name="state"/>
+                <field name="partner_id"/>
+                <field name="source_reference"/>
+                <filter name="filter_archived" string="Archived" domain="[('state', '=', 'archived')]"/>
+                <filter name="filter_draft" string="Draft" domain="[('state', '=', 'draft')]"/>
+                <filter name="filter_cancelled" string="Cancelled" domain="[('state', '=', 'cancelled')]"/>
+                <group expand="0" string="Group By">
+                    <filter name="group_document_type" string="Document Type" context="{'group_by': 'document_type'}"/>
+                    <filter name="group_state" string="State" context="{'group_by': 'state'}"/>
+                    <filter name="group_partner" string="Partner" context="{'group_by': 'partner_id'}"/>
+                    <filter name="group_company" string="Company" context="{'group_by': 'company_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="view_commercial_document_archive_form" model="ir.ui.view">
+        <field name="name">commercial.document.archive.form</field>
+        <field name="model">commercial.document.archive</field>
+        <field name="arch" type="xml">
+            <form string="Commercial Document Archive">
+                <header>
+                    <button name="action_archive_document" string="Archive" type="object" class="btn-primary" invisible="state == 'archived'"/>
+                    <button name="action_reset_to_draft" string="Reset to Draft" type="object" invisible="state == 'draft'"/>
+                    <button name="action_cancel_archive" string="Cancel" type="object" class="btn-secondary" invisible="state == 'cancelled'"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,archived,cancelled"/>
+                </header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_open_attachment" type="object" class="oe_stat_button" icon="fa-paperclip">
+                            <div class="o_stat_info">
+                                <span class="o_stat_text">Attachment</span>
+                            </div>
+                        </button>
+                        <button name="action_open_source_document" type="object" class="oe_stat_button" icon="fa-folder-open-o" invisible="not source_model">
+                            <div class="o_stat_info">
+                                <span class="o_stat_text">Source</span>
+                            </div>
+                        </button>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="name" readonly="1"/>
+                            <field name="document_type"/>
+                            <field name="company_id"/>
+                            <field name="partner_id"/>
+                        </group>
+                        <group>
+                            <field name="attachment_id" options="{'no_create': True}"/>
+                            <field name="attachment_name" readonly="1"/>
+                            <field name="attachment_mimetype" readonly="1"/>
+                            <field name="attachment_file_size" readonly="1"/>
+                        </group>
+                    </group>
+                    <group string="Source Links">
+                        <group>
+                            <field name="sale_order_id"/>
+                            <field name="picking_id"/>
+                        </group>
+                        <group>
+                            <field name="account_move_id"/>
+                            <field name="source_reference" readonly="1"/>
+                        </group>
+                    </group>
+                    <group string="Archive Metadata">
+                        <group>
+                            <field name="archived_at" readonly="1"/>
+                            <field name="archived_by" readonly="1"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Notes">
+                            <field name="note" placeholder="Archive notes, references, or operator remarks..."/>
+                        </page>
+                        <page string="Chatter">
+                            <field name="message_follower_ids" widget="mail_followers"/>
+                            <field name="activity_ids" widget="mail_activity"/>
+                            <field name="message_ids" widget="mail_thread"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_commercial_document_archive" model="ir.actions.act_window">
+        <field name="name">Commercial Documents</field>
+        <field name="res_model">commercial.document.archive</field>
+        <field name="view_mode">tree,form</field>
+        <field name="search_view_id" ref="view_commercial_document_archive_search"/>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                Archive commercial documents and keep linked electronic files visible in one place.
+            </p>
+        </field>
+    </record>
+
+    <menuitem id="menu_commercial_document_archive"
+              name="Commercial Documents"
+              parent="menu_commercial_documents"
+              action="action_commercial_document_archive"
+              sequence="40"/>
+</odoo>

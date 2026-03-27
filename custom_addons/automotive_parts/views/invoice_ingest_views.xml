@@ -36,6 +36,14 @@
                     <field name="state" widget="statusbar" statusbar_visible="pending,running,needs_review,done,failed"/>
                 </header>
                 <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button type="action" name="%(action_invoice_ingest_upload_wizard)d" class="oe_stat_button" icon="fa-upload">
+                            <div class="o_stat_info">
+                                <span class="o_stat_text">Import</span>
+                                <span class="o_stat_text">PDF nou</span>
+                            </div>
+                        </button>
+                    </div>
                     <group>
                         <group>
                             <field name="name"/>
@@ -53,6 +61,19 @@
                             <field name="vat_rate"/>
                             <field name="amount_total"/>
                             <field name="account_move_id" string="Linked Vendor Bill"/>
+                        </group>
+                    </group>
+                    <group string="Document Routing">
+                        <group>
+                            <field name="attachment_id" readonly="1"/>
+                            <field name="picking_id" string="Stock Receipt" readonly="1"/>
+                            <field name="account_move_id" string="Vendor Bill" readonly="1"/>
+                        </group>
+                        <group>
+                            <field name="partner_id" readonly="1"/>
+                            <field name="invoice_number" readonly="1"/>
+                            <field name="invoice_date" readonly="1"/>
+                            <field name="receipt_sync_state" readonly="1"/>
                         </group>
                     </group>
                     <group string="Extracted Lines" class="o_invoice_ingest_lines_wrap" invisible="not line_ids">

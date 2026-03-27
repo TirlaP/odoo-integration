@@ -106,6 +106,16 @@ class MechanicPortalRequest(models.Model):
             return 'portal'
         return 'backend'
 
+    def _audit_context_summary(self):
+        self.ensure_one()
+        return {
+            'origin': self._audit_origin(),
+            'request_type': self.request_type,
+            'state': self.state,
+            'sale_order_id': self.sale_order_id.id if self.sale_order_id else False,
+            'sale_order_name': self.sale_order_id.name if self.sale_order_id else False,
+        }
+
     def _audit_log(self, action, description, old_values=None, new_values=None):
         self.ensure_one()
         if self.env.context.get('skip_audit_log') is True:
@@ -150,10 +160,7 @@ class MechanicPortalRequest(models.Model):
             request_record._audit_log(
                 action='create',
                 description=f'Mechanic portal request created from {request_record._audit_origin()}: {request_record.name}',
-                new_values={
-                    'origin': request_record._audit_origin(),
-                    **request_record._audit_snapshot(tracked_fields),
-                },
+                new_values={**request_record._audit_context_summary(), **request_record._audit_snapshot(tracked_fields)},
             )
         return requests
 
@@ -200,9 +207,8 @@ class MechanicPortalRequest(models.Model):
                         'resolved_on': old_values.get(request_record.id, {}).get('resolved_on'),
                     },
                     new_values={
-                        'state': request_record.state,
+                        **request_record._audit_context_summary(),
                         'resolved_on': request_record.resolved_on,
-                        'origin': request_record._audit_origin(),
                     },
                 )
         return result

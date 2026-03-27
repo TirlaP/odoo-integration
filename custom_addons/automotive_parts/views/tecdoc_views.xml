@@ -9,8 +9,20 @@
                 <header>
                     <button name="action_test_connection" string="Test Connection" type="object" class="btn-primary"/>
                     <button name="action_sync_suppliers_catalog" string="Sync TecDoc Suppliers" type="object" class="btn-secondary"/>
+                    <button name="%(action_tecdoc_api_cache)d" string="Open Cache" type="action" class="btn-secondary"/>
+                    <button name="%(action_tecdoc_products)d" string="Review TecDoc Products" type="action" class="btn-secondary"/>
                 </header>
                 <sheet>
+                    <div class="alert alert-warning" role="alert" invisible="api_key">
+                        RapidAPI key is missing. TecDoc sync/search actions will fail until the key is configured.
+                    </div>
+                    <div class="alert alert-warning" role="alert" invisible="cache_enabled">
+                        Cache is disabled. This removes the local safety net and makes TecDoc calls fully dependent on the live API.
+                    </div>
+                    <div class="alert alert-info" role="alert">
+                        Treat TecDoc as the reference source for article compatibility and supplier metadata.
+                        Products without a TecDoc link should be considered manually maintained.
+                    </div>
                     <group>
                         <group string="API Configuration">
                             <field name="name"/>
@@ -30,6 +42,36 @@
                     </group>
 
                     <notebook>
+                        <page string="Governance &amp; Status" name="governance_status">
+                            <group>
+                                <group string="Governance">
+                                    <label string="Source of truth"/>
+                                    <div>
+                                        <p class="text-muted">
+                                            TecDoc-linked products should keep supplier/article compatibility aligned with TecDoc.
+                                            Manual products can still exist, but they should be reviewed separately.
+                                        </p>
+                                    </div>
+                                    <label string="Operator rules"/>
+                                    <div>
+                                        <ul class="mb0">
+                                            <li>Keep cache enabled in production.</li>
+                                            <li>Use stale cache fallback to reduce outage impact.</li>
+                                            <li>Review TecDoc-linked products after supplier sync changes.</li>
+                                        </ul>
+                                    </div>
+                                </group>
+                                <group string="Current Status">
+                                    <field name="cache_enabled" widget="boolean_toggle"/>
+                                    <field name="cache_allow_stale_on_error" widget="boolean_toggle" invisible="not cache_enabled"/>
+                                    <field name="cache_ttl_seconds" invisible="not cache_enabled"/>
+                                    <field name="download_images" widget="boolean_toggle"/>
+                                    <field name="overwrite_images" invisible="not download_images"/>
+                                    <field name="lang_id"/>
+                                    <field name="country_filter_id"/>
+                                </group>
+                            </group>
+                        </page>
                         <page string="Help" name="help">
                             <group>
                                 <div>
@@ -72,12 +114,38 @@
         <field name="name">tecdoc.api.tree</field>
         <field name="model">tecdoc.api</field>
         <field name="arch" type="xml">
-            <list string="TecDoc API">
+            <list string="TecDoc API"
+                  decoration-warning="cache_enabled == False"
+                  decoration-info="download_images == True">
                 <field name="name"/>
                 <field name="api_host"/>
                 <field name="lang_id"/>
                 <field name="cache_enabled"/>
+                <field name="cache_allow_stale_on_error" optional="hide"/>
+                <field name="download_images" optional="hide"/>
             </list>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_api_search" model="ir.ui.view">
+        <field name="name">tecdoc.api.search</field>
+        <field name="model">tecdoc.api</field>
+        <field name="arch" type="xml">
+            <search string="TecDoc API Configuration">
+                <field name="name"/>
+                <field name="api_host"/>
+                <field name="lang_id"/>
+                <field name="country_filter_id"/>
+                <filter string="Cache Enabled" name="cache_enabled" domain="[('cache_enabled', '=', True)]"/>
+                <filter string="Cache Disabled" name="cache_disabled" domain="[('cache_enabled', '=', False)]"/>
+                <filter string="Download Images" name="download_images" domain="[('download_images', '=', True)]"/>
+                <filter string="No API Key" name="no_api_key" domain="[('api_key', '=', False)]"/>
+                <group expand="0" string="Group By">
+                    <filter string="API Host" name="group_api_host" context="{'group_by': 'api_host'}"/>
+                    <filter string="Language" name="group_lang" context="{'group_by': 'lang_id'}"/>
+                    <filter string="Country" name="group_country" context="{'group_by': 'country_filter_id'}"/>
+                </group>
+            </search>
         </field>
     </record>
 
@@ -87,6 +155,7 @@
         <field name="path">automotive-tecdoc-config</field>
         <field name="res_model">tecdoc.api</field>
         <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="view_tecdoc_api_search"/>
     </record>
 
     <!-- TecDoc Cache List -->
@@ -94,8 +163,11 @@
         <field name="name">tecdoc.api.cache.list</field>
         <field name="model">tecdoc.api.cache</field>
         <field name="arch" type="xml">
-            <list string="TecDoc Cache" create="false" delete="false">
+            <list string="TecDoc Cache" create="false" delete="false"
+                  decoration-danger="ok == False"
+                  decoration-info="hits &gt; 0">
                 <field name="api_id"/>
+                <field name="method" optional="hide"/>
                 <field name="endpoint"/>
                 <field name="ok"/>
                 <field name="status_code"/>
@@ -139,6 +211,27 @@
         </field>
     </record>
 
+    <record id="view_tecdoc_api_cache_search" model="ir.ui.view">
+        <field name="name">tecdoc.api.cache.search</field>
+        <field name="model">tecdoc.api.cache</field>
+        <field name="arch" type="xml">
+            <search string="TecDoc Cache">
+                <field name="api_id"/>
+                <field name="endpoint"/>
+                <field name="status_code"/>
+                <filter string="Healthy" name="healthy" domain="[('ok', '=', True)]"/>
+                <filter string="Errors" name="errors" domain="[('ok', '=', False)]"/>
+                <filter string="Used Entries" name="used_entries" domain="[('hits', '&gt;', 0)]"/>
+                <filter string="Freshly Fetched" name="recent_fetch" domain="[('fetched_at', '!=', False)]"/>
+                <group expand="0" string="Group By">
+                    <filter string="API" name="group_api" context="{'group_by': 'api_id'}"/>
+                    <filter string="Endpoint" name="group_endpoint" context="{'group_by': 'endpoint'}"/>
+                    <filter string="Status" name="group_status" context="{'group_by': 'ok'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
     <record id="action_tecdoc_api_cache" model="ir.actions.act_window">
         <field name="name">TecDoc Cache</field>
         <field name="path">cache</field>
@@ -146,6 +239,7 @@
         <field name="view_mode">list,form</field>
         <field name="domain">[]</field>
         <field name="context">{}</field>
+        <field name="search_view_id" ref="view_tecdoc_api_cache_search"/>
     </record>
 
     <!-- TecDoc Products (synced) -->

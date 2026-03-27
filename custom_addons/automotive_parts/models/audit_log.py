@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
+from datetime import date, datetime
+from decimal import Decimal
 import json
+from collections.abc import Mapping, Sequence
 
 from odoo import models, fields, api
+from odoo.osv import expression
+
 
 
 class AutomotiveAuditLog(models.Model):
@@ -15,8 +20,13 @@ class AutomotiveAuditLog(models.Model):
         'password',
         'authorization_code',
         'api_key',
+        'client_secret',
+        'refresh_token',
+        'access_token',
+        'oauth_state',
     )
     _REDACTED_VALUE = '[redacted]'
+    _MAX_PAYLOAD_CHARS = 64000
 
     user_id = fields.Many2one('res.users', 'User', required=True, default=lambda self: self.env.user)
     company_id = fields.Many2one('res.company', 'Company', readonly=True, index=True)
@@ -25,18 +35,18 @@ class AutomotiveAuditLog(models.Model):
         ('write', 'Modify'),
         ('unlink', 'Delete'),
         ('custom', 'Custom Action'),
-    ], string='Action', required=True)
+    ], string='Action', required=True, index=True)
 
-    model_name = fields.Char('Model', required=True)
+    model_name = fields.Char('Model', required=True, index=True)
     model_description = fields.Char('Model Label', readonly=True, index=True)
-    record_id = fields.Integer('Record ID')
+    record_id = fields.Integer('Record ID', index=True)
     record_display_name = fields.Char('Record', readonly=True, index=True)
     description = fields.Text('Description')
 
     old_values = fields.Text('Old Values')
     new_values = fields.Text('New Values')
 
-    create_date = fields.Datetime('Date & Time', readonly=True)
+    create_date = fields.Datetime('Date & Time', readonly=True, index=True)
 
     @classmethod
     def _is_sensitive_key(cls, key):
@@ -51,18 +61,45 @@ class AutomotiveAuditLog(models.Model):
             return payload
         if key and cls._is_sensitive_key(key):
             return cls._REDACTED_VALUE
+        if isinstance(payload, models.BaseModel):
+            return {
+                'model': payload._name,
+                'ids': payload.ids,
+                'display_name': payload.display_name if len(payload) == 1 else False,
+            }
+        if isinstance(payload, (datetime, date)):
+            return payload.isoformat()
+        if isinstance(payload, Decimal):
+            return str(payload)
+        if isinstance(payload, bytes):
+            return payload.decode('utf-8', errors='replace')
         if isinstance(payload, dict):
             return {
-                dict_key: cls._sanitize_payload(value, key=dict_key)
+                str(dict_key): cls._sanitize_payload(value, key=dict_key)
                 for dict_key, value in payload.items()
             }
-        if isinstance(payload, list):
+        if isinstance(payload, Mapping):
+            return {
+                str(dict_key): cls._sanitize_payload(value, key=dict_key)
+                for dict_key, value in payload.items()
+            }
+        if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+            if len(payload) == 2 and cls._is_sensitive_key(payload[0]):
+                return cls._REDACTED_VALUE
             return [cls._sanitize_payload(value) for value in payload]
-        if isinstance(payload, tuple):
-            return tuple(cls._sanitize_payload(value) for value in payload)
         if isinstance(payload, set):
             return [cls._sanitize_payload(value) for value in sorted(payload, key=str)]
         return payload
+
+    @classmethod
+    def _truncate_payload(cls, payload):
+        if payload in (None, False):
+            return payload
+        if not isinstance(payload, str):
+            payload = str(payload)
+        if len(payload) <= cls._MAX_PAYLOAD_CHARS:
+            return payload
+        return f"{payload[:cls._MAX_PAYLOAD_CHARS]}... [truncated {len(payload) - cls._MAX_PAYLOAD_CHARS} chars]"
 
     @staticmethod
     def _stringify_payload(payload):
@@ -70,8 +107,9 @@ class AutomotiveAuditLog(models.Model):
             return False
         payload = AutomotiveAuditLog._sanitize_payload(payload)
         if isinstance(payload, str):
-            return payload
-        return json.dumps(payload, ensure_ascii=False, default=str)
+            return AutomotiveAuditLog._truncate_payload(payload)
+        rendered = json.dumps(payload, ensure_ascii=False, default=str, sort_keys=True, separators=(',', ':'))
+        return AutomotiveAuditLog._truncate_payload(rendered)
 
     @api.model
     def log_change(self, action, record, description=None, old_values=None, new_values=None):
@@ -101,3 +139,21 @@ class AutomotiveAuditLog(models.Model):
             name = f"{log.user_id.name} - {log.action} - {log.record_display_name or log.model_name}"
             result.append((log.id, name))
         return result
+
+    @api.model
+    def name_search(self, name='', args=None, operator='ilike', limit=100):
+        args = list(args or [])
+        if not name:
+            return self.search(args, limit=limit).name_get()
+
+        search_domain = expression.OR([
+            [('model_name', operator, name)],
+            [('model_description', operator, name)],
+            [('record_display_name', operator, name)],
+            [('description', operator, name)],
+            [('old_values', operator, name)],
+            [('new_values', operator, name)],
+            [('user_id.name', operator, name)],
+            [('company_id.name', operator, name)],
+        ])
+        return self.search(expression.AND([args, search_domain]), limit=limit).name_get()

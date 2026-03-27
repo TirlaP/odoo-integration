@@ -205,6 +205,22 @@ class InvoiceIngestJob(models.Model):
             new_values=new_values,
         )
 
+    def _audit_blocked_action(self, description, reason, old_values=None):
+        self.ensure_one()
+        self._audit_log(
+            action='custom',
+            description=description,
+            old_values=old_values,
+            new_values={
+                'blocked_reason': reason,
+                'state': self.state,
+                'receipt_sync_state': self.receipt_sync_state,
+                'account_move_id': self.account_move_id.id if self.account_move_id else False,
+                'picking_id': self.picking_id.id if self.picking_id else False,
+                **self._audit_line_summary(),
+            },
+        )
+
     @api.model_create_multi
     def create(self, vals_list):
         jobs = super().create(vals_list)
@@ -2177,9 +2193,10 @@ class InvoiceIngestJob(models.Model):
             )
 
     def action_run(self):
-        old_states = {job.id: job.state for job in self}
-        self._process_ingest_job(raise_on_error=True)
-        for job in self:
+        eligible_jobs = self.filtered(lambda job: job.state in {'pending', 'failed', 'needs_review'})
+        old_states = {job.id: job.state for job in eligible_jobs}
+        eligible_jobs._process_ingest_job(raise_on_error=True)
+        for job in eligible_jobs:
             job._audit_log(
                 action='custom',
                 description=f'Invoice ingest processing retried: {job.display_name}',
@@ -2193,6 +2210,15 @@ class InvoiceIngestJob(models.Model):
         for job in self:
             duplicate_of = job._get_duplicate_of_job_id()
             if duplicate_of:
+                duplicate = self.browse(duplicate_of).exists()
+                job._audit_blocked_action(
+                    description=f'Invoice bill creation blocked for duplicate job: {job.display_name}',
+                    reason='duplicate_job',
+                    old_values={
+                        'duplicate_of_job_id': duplicate.id if duplicate else duplicate_of,
+                        'duplicate_of_name': duplicate.display_name if duplicate else False,
+                    },
+                )
                 raise UserError('This ingest job is flagged as a duplicate. Resolve the original invoice before creating a bill.')
 
             supplier = job._resolve_supplier_for_billing()
@@ -2358,6 +2384,15 @@ class InvoiceIngestJob(models.Model):
         for job in self:
             duplicate_of = job._get_duplicate_of_job_id()
             if duplicate_of:
+                duplicate = self.browse(duplicate_of).exists()
+                job._audit_blocked_action(
+                    description=f'Invoice receipt sync blocked for duplicate job: {job.display_name}',
+                    reason='duplicate_job',
+                    old_values={
+                        'duplicate_of_job_id': duplicate.id if duplicate else duplicate_of,
+                        'duplicate_of_name': duplicate.display_name if duplicate else False,
+                    },
+                )
                 raise UserError('This ingest job is flagged as a duplicate. Resolve the original invoice before syncing receipt stock.')
 
             supplier = job._resolve_supplier_for_billing() or job.partner_id

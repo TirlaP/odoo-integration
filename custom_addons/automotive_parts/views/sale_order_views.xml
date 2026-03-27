@@ -6,6 +6,17 @@
         <field name="model">sale.order</field>
         <field name="inherit_id" ref="sale.view_order_form"/>
         <field name="arch" type="xml">
+            <xpath expr="//sheet//div[@name='button_box']" position="inside">
+                <button name="action_view_delivery" type="object" class="oe_stat_button" icon="fa-truck"
+                        invisible="delivery_count == 0">
+                    <field name="delivery_count" widget="statinfo" string="Transferuri"/>
+                </button>
+                <button name="action_view_invoice" type="object" class="oe_stat_button" icon="fa-file-text-o"
+                        invisible="invoice_count == 0">
+                    <field name="invoice_count" widget="statinfo" string="Facturi"/>
+                </button>
+            </xpath>
+
             <!-- Add automotive fields after partner_id -->
             <field name="partner_id" position="after">
                 <field name="mechanic_partner_id"
@@ -28,6 +39,49 @@
             <xpath expr="//notebook" position="inside">
                 <page string="Observații" name="observations">
                     <field name="observations" placeholder="Add internal notes here..."/>
+                </page>
+                <page string="Documente comerciale" name="commercial_documents">
+                    <group>
+                        <group string="Asociere documente">
+                            <field name="partner_id" readonly="1"/>
+                            <field name="mechanic_partner_id" readonly="1"/>
+                            <field name="client_order_ref" readonly="1"/>
+                            <field name="invoice_status" readonly="1"/>
+                        </group>
+                        <group string="Rezumat operațional">
+                            <field name="delivery_count" readonly="1"/>
+                            <field name="invoice_count" readonly="1"/>
+                            <field name="amount_total" readonly="1"/>
+                            <field name="state" readonly="1"/>
+                        </group>
+                    </group>
+
+                    <group string="Transferuri asociate" invisible="delivery_count == 0">
+                        <field name="picking_ids" nolabel="1" readonly="1">
+                            <list create="0" edit="0" delete="0" open_form_view="1">
+                                <field name="name"/>
+                                <field name="picking_type_id"/>
+                                <field name="scheduled_date"/>
+                                <field name="state"/>
+                                <field name="nir_number" optional="show"/>
+                                <field name="partner_id" optional="show"/>
+                            </list>
+                        </field>
+                    </group>
+
+                    <group string="Facturi asociate" invisible="invoice_count == 0">
+                        <field name="invoice_ids" nolabel="1" readonly="1">
+                            <list create="0" edit="0" delete="0" open_form_view="1">
+                                <field name="name"/>
+                                <field name="move_type"/>
+                                <field name="invoice_date"/>
+                                <field name="invoice_date_due" optional="show"/>
+                                <field name="payment_state"/>
+                                <field name="state"/>
+                                <field name="amount_total"/>
+                            </list>
+                        </field>
+                    </group>
                 </page>
             </xpath>
 
