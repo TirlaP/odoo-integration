@@ -89,9 +89,9 @@ class IrActionsReport(models.Model):
             if command_name not in {'lp', 'lpr'}:
                 raise UserError(_('Only lp or lpr may be configured for server-side label printing.'))
             if command_path.is_absolute():
-                if not command_path.exists():
-                    raise UserError(_('The configured label print command does not exist on the server.'))
-                return str(command_path)
+                raise UserError(
+                    _('Absolute command paths are not allowed for label printing. Configure only lp or lpr.')
+                )
             resolved = shutil.which(command_name)
             if not resolved:
                 raise UserError(_('The configured label print command is not available on the server PATH.'))

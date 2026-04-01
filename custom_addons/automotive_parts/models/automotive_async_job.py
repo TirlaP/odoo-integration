@@ -7,7 +7,7 @@ from odoo.exceptions import UserError
 
 
 def _json_dumps(value):
-    return json.dumps(value or [], ensure_ascii=False, default=str)
+    return json.dumps([] if value is None else value, ensure_ascii=False, default=str)
 
 
 def _json_loads(value, default):
@@ -561,7 +561,7 @@ class AutomotiveAsyncJob(models.Model):
             self.message_post(body=_('Async job failed: %s') % (exc,))
             if self.batch_id:
                 self.batch_id._sync_state_from_jobs()
-            raise
+            return False
 
         self.write({
             'state': 'done',
@@ -623,9 +623,9 @@ class AutomotiveAsyncJob(models.Model):
         return [row[0] for row in self.env.cr.fetchall()]
 
     @api.model
-    def cron_process_jobs(self):
+    def cron_process_jobs(self, limit=None):
         icp = self.env['ir.config_parameter'].sudo()
-        limit = int(icp.get_param('automotive.async_jobs_per_run') or 20)
+        limit = int(limit or icp.get_param('automotive.async_jobs_per_run') or 20)
         stale_timeout = int(icp.get_param('automotive.async_running_timeout_minutes') or 30)
         self._requeue_stale_running_jobs(timeout_minutes=stale_timeout)
 

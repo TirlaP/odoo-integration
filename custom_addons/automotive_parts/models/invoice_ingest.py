@@ -258,6 +258,8 @@ class InvoiceIngestJob(models.Model):
         self.ensure_one()
         existing_job = self._get_async_processing_job()
         if existing_job and not force:
+            if batch and not existing_job.batch_id:
+                existing_job.sudo().write({'batch_id': batch.id})
             return existing_job
 
         effective_batch_name = batch_name or self.batch_name or self.display_name
@@ -2451,7 +2453,7 @@ class InvoiceIngestJob(models.Model):
 
         for job in eligible_jobs:
             previous_state = job.state
-            job._enqueue_async_processing(batch=batch, batch_name=batch_name, force=True)
+            job._enqueue_async_processing(batch=batch, batch_name=batch_name)
             job._audit_log(
                 action='custom',
                 description=f'Invoice ingest queued for background processing: {job.display_name}',
@@ -3309,7 +3311,6 @@ class InvoiceIngestUploadWizard(models.TransientModel):
                 batch=async_batch,
                 batch_uid=batch_uid,
                 batch_name=batch_name,
-                force=True,
                 priority=85,
             )
             jobs |= job

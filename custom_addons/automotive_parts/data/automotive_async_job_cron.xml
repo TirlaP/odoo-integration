@@ -4,7 +4,7 @@
         <field name="name">Automotive Async Job Processor</field>
         <field name="model_id" ref="model_automotive_async_job"/>
         <field name="state">code</field>
-        <field name="code">model.cron_process_jobs(limit=15)</field>
+        <field name="code">model.cron_process_jobs()</field>
         <field name="interval_number">1</field>
         <field name="interval_type">minutes</field>
         <field name="active">True</field>

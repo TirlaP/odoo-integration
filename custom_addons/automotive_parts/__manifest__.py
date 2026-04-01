@@ -42,6 +42,7 @@
         'web.assets_backend': [
             'automotive_parts/static/src/js/browser_diagnostics.js',
             'automotive_parts/static/src/js/invoice_ingest_live_status.js',
+            'automotive_parts/static/src/js/invoice_ingest_submit_once.js',
             'automotive_parts/static/src/js/pdf_drop_binary_field.js',
             'automotive_parts/static/src/xml/pdf_drop_binary_field.xml',
             'automotive_parts/static/src/scss/pdf_drop_binary_field.scss',
