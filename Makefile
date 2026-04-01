@@ -1,4 +1,4 @@
-.PHONY: help start update logs validate-fast install-hooks
+.PHONY: help start update logs validate-fast test-odoo install-hooks
 
 VENV_DIR ?= odoo-venv
 PYTHON ?= $(VENV_DIR)/bin/python
@@ -13,6 +13,7 @@ help:
 	@echo "  make update  - update module $(MODULE)"
 	@echo "  make logs    - tail $(LOG_FILE)"
 	@echo "  make validate-fast - run local pre-commit checks"
+	@echo "  make test-odoo - run Odoo addon regression tests on a temp database"
 	@echo "  make install-hooks - enable repo git hooks"
 
 start:
@@ -26,6 +27,9 @@ logs:
 
 validate-fast:
 	bash scripts/pre_commit_validate.sh
+
+test-odoo:
+	bash scripts/run_odoo_tests.sh
 
 install-hooks:
 	bash scripts/install_git_hooks.sh
