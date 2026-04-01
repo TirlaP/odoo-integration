@@ -2,11 +2,13 @@
 from datetime import date, datetime
 from decimal import Decimal
 import json
+import logging
 from collections.abc import Mapping, Sequence
 
 from odoo import models, fields, api
 from odoo.osv import expression
 
+_logger = logging.getLogger(__name__)
 
 
 class AutomotiveAuditLog(models.Model):
@@ -178,7 +180,7 @@ class AutomotiveAuditLog(models.Model):
             if 'company_id' in record._fields and record.company_id
             else self.env.company
         )
-        return self.create({
+        values = {
             'user_id': self.env.user.id,
             'company_id': company.id if company else False,
             'action': action,
@@ -189,7 +191,19 @@ class AutomotiveAuditLog(models.Model):
             'description': description or '',
             'old_values': self._stringify_payload(old_values),
             'new_values': self._stringify_payload(new_values),
-        })
+        }
+        try:
+            # Audit logging must never block the business action that triggered it.
+            with self.env.cr.savepoint():
+                return self.create(values)
+        except Exception:
+            _logger.exception(
+                'Skipping automotive audit log write for %s[%s] during %s',
+                record._name,
+                record.id,
+                action,
+            )
+            return self.browse()
 
     def name_get(self):
         """Custom name display"""
