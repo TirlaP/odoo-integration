@@ -20,53 +20,51 @@
 
         <record id="action_report_automotive_label" model="ir.actions.report">
             <field name="name">Automotive Label</field>
-            <field name="model">invoice.ingest.job.line</field>
+            <field name="model">product.template</field>
             <field name="report_type">qweb-pdf</field>
             <field name="report_name">automotive_parts.report_product_label</field>
             <field name="report_file">automotive_parts.report_product_label</field>
             <field name="paperformat_id" ref="automotive_parts.paperformat_automotive_label"/>
-            <field name="binding_model_id" ref="model_invoice_ingest_job_line"/>
+            <field name="binding_model_id" ref="product.model_product_template"/>
             <field name="binding_type">report</field>
+            <field name="print_report_name">'Automotive Label'</field>
         </record>
 
         <template id="report_product_label">
             <t t-call="web.html_container">
                 <t t-foreach="docs" t-as="label">
                     <div class="page" style="margin: 0; padding: 0;">
-                        <div style="width: 413mm; min-height: 270mm; padding: 5mm; box-sizing: border-box; background: #fff; color: #000; font-family: Arial, sans-serif;">
-                            <div style="text-align: center; font-weight: 700; font-size: 18mm; line-height: 1.05; margin: 0 0 4mm 0; text-transform: uppercase;">
+                        <div style="width: 413mm; min-height: 270mm; padding: 5mm 6mm; box-sizing: border-box; background: #fff; color: #000; font-family: 'DejaVu Sans', Arial, sans-serif;">
+                            <div style="text-align: center; font-weight: 500; font-size: 15mm; line-height: 1.05; margin: 0 0 2mm 0; overflow-wrap: anywhere; word-break: break-word;">
                                 <t t-esc="label.get('denumire')"/>
                             </div>
-                            <div style="width: 100%; text-align: center; margin: 0 0 4mm 0;">
+                            <div style="width: 100%; text-align: center; margin: 0 0 2mm 0;">
                                 <t t-if="label.get('barcode')">
-                                    <div t-out="label.get('barcode')" t-options="{'widget': 'barcode', 'quiet': 0, 'symbology': 'Code128', 'img_style': 'width:100%;height:70mm;'}"/>
-                                    <div style="font-size: 6mm; margin-top: 2mm;">
-                                        <t t-esc="label.get('barcode')"/>
-                                    </div>
+                                    <div t-out="label.get('barcode')" t-options="{'widget': 'barcode', 'quiet': 0, 'symbology': 'Code128', 'img_style': 'width:100%;height:63mm;'}"/>
                                 </t>
                             </div>
-                            <div style="text-align: center; font-weight: 700; font-size: 16mm; margin: 0 0 16mm 0;">
+                            <div style="text-align: center; font-weight: 700; font-size: 18mm; line-height: 1; margin: 0 0 18mm 0;">
                                 PRET:
                                 <span t-out="label.get('price', 0.0)" t-options="{'widget': 'monetary', 'display_currency': company.currency_id}"/>
                                 /BUC
                             </div>
-                            <div style="display: flex; justify-content: space-between; align-items: flex-end; min-height: 70mm; gap: 12mm;">
-                                <div style="flex: 1 1 auto; font-size: 11mm; line-height: 1.35;">
+                            <div style="display: flex; justify-content: space-between; align-items: flex-end; min-height: 82mm; gap: 18mm;">
+                                <div style="flex: 1 1 auto; font-size: 13mm; line-height: 1.35; padding-left: 6mm;">
                                     <div>
-                                        <strong>Cod produs:</strong>
+                                        <strong>Cod Comanda:</strong>
                                         <t t-esc="label.get('product_code') or '-'"/>
-                                    </div>
-                                    <div>
-                                        <strong>Cod intern:</strong>
-                                        <t t-esc="label.get('internal_code') or '-'"/>
                                     </div>
                                     <div>
                                         <strong>Brand:</strong>
                                         <t t-esc="label.get('brand') or '-'"/>
                                     </div>
+                                    <div t-if="label.get('internal_code') and label.get('internal_code') != label.get('product_code')" style="font-size: 8mm; margin-top: 4mm;">
+                                        <strong>Cod intern:</strong>
+                                        <t t-esc="label.get('internal_code')"/>
+                                    </div>
                                 </div>
-                                <div style="flex: 0 0 110mm; text-align: right;">
-                                    <img t-if="company.logo" t-att-src="image_data_uri(company.logo)" alt="Company Logo" style="max-width: 110mm; max-height: 55mm; object-fit: contain;"/>
+                                <div style="flex: 0 0 132mm; text-align: right; padding-right: 4mm;">
+                                    <img t-if="company.logo" t-att-src="image_data_uri(company.logo)" alt="Company Logo" style="max-width: 132mm; max-height: 62mm; object-fit: contain;"/>
                                 </div>
                             </div>
                         </div>
