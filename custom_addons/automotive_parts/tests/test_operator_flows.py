@@ -80,6 +80,31 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertTrue(async_job, 'Queueing an invoice import should enqueue a background job.')
         self.assertEqual(async_job.state, 'queued')
 
+    def test_invoice_upload_wizard_multiple_documents_opens_batch_list(self):
+        attachment_one = self.env['ir.attachment'].create({
+            'name': 'supplier_invoice_1.pdf',
+            'type': 'binary',
+            'datas': base64.b64encode(b'%PDF-1.4\n% automotive test one\n'),
+            'mimetype': 'application/pdf',
+        })
+        attachment_two = self.env['ir.attachment'].create({
+            'name': 'supplier_invoice_2.pdf',
+            'type': 'binary',
+            'datas': base64.b64encode(b'%PDF-1.4\n% automotive test two\n'),
+            'mimetype': 'application/pdf',
+        })
+        wizard = self.env['invoice.ingest.upload.wizard'].create({
+            'supplier_id': self.supplier.id,
+            'upload_attachment_ids': [(6, 0, [attachment_one.id, attachment_two.id])],
+        })
+
+        action = wizard.action_import_document()
+
+        self.assertEqual(action['type'], 'ir.actions.act_window')
+        self.assertEqual(action['res_model'], 'invoice.ingest.job')
+        self.assertEqual(action['target'], 'current')
+        self.assertEqual(action['domain'][0][0], 'batch_uid')
+
     def test_invoice_ingest_cron_skips_empty_manual_jobs(self):
         manual_job = self.env['invoice.ingest.job'].create({
             'name': 'Manual Placeholder',

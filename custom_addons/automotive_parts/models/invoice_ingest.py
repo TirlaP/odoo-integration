@@ -3510,18 +3510,9 @@ class InvoiceIngestUploadWizard(models.TransientModel):
                 },
             }
 
-        return {
-            'type': 'ir.actions.client',
-            'tag': 'display_notification',
-            'params': {
-                'title': 'Invoice Ingest',
-                'message': (
-                    f'{len(jobs)} documents queued for background import.'
-                    if not reused_count
-                    else f'{len(jobs)} documents queued for background import ({reused_count} existing imports reprocessed).'
-                ),
-                'type': 'success',
-                'sticky': False,
-                'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
-            },
-        }
+        action = self.env.ref('automotive_parts.action_invoice_ingest_jobs').read()[0]
+        action.update({
+            'domain': [('batch_uid', '=', batch_uid)],
+            'target': 'current',
+        })
+        return action
