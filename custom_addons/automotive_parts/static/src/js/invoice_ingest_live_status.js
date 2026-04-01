@@ -15,6 +15,7 @@ patch(FormController.prototype, {
     setup() {
         super.setup(...arguments);
         this.notification = useService("notification");
+        this.actionService = useService("action");
         this._invoiceIngestPollTimer = null;
         this._invoiceIngestPolling = false;
         this._closeInvoiceIngestNotification = null;
@@ -22,12 +23,16 @@ patch(FormController.prototype, {
         useEffect(
             () => {
                 this._syncInvoiceIngestPolling();
+                this._maybeShowInvoiceDuplicateWarning();
                 return () => this._stopInvoiceIngestPolling();
             },
             () => [
                 this.props.resModel,
                 this.model.root?.resId || false,
                 this.model.root?.data?.state || "",
+                this.model.root?.data?.finished_at || "",
+                this._invoiceDuplicateTargetId() || false,
+                this.model.root?.data?.duplicate_warning_message || "",
             ]
         );
 
@@ -84,6 +89,74 @@ patch(FormController.prototype, {
         this._invoiceIngestPolling = false;
     },
 
+    _invoiceDuplicateTargetId() {
+        const value = this.model.root?.data?.duplicate_of_job_id;
+        if (Array.isArray(value)) {
+            return value[0];
+        }
+        if (value && typeof value === "object" && "resId" in value) {
+            return value.resId;
+        }
+        return value || false;
+    },
+
+    _invoiceDuplicateNoticeKey() {
+        if (this.props.resModel !== "invoice.ingest.job" || !this.model.root?.resId) {
+            return false;
+        }
+        const duplicateId = this._invoiceDuplicateTargetId();
+        if (!duplicateId) {
+            return false;
+        }
+        return [
+            "invoice_ingest_duplicate",
+            this.model.root.resId,
+            duplicateId,
+            this.model.root?.data?.finished_at || "",
+        ].join(":");
+    },
+
+    _maybeShowInvoiceDuplicateWarning() {
+        if (
+            this.props.resModel !== "invoice.ingest.job" ||
+            !this.model.root?.resId ||
+            ACTIVE_STATES.has(this.model.root?.data?.state)
+        ) {
+            return;
+        }
+        const duplicateId = this._invoiceDuplicateTargetId();
+        const message = this.model.root?.data?.duplicate_warning_message;
+        const noticeKey = this._invoiceDuplicateNoticeKey();
+        if (!duplicateId || !message || !noticeKey) {
+            return;
+        }
+        if (browser.sessionStorage.getItem(noticeKey)) {
+            return;
+        }
+        browser.sessionStorage.setItem(noticeKey, "1");
+        this.notification.add(message, {
+            title: _t("Duplicate Document"),
+            type: "warning",
+            sticky: true,
+            buttons: [
+                {
+                    name: _t("Open Original"),
+                    primary: true,
+                    onClick: () =>
+                        this.actionService.doAction({
+                            type: "ir.actions.act_window",
+                            name: _t("Importuri facturi"),
+                            res_model: "invoice.ingest.job",
+                            res_id: duplicateId,
+                            views: [[false, "form"]],
+                            view_mode: "form",
+                            target: "current",
+                        }),
+                },
+            ],
+        });
+    },
+
     async _pollInvoiceIngestRecord() {
         if (!this._isInvoiceIngestProcessing() || this._invoiceIngestPolling) {
             if (!this._isInvoiceIngestProcessing()) {
@@ -104,6 +177,7 @@ patch(FormController.prototype, {
             if (!this._isInvoiceIngestProcessing()) {
                 this._stopInvoiceIngestPolling();
             }
+            this._maybeShowInvoiceDuplicateWarning();
         }
     },
 });

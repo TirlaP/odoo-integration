@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import base64
 import glob
-import hashlib
 import json
 import logging
 import mimetypes
@@ -169,6 +168,15 @@ class InvoiceIngestJob(models.Model):
         'Line Extraction Message',
         compute='_compute_line_extraction_message',
     )
+    duplicate_of_job_id = fields.Many2one(
+        'invoice.ingest.job',
+        string='Duplicate Of',
+        compute='_compute_duplicate_warning',
+    )
+    duplicate_warning_message = fields.Text(
+        'Duplicate Warning Message',
+        compute='_compute_duplicate_warning',
+    )
     allow_test_duplicate_action = fields.Boolean(
         'Allow Test Duplicate Action',
         compute='_compute_allow_test_duplicate_action',
@@ -211,6 +219,20 @@ class InvoiceIngestJob(models.Model):
                 )
             else:
                 job.line_extraction_message = False
+
+    @api.depends('payload_json', 'error')
+    def _compute_duplicate_warning(self):
+        for job in self:
+            duplicate_id = job._get_duplicate_of_job_id()
+            duplicate = self.browse(duplicate_id).exists() if duplicate_id else self.browse()
+            if duplicate:
+                job.duplicate_of_job_id = duplicate
+                job.duplicate_warning_message = _(
+                    'This document looks like a duplicate of "%s". Review the original import before continuing.'
+                ) % duplicate.display_name
+            else:
+                job.duplicate_of_job_id = False
+                job.duplicate_warning_message = False
 
     @api.model
     def _allow_test_duplicate_jobs(self):
@@ -2412,63 +2434,12 @@ class InvoiceIngestJob(models.Model):
                 amount_total=pdf_totals.get('amount_total') or self._safe_float(parsed.get('amount_total')),
                 document_type=document_type or 'invoice',
             )
+            duplicate_of_id = False
+            duplicate_warning = False
             if duplicate and duplicate.id != job.id:
-                job.write({
-                    'state': 'needs_review',
-                    'partner_id': supplier.id if supplier else False,
-                    'invoice_number': invoice_number,
-                    'invoice_date': self._safe_date(invoice_date_value),
-                    'amount_total': pdf_totals.get('amount_total') or self._safe_float(parsed.get('amount_total')),
-                    'vat_rate': pdf_totals.get('vat_rate') or self._safe_float(parsed.get('vat_rate')),
-                    'currency_id': currency.id,
-                    'ai_confidence': self._safe_float(parsed.get('confidence')),
-                    'error': f'Duplicate supplier invoice already exists: {duplicate.display_name}',
-                })
-                job._set_payload_dict({
-                    'openai': {
-                        'model': job.ai_model or job._default_ai_model(),
-                        'raw': parsed,
-                        'normalized': {
-                            'supplier_name': supplier_name,
-                            'supplier_code': parsed.get('supplier_code'),
-                            'supplier_vat': pdf_header.get('supplier_vat'),
-                            'invoice_number': invoice_number,
-                            'invoice_date': invoice_date_value,
-                            'invoice_due_date': invoice_due_date_value,
-                            'invoice_currency': currency_name or currency.name,
-                            'vat_rate': pdf_totals.get('vat_rate') or self._safe_float(parsed.get('vat_rate')),
-                            'amount_total': pdf_totals.get('amount_total') or self._safe_float(parsed.get('amount_total')),
-                            'confidence': self._safe_float(parsed.get('confidence')),
-                            'warnings': warnings,
-                            'document_type': document_type or 'invoice',
-                            'invoice_lines': [],
-                        },
-                        'pdf_header': pdf_header,
-                        'pdf_reconciliation': {
-                            'total_excl_vat': pdf_totals.get('total_excl_vat'),
-                            'vat_amount': pdf_totals.get('vat_amount'),
-                            'amount_total': pdf_totals.get('amount_total'),
-                            'fallback_line_count': len(fallback_lines),
-                            'ai_line_count': len(ai_lines),
-                        },
-                        'duplicate_of': duplicate.id,
-                    }
-                })
-                job._audit_log(
-                    action='custom',
-                    description=f'Invoice OCR extraction flagged as duplicate: {job.display_name}',
-                    new_values={
-                        'duplicate_of_job_id': duplicate.id,
-                        'duplicate_of_name': duplicate.display_name,
-                        'ai_model': job.ai_model or job._default_ai_model(),
-                        'partner_id': supplier.id if supplier else False,
-                        'invoice_number': invoice_number,
-                        'invoice_date': self._safe_date(invoice_date_value),
-                        'amount_total': pdf_totals.get('amount_total') or self._safe_float(parsed.get('amount_total')),
-                        'warnings': warnings,
-                    },
-                )
-                return
+                duplicate_of_id = duplicate.id
+                duplicate_warning = f'Duplicate supplier invoice already exists: {duplicate.display_name}'
+                warnings.append(duplicate_warning)
             if len(fallback_lines) > len(ai_lines):
                 lines = fallback_lines
                 warnings.append(
@@ -2553,6 +2524,8 @@ class InvoiceIngestJob(models.Model):
                     'ai_line_count': len(ai_lines),
                 },
             }
+            if duplicate_of_id:
+                payload['openai']['duplicate_of'] = duplicate_of_id
             vals = {
                 'state': 'needs_review',
                 'partner_id': supplier.id if supplier else False,
@@ -2563,7 +2536,7 @@ class InvoiceIngestJob(models.Model):
                 'currency_id': currency.id,
                 'document_type': document_type or 'invoice',
                 'ai_confidence': self._safe_float(parsed.get('confidence')),
-                'error': False,
+                'error': duplicate_warning or False,
             }
             job.write(vals)
             job._set_payload_dict(payload)
@@ -2579,6 +2552,7 @@ class InvoiceIngestJob(models.Model):
                     'used_pdf_fallback_lines': len(fallback_lines) > len(ai_lines),
                     'warning_count': len(warnings),
                     'warnings': warnings,
+                    'duplicate_of_job_id': duplicate_of_id or False,
                     **job._audit_line_summary(),
                 },
             )
@@ -3388,49 +3362,22 @@ class InvoiceIngestUploadWizard(models.TransientModel):
         if kind == 'image' and not shutil.which('tesseract'):
             raise UserError('Image OCR requires Tesseract OCR to be installed on the server.')
 
-        file_checksum = hashlib.sha256(binary).hexdigest()
-        job = self.env['invoice.ingest.job'].search([
-            ('source', '=', 'ocr'),
-            ('external_id', '=', file_checksum),
-        ], limit=1)
-        reused_existing_job = bool(job)
-        if not job:
-            job = self.env['invoice.ingest.job'].create({
-                'name': f'OCR - {filename}',
-                'source': 'ocr',
-                'external_id': file_checksum,
-                'state': 'pending',
-                'partner_id': self.supplier_id.id if self.supplier_id else False,
-                'ai_model': self.env['invoice.ingest.job']._default_ai_model(),
-                'batch_uid': batch_uid,
-                'batch_name': batch_name,
-                'batch_index': batch_index,
-                'batch_total': batch_total,
-                'queued_at': fields.Datetime.now(),
-            })
-        else:
-            queue_vals = {
-                'batch_uid': batch_uid,
-                'batch_name': batch_name,
-                'batch_index': batch_index,
-                'batch_total': batch_total,
-            }
-            if job.state in {'failed', 'needs_review'}:
-                queue_vals.update({
-                    'state': 'pending',
-                    'queued_at': fields.Datetime.now(),
-                    'started_at': False,
-                    'finished_at': False,
-                    'error': False,
-                })
-            if not job.partner_id and self.supplier_id:
-                queue_vals['partner_id'] = self.supplier_id.id
-            if queue_vals:
-                job.write(queue_vals)
+        job = self.env['invoice.ingest.job'].create({
+            'name': f'OCR - {filename}',
+            'source': 'ocr',
+            'external_id': f'upload:{uuid.uuid4().hex}',
+            'state': 'pending',
+            'partner_id': self.supplier_id.id if self.supplier_id else False,
+            'ai_model': self.env['invoice.ingest.job']._default_ai_model(),
+            'batch_uid': batch_uid,
+            'batch_name': batch_name,
+            'batch_index': batch_index,
+            'batch_total': batch_total,
+            'queued_at': fields.Datetime.now(),
+        })
 
-        if not job.attachment_id:
-            attachment.write({'res_model': 'invoice.ingest.job', 'res_id': job.id})
-            job.write({'attachment_id': attachment.id})
+        attachment.write({'res_model': 'invoice.ingest.job', 'res_id': job.id})
+        job.write({'attachment_id': attachment.id})
 
         job._audit_log(
             action='custom',
@@ -3440,14 +3387,13 @@ class InvoiceIngestUploadWizard(models.TransientModel):
                 'attachment_id': job.attachment_id.id if job.attachment_id else False,
                 'partner_id': job.partner_id.id if job.partner_id else False,
                 'external_id': job.external_id,
-                'reused_existing_job': reused_existing_job,
                 'batch_uid': job.batch_uid,
                 'batch_name': job.batch_name,
                 'batch_index': job.batch_index,
                 'batch_total': job.batch_total,
             },
         )
-        return job, reused_existing_job
+        return job
 
     def action_import_document(self):
         self.ensure_one()
@@ -3464,18 +3410,15 @@ class InvoiceIngestUploadWizard(models.TransientModel):
             'requested_by_id': self.env.user.id,
         })
         jobs = self.env['invoice.ingest.job']
-        reused_count = 0
         total = len(documents)
         for index, document in enumerate(documents, start=1):
-            job, reused_existing_job = self._queue_document_job(
+            job = self._queue_document_job(
                 document,
                 batch_uid=batch_uid,
                 batch_name=batch_name,
                 batch_index=index,
                 batch_total=total,
             )
-            if reused_existing_job:
-                reused_count += 1
             job._enqueue_async_processing(
                 batch=async_batch,
                 batch_uid=batch_uid,
@@ -3486,33 +3429,21 @@ class InvoiceIngestUploadWizard(models.TransientModel):
 
         if len(jobs) == 1:
             job = jobs[:1]
-            message = (
-                'Existing import requeued for background processing.'
-                if reused_count
-                else 'Document queued for background import.'
-            )
             return {
-                'type': 'ir.actions.client',
-                'tag': 'display_notification',
-                'params': {
-                    'title': 'Invoice Ingest',
-                    'message': message,
-                    'type': 'success',
-                    'sticky': False,
-                    'next': {
-                        'type': 'ir.actions.act_window',
-                        'name': 'Importuri facturi',
-                        'res_model': 'invoice.ingest.job',
-                        'res_id': job.id,
-                        'view_mode': 'form',
-                        'target': 'current',
-                    },
-                },
+                'type': 'ir.actions.act_window',
+                'name': 'Importuri facturi',
+                'res_model': 'invoice.ingest.job',
+                'res_id': job.id,
+                'views': [(False, 'form')],
+                'view_mode': 'form',
+                'target': 'current',
             }
 
         action = self.env.ref('automotive_parts.action_invoice_ingest_jobs').read()[0]
         action.update({
             'domain': [('batch_uid', '=', batch_uid)],
+            'views': [(False, 'list'), (False, 'form')],
+            'view_mode': 'list,form',
             'target': 'current',
         })
         return action

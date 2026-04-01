@@ -54,8 +54,10 @@ class TestAutomotiveOperatorFlows(TransactionCase):
 
         action = wizard.action_import_document()
 
-        self.assertEqual(action['type'], 'ir.actions.client')
-        self.assertEqual(action['tag'], 'display_notification')
+        self.assertEqual(action['type'], 'ir.actions.act_window')
+        self.assertEqual(action['res_model'], 'invoice.ingest.job')
+        self.assertEqual(action['view_mode'], 'form')
+        self.assertEqual(action['views'], [(False, 'form')])
 
         job = self.env['invoice.ingest.job'].search(
             [('source', '=', 'ocr'), ('partner_id', '=', self.supplier.id)],
@@ -79,6 +81,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         )
         self.assertTrue(async_job, 'Queueing an invoice import should enqueue a background job.')
         self.assertEqual(async_job.state, 'queued')
+        self.assertEqual(action['res_id'], job.id)
 
     def test_invoice_upload_wizard_multiple_documents_opens_batch_list(self):
         attachment_one = self.env['ir.attachment'].create({
@@ -104,6 +107,28 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertEqual(action['res_model'], 'invoice.ingest.job')
         self.assertEqual(action['target'], 'current')
         self.assertEqual(action['domain'][0][0], 'batch_uid')
+        self.assertEqual(action['views'], [(False, 'list'), (False, 'form')])
+
+    def test_same_uploaded_file_creates_new_ocr_jobs(self):
+        payload = base64.b64encode(b'%PDF-1.4\n% identical content\n')
+        wizard_one = self.env['invoice.ingest.upload.wizard'].create({
+            'supplier_id': self.supplier.id,
+            'pdf_file': payload,
+            'pdf_filename': 'same_file.pdf',
+        })
+        action_one = wizard_one.action_import_document()
+        first_job = self.env['invoice.ingest.job'].browse(action_one['res_id'])
+
+        wizard_two = self.env['invoice.ingest.upload.wizard'].create({
+            'supplier_id': self.supplier.id,
+            'pdf_file': payload,
+            'pdf_filename': 'same_file_again.pdf',
+        })
+        action_two = wizard_two.action_import_document()
+        second_job = self.env['invoice.ingest.job'].browse(action_two['res_id'])
+
+        self.assertNotEqual(first_job.id, second_job.id)
+        self.assertNotEqual(first_job.external_id, second_job.external_id)
 
     def test_invoice_ingest_cron_skips_empty_manual_jobs(self):
         manual_job = self.env['invoice.ingest.job'].create({
@@ -139,6 +164,26 @@ class TestAutomotiveOperatorFlows(TransactionCase):
 
         self.assertFalse(job.line_ids)
         self.assertIn('No invoice lines were extracted', job.line_extraction_message or '')
+
+    def test_invoice_ingest_exposes_duplicate_warning_fields(self):
+        original = self.env['invoice.ingest.job'].create({
+            'name': 'Original OCR Invoice',
+            'source': 'ocr',
+            'state': 'needs_review',
+        })
+        duplicate = self.env['invoice.ingest.job'].create({
+            'name': 'Duplicate OCR Invoice',
+            'source': 'ocr',
+            'state': 'needs_review',
+            'payload_json': json.dumps({
+                'openai': {
+                    'duplicate_of': original.id,
+                },
+            }),
+        })
+
+        self.assertEqual(duplicate.duplicate_of_job_id, original)
+        self.assertIn(original.display_name, duplicate.duplicate_warning_message or '')
 
     def test_reprocess_existing_ocr_job_requeues_same_record(self):
         attachment = self.env['ir.attachment'].create({
