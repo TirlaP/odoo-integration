@@ -37,6 +37,8 @@ Complete ERP system for automotive parts distribution with TecDoc integration.
 - Open in browser: `./dev open` (or go to `http://localhost:8069`)
 - Update the custom module after changes: `./dev update`
 - Tail logs: `./dev logs`
+- Install local git hooks: `./scripts/install_git_hooks.sh`
+- Run fast local validation: `make validate-fast`
 - Tip: if you don’t want logs in the terminal, run `LOG_TO_STDOUT=0 ./dev start`
 - Tip: `./dev start` enables auto-reload by default (`--dev=reload`)
 - Tip: after pulling code changes that add fields, run `./dev update -d <your_db>` to apply DB schema updates
