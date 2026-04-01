@@ -52,7 +52,6 @@
         'security/mechanic_security.xml',
         'security/commercial_document_security.xml',
         'security/ir.model.access.csv',
-        'security/commercial_document_access.csv',
         'data/mail_templates.xml',
         'data/mechanic_portal_request_sequence.xml',
         'data/commercial_document_sequence.xml',

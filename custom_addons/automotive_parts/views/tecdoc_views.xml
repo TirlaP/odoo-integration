@@ -45,14 +45,14 @@
                         <page string="Governance &amp; Status" name="governance_status">
                             <group>
                                 <group string="Governance">
-                                    <label string="Source of truth"/>
+                                    <div class="o_form_label">Source of truth</div>
                                     <div>
                                         <p class="text-muted">
                                             TecDoc-linked products should keep supplier/article compatibility aligned with TecDoc.
                                             Manual products can still exist, but they should be reviewed separately.
                                         </p>
                                     </div>
-                                    <label string="Operator rules"/>
+                                    <div class="o_form_label">Operator rules</div>
                                     <div>
                                         <ul class="mb0">
                                             <li>Keep cache enabled in production.</li>

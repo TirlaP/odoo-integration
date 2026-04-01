@@ -4,7 +4,7 @@
         <field name="name">commercial.document.archive.tree</field>
         <field name="model">commercial.document.archive</field>
         <field name="arch" type="xml">
-            <tree string="Commercial Documents" default_order="archived_at desc, id desc">
+            <list string="Commercial Documents" default_order="archived_at desc, id desc">
                 <field name="name"/>
                 <field name="document_type"/>
                 <field name="state"/>
@@ -13,7 +13,7 @@
                 <field name="attachment_name"/>
                 <field name="archived_at"/>
                 <field name="archived_by"/>
-            </tree>
+            </list>
         </field>
     </record>
 
@@ -112,7 +112,7 @@
     <record id="action_commercial_document_archive" model="ir.actions.act_window">
         <field name="name">Commercial Documents</field>
         <field name="res_model">commercial.document.archive</field>
-        <field name="view_mode">tree,form</field>
+        <field name="view_mode">list,form</field>
         <field name="search_view_id" ref="view_commercial_document_archive_search"/>
         <field name="help" type="html">
             <p class="o_view_nocontent_smiling_face">
