@@ -3214,7 +3214,11 @@ class InvoiceIngestUploadWizard(models.TransientModel):
         binary = document['binary']
         mimetype = document['mimetype']
         attachment = document['attachment']
-        kind = self._detect_attachment_kind(binary, filename=filename, mimetype=mimetype)
+        kind = self.env['invoice.ingest.job']._detect_attachment_kind(
+            binary,
+            filename=filename,
+            mimetype=mimetype,
+        )
         if kind not in {'pdf', 'image'}:
             raise UserError(f'Please upload a PDF or image file. Invalid file: {filename}')
         if kind == 'image' and not shutil.which('tesseract'):
