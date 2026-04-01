@@ -36,6 +36,7 @@ class IrActionsReport(models.Model):
                 'label_count': len(labels) or len(docids or []),
                 'dispatch_mode': dispatch_mode,
                 'direct_print_enabled': settings['enabled'],
+                'queue_requested': settings['queue_requested'],
                 'printer_name': settings['printer_name'],
                 'job_name': settings['job_name'],
                 'copies': settings['copies'],
@@ -44,16 +45,41 @@ class IrActionsReport(models.Model):
 
     def _get_label_print_settings(self):
         icp = self.env['ir.config_parameter'].sudo()
+        preview_only = self.env.context.get('automotive_label_print_preview_only') is True
         return {
-            'enabled': icp.get_param('automotive.label_direct_print_enabled') in {'1', 'true', 'True'},
-            'printer_name': (icp.get_param('automotive.label_printer_name') or '').strip(),
-            'command': (icp.get_param('automotive.label_print_command') or '').strip(),
-            'copies': max(int(self.env.context.get('automotive_label_print_copies') or 1), 1),
+            'enabled': (not preview_only) and icp.get_param('automotive.label_direct_print_enabled') in {'1', 'true', 'True'},
+            'queue_requested': self.env.context.get('automotive_label_queue_print') is True,
+            'printer_name': (self.env.context.get('automotive_label_printer_name') or icp.get_param('automotive.label_printer_name') or '').strip(),
+            'command': (self.env.context.get('automotive_label_print_command') or icp.get_param('automotive.label_print_command') or '').strip(),
+            'copies': max(
+                int(
+                    self.env.context.get('automotive_label_print_copies')
+                    or icp.get_param('automotive.label_default_copies')
+                    or 1
+                ),
+                1,
+            ),
             'job_name': (
                 self.env.context.get('automotive_label_print_job_name')
                 or _('Automotive labels')
             ),
+            'source_model': self.env.context.get('automotive_label_source_model') or self.env.context.get('active_model') or False,
+            'source_res_id': self.env.context.get('automotive_label_source_res_id') or self.env.context.get('active_id') or False,
         }
+
+    def _get_label_payloads(self, docids, data=None):
+        self.ensure_one()
+        labels = list((data or {}).get('labels') or [])
+        if labels:
+            return labels
+        if not docids:
+            return []
+        report_model = self.env['report.automotive_parts.report_product_label']
+        try:
+            report_values = report_model._get_report_values(docids, data=data)
+        except Exception:
+            return []
+        return list(report_values.get('docs') or [])
 
     def _get_label_print_command(self, settings):
         command = settings['command']
@@ -157,6 +183,67 @@ class IrActionsReport(models.Model):
             },
         }
 
+    def _enqueue_label_print_job(self, docids, data, settings):
+        self.ensure_one()
+        labels = self._get_label_payloads(docids, data=data)
+        if not labels:
+            raise UserError(_('No labels were prepared for queued printing.'))
+
+        source_record = False
+        try:
+            if settings['source_model'] and settings['source_res_id']:
+                source_record = self.env[settings['source_model']].browse(settings['source_res_id']).exists()
+            elif self.env.context.get('active_model') and docids:
+                source_record = self.env[self.env.context['active_model']].browse(docids[0]).exists()
+        except Exception:
+            source_record = False
+
+        payload = {
+            'labels': labels,
+            'printer_name': settings['printer_name'],
+            'print_command': settings['command'],
+            'copies': settings['copies'],
+            'job_name': settings['job_name'],
+            'report_name': self.report_name,
+        }
+        batch_name = settings['job_name'] or _('Automotive labels')
+        return self.env['automotive.async.job'].enqueue_call(
+            'ir.actions.report',
+            '_run_automotive_async_label_job',
+            target_res_id=self.id,
+            name=batch_name,
+            args=[],
+            kwargs={'payload': payload},
+            payload=payload,
+            source_record=source_record or False,
+            batch_name=batch_name,
+            priority=20,
+            requested_by_id=self.env.user.id,
+            run_as_user_id=self.env.user.id,
+            company_id=self.env.company.id,
+            max_attempts=3,
+        )
+
+    def _run_automotive_async_label_job(self, payload=None):
+        self.ensure_one()
+        payload = payload or {}
+        labels = [label for label in (payload.get('labels') or []) if label and label.get('barcode')]
+        if not labels:
+            raise UserError(_('No labels were prepared for printing.'))
+
+        async_context = {
+            'automotive_label_print_preview_only': False,
+            'automotive_label_queue_print': False,
+            'automotive_label_printer_name': payload.get('printer_name') or '',
+            'automotive_label_print_command': payload.get('print_command') or '',
+            'automotive_label_print_copies': max(int(payload.get('copies') or 1), 1),
+            'automotive_label_print_job_name': payload.get('job_name') or _('Automotive labels'),
+        }
+        report = self.with_context(**async_context)
+        settings = report._get_label_print_settings()
+        pdf_content = report._render_label_report_pdf(data={'labels': labels})
+        return report._dispatch_label_pdf_to_printer(pdf_content, settings)
+
     def _render_label_report_pdf(self, data=None):
         self.ensure_one()
         pdf_content, _content_type = self.with_context(force_report_rendering=True)._render_qweb_pdf(
@@ -174,11 +261,39 @@ class IrActionsReport(models.Model):
             return super().report_action(docids, data=data, config=config)
 
         settings = self._get_label_print_settings()
-        if not settings['enabled']:
-            self._audit_label_request(docids, data, settings, 'requested (pdf)')
+        labels = self._get_label_payloads(docids, data=data)
+        if not labels:
+            raise UserError(_('No labels were prepared for printing.'))
+
+        if (settings['enabled'] or settings['queue_requested']) and not settings['printer_name']:
+            raise UserError(
+                _('No label printer is configured. Set automotive.label_printer_name or disable direct printing.')
+            )
+
+        if (settings['enabled'] or settings['queue_requested']) and not self.env.context.get('skip_automotive_async_queue'):
+            job = self._enqueue_label_print_job(docids, {'labels': labels}, settings)
+            self._audit_label_request(docids, {'labels': labels}, settings, f'queued as {job.display_name}')
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': _('Eticheta a fost pusă în coadă'),
+                    'message': _(
+                        'Jobul "%(job)s" a fost pus în coadă pentru imprimanta "%(printer)s".'
+                    ) % {
+                        'job': job.display_name,
+                        'printer': settings['printer_name'],
+                    },
+                    'type': 'info',
+                    'sticky': False,
+                },
+            }
+
+        if self.env.context.get('automotive_label_print_preview_only') is True or not settings['enabled']:
+            self._audit_label_request(docids, {'labels': labels}, settings, 'requested (pdf)')
             return super().report_action(docids, data=data, config=config)
 
-        pdf_content = self._render_label_report_pdf(data=data)
+        pdf_content = self._render_label_report_pdf(data={'labels': labels})
         result = self._dispatch_label_pdf_to_printer(pdf_content, settings)
-        self._audit_label_request(docids, data, settings, 'dispatched to printer')
+        self._audit_label_request(docids, {'labels': labels}, settings, 'dispatched to printer')
         return result

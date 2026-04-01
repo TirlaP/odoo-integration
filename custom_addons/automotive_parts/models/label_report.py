@@ -35,12 +35,26 @@ class ReportAutomotiveLabel(models.AbstractModel):
             ))
         return labels
 
+    def _expand_labels(self, labels):
+        expanded = []
+        for label in labels or []:
+            qty = 1
+            try:
+                qty = int(label.get('qty') or 1)
+            except (TypeError, ValueError, AttributeError):
+                qty = 1
+            qty = max(qty, 1)
+            for _idx in range(qty):
+                expanded.append(dict(label, qty=1))
+        return expanded
+
     def _get_report_values(self, docids, data=None):
         labels = list((data or {}).get('labels') or [])
         if not labels:
             active_model = self.env.context.get('active_model') or 'product.template'
             if active_model in {'product.template', 'product.product'} and docids:
                 labels = self._build_labels_from_records(self.env[active_model].browse(docids).exists())
+        labels = self._expand_labels(labels)
         if not labels:
             raise UserError(_('No labels were prepared for printing.'))
         return {

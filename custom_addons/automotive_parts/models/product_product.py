@@ -430,7 +430,12 @@ class ProductProduct(models.Model):
         """Generate a printable product label PDF."""
         self.ensure_one()
         labels = [self._prepare_label_payload()]
-        return self._action_print_labels_report(labels)
+        return self.env['automotive.label.print.wizard'].open_wizard(
+            labels=labels,
+            source_record=self,
+            label_count=1,
+            job_name=self.display_name,
+        )
 
     @api.model
     def _prepare_label_payload_from_values(

@@ -10,13 +10,13 @@ import re
 import shutil
 import subprocess
 import tempfile
-import threading
+import uuid
 from datetime import datetime
+from math import ceil
 from io import BytesIO
 from collections import defaultdict
 from xml.etree import ElementTree
 
-import odoo
 import requests
 from PyPDF2 import PdfReader
 from odoo import api, fields, models
@@ -41,30 +41,6 @@ PROGRESSIVE_TRIM_MAX_STEPS = 8
 _logger = logging.getLogger(__name__)
 
 
-def _invoice_ingest_background_worker(db_name, job_id):
-    registry = odoo.registry(db_name)
-    try:
-        with registry.cursor() as cr:
-            env = api.Environment(cr, odoo.SUPERUSER_ID, {})
-            job = env['invoice.ingest.job'].browse(job_id).exists()
-            if not job:
-                return
-            job._process_ingest_job()
-            cr.commit()
-    except Exception:
-        _logger.exception("Invoice ingest background worker failed for job_id=%s", job_id)
-
-
-def _start_invoice_ingest_background_worker(db_name, job_id):
-    thread = threading.Thread(
-        target=_invoice_ingest_background_worker,
-        args=(db_name, job_id),
-        name=f"invoice_ingest_job_{job_id}",
-        daemon=True,
-    )
-    thread.start()
-
-
 class InvoiceIngestJob(models.Model):
     _name = 'invoice.ingest.job'
     _description = 'Invoice Ingest Job'
@@ -87,6 +63,13 @@ class InvoiceIngestJob(models.Model):
         'error',
         'ai_model',
         'ai_confidence',
+        'batch_uid',
+        'batch_name',
+        'batch_index',
+        'batch_total',
+        'queued_at',
+        'started_at',
+        'finished_at',
     }
     _sql_constraints = [
         (
@@ -159,6 +142,13 @@ class InvoiceIngestJob(models.Model):
         help='Used when extracting invoice details with OpenAI.',
     )
     ai_confidence = fields.Float('AI Confidence (%)')
+    batch_uid = fields.Char('Batch UID', index=True, readonly=True)
+    batch_name = fields.Char('Batch Name', index=True, readonly=True)
+    batch_index = fields.Integer('Batch Index', readonly=True)
+    batch_total = fields.Integer('Batch Total', readonly=True)
+    queued_at = fields.Datetime('Queued At', readonly=True, index=True)
+    started_at = fields.Datetime('Started At', readonly=True, index=True)
+    finished_at = fields.Datetime('Finished At', readonly=True, index=True)
 
     def _audit_snapshot(self, field_names=None):
         self.ensure_one()
@@ -223,8 +213,78 @@ class InvoiceIngestJob(models.Model):
             },
         )
 
+    def _queue_metadata(self, batch_uid=None, batch_name=None, batch_index=None, batch_total=None):
+        self.ensure_one()
+        return {
+            'state': 'pending',
+            'error': False,
+            'queued_at': fields.Datetime.now(),
+            'started_at': False,
+            'finished_at': False,
+            'batch_uid': batch_uid or self.batch_uid or uuid.uuid4().hex,
+            'batch_name': batch_name or self.batch_name or False,
+            'batch_index': batch_index if batch_index not in (None, False) else (self.batch_index or 0),
+            'batch_total': batch_total if batch_total not in (None, False) else (self.batch_total or 0),
+        }
+
+    def _queue_processing(self, batch_uid=None, batch_name=None, batch_index=None, batch_total=None):
+        self.ensure_one()
+        values = self._queue_metadata(
+            batch_uid=batch_uid,
+            batch_name=batch_name,
+            batch_index=batch_index,
+            batch_total=batch_total,
+        )
+        self.write(values)
+        return values['batch_uid']
+
+    def _get_async_processing_job(self, states=('queued', 'running')):
+        self.ensure_one()
+        return self.env['automotive.async.job'].search(
+            [
+                ('job_type', '=', 'invoice_ingest'),
+                ('source_model', '=', self._name),
+                ('source_res_id', '=', self.id),
+                ('target_model', '=', self._name),
+                ('target_res_id', '=', self.id),
+                ('target_method', '=', '_process_ingest_job'),
+                ('state', 'in', list(states)),
+            ],
+            order='id desc',
+            limit=1,
+        )
+
+    def _enqueue_async_processing(self, batch=False, batch_uid=None, batch_name=None, force=False, priority=80):
+        self.ensure_one()
+        existing_job = self._get_async_processing_job()
+        if existing_job and not force:
+            return existing_job
+
+        effective_batch_name = batch_name or self.batch_name or self.display_name
+        self._queue_processing(batch_uid=batch_uid, batch_name=effective_batch_name)
+        return self.env['automotive.async.job'].enqueue_job(
+            'invoice_ingest',
+            name=_('Process %s') % self.display_name,
+            payload={
+                'invoice_ingest_job_id': self.id,
+                'batch_uid': self.batch_uid,
+                'batch_name': self.batch_name,
+            },
+            source=self,
+            batch=batch,
+            batch_name=effective_batch_name,
+            priority=priority,
+            target_model=self._name,
+            target_method='_process_ingest_job',
+            target_res_id=self.id,
+        )
+
     @api.model_create_multi
     def create(self, vals_list):
+        now = fields.Datetime.now()
+        for vals in vals_list:
+            if vals.get('state', 'pending') == 'pending' and not vals.get('queued_at'):
+                vals['queued_at'] = now
         jobs = super().create(vals_list)
         if self.env.context.get('skip_audit_log') is True:
             return jobs
@@ -407,6 +467,10 @@ class InvoiceIngestJob(models.Model):
         attachment_id=None,
         document_type=None,
         payload=None,
+        batch_uid=None,
+        batch_name=None,
+        batch_index=None,
+        batch_total=None,
     ):
         existing = self._find_duplicate_job(
             source=source,
@@ -437,6 +501,16 @@ class InvoiceIngestJob(models.Model):
                 vals['attachment_id'] = attachment_id
             if not existing.document_type and document_type:
                 vals['document_type'] = document_type
+            if batch_uid:
+                vals['batch_uid'] = batch_uid
+            if batch_name:
+                vals['batch_name'] = batch_name
+            if batch_index not in (None, False):
+                vals['batch_index'] = batch_index
+            if batch_total not in (None, False):
+                vals['batch_total'] = batch_total
+            if existing.state in {'pending', 'failed'} and not existing.queued_at:
+                vals['queued_at'] = fields.Datetime.now()
             if vals:
                 existing.write(vals)
             if payload:
@@ -456,6 +530,11 @@ class InvoiceIngestJob(models.Model):
             'picking_id': picking_id,
             'attachment_id': attachment_id,
             'document_type': document_type,
+            'batch_uid': batch_uid,
+            'batch_name': batch_name,
+            'batch_index': batch_index or 0,
+            'batch_total': batch_total or 0,
+            'queued_at': fields.Datetime.now() if source in {'ocr', 'anaf'} or batch_uid else False,
         }
         job = self.create(vals)
         if payload:
@@ -1219,17 +1298,25 @@ class InvoiceIngestJob(models.Model):
             if job.state not in {'pending', 'failed', 'needs_review'}:
                 continue
             try:
-                job.write({'state': 'running', 'error': False})
+                job.write({
+                    'state': 'running',
+                    'error': False,
+                    'started_at': fields.Datetime.now(),
+                    'finished_at': False,
+                })
                 if job.source == 'ocr' and job.attachment_id:
                     job.action_extract_with_openai()
                 elif job.account_move_id:
-                    job.write({'state': 'done'})
+                    job.write({'state': 'done', 'finished_at': fields.Datetime.now()})
                 else:
-                    job.write({'state': 'needs_review'})
+                    job.write({'state': 'needs_review', 'finished_at': fields.Datetime.now()})
+                if job.state in {'done', 'needs_review'} and not job.finished_at:
+                    job.write({'finished_at': fields.Datetime.now()})
             except Exception as exc:  # noqa: BLE001
                 job.write({
                     'state': 'failed',
                     'error': str(exc) or repr(exc),
+                    'finished_at': fields.Datetime.now(),
                 })
                 if raise_on_error:
                     raise
@@ -2340,16 +2427,56 @@ class InvoiceIngestJob(models.Model):
 
     def action_run(self):
         eligible_jobs = self.filtered(lambda job: job.state in {'pending', 'failed', 'needs_review'})
-        old_states = {job.id: job.state for job in eligible_jobs}
-        eligible_jobs._process_ingest_job(raise_on_error=True)
+        if not eligible_jobs:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Invoice Ingest',
+                    'message': 'No queued jobs were eligible for processing.',
+                    'type': 'warning',
+                    'sticky': False,
+                },
+            }
+        batch = False
+        batch_name = False
+        if len(eligible_jobs) > 1:
+            batch_name = _('Invoice ingest batch - %s') % (eligible_jobs[0].batch_name or fields.Datetime.now())
+            batch = self.env['automotive.async.batch'].sudo().create({
+                'name': batch_name,
+                'job_type': 'invoice_ingest',
+                'company_id': self.env.company.id,
+                'requested_by_id': self.env.user.id,
+            })
+
         for job in eligible_jobs:
+            previous_state = job.state
+            job._enqueue_async_processing(batch=batch, batch_name=batch_name, force=True)
             job._audit_log(
                 action='custom',
-                description=f'Invoice ingest processing retried: {job.display_name}',
-                old_values={'state': old_states.get(job.id)},
+                description=f'Invoice ingest queued for background processing: {job.display_name}',
+                old_values={'state': previous_state},
                 new_values=job._audit_job_summary(),
             )
-        return True
+
+        message = (
+            '1 job queued for background processing.'
+            if len(eligible_jobs) == 1
+            else f'{len(eligible_jobs)} jobs queued for background processing.'
+        )
+        if batch:
+            return batch.action_open_jobs()
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Invoice Ingest',
+                'message': message,
+                'type': 'success',
+                'sticky': False,
+                'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
+            },
+        }
 
     def action_create_draft_vendor_bill(self):
         notifications = []
@@ -2600,9 +2727,15 @@ class InvoiceIngestJob(models.Model):
 
     @api.model
     def cron_process_jobs(self):
-        job = self.search([('state', 'in', ['pending', 'failed'])], order='id asc', limit=1)
-        if job:
-            job._process_ingest_job()
+        jobs = self.search([('state', 'in', ['pending', 'failed'])], order='queued_at asc, id asc', limit=10)
+        queued = 0
+        for job in jobs:
+            with self.env.cr.savepoint():
+                if job._get_async_processing_job():
+                    continue
+                job._enqueue_async_processing(priority=90)
+                queued += 1
+        return queued
 
 
 class InvoiceIngestJobLine(models.Model):
@@ -2976,7 +3109,6 @@ class InvoiceIngestJobLine(models.Model):
 
     def action_generate_label(self):
         self.ensure_one()
-        product_model = self.env['product.product']
         product = self.product_id
         if product:
             label = product._prepare_label_payload(
@@ -2986,44 +3118,109 @@ class InvoiceIngestJobLine(models.Model):
                 internal_code=self.matched_internal_code or product.default_code,
                 price=self.sale_price_incl_vat,
                 brand=self.supplier_brand or product.tecdoc_supplier_name or product.main_supplier_id.name,
+                qty=1,
             )
         else:
-            label = product_model._prepare_label_payload_from_values(
+            label = self.env['product.product']._prepare_label_payload_from_values(
                 name=self.product_description,
                 barcode=self.label_barcode_value,
                 product_code=self.product_code or self.product_code_raw,
                 internal_code='',
                 price=self.sale_price_incl_vat,
                 brand=self.supplier_brand,
+                qty=1,
             )
-        return product_model._action_print_labels_report([label])
+        return self.env['automotive.label.print.wizard'].open_wizard(
+            labels=[label],
+            source_record=self,
+            label_count=max(int(ceil(self.quantity or 1.0)), 1),
+            job_name=self.job_id.display_name or self.display_name,
+        )
+
+    def _prepare_label_payload(self):
+        self.ensure_one()
+        product_model = self.env['product.product']
+        product = self.product_id
+        if product:
+            return product._prepare_label_payload(
+                name=self.product_description or product.display_name,
+                barcode=self.label_barcode_value,
+                product_code=self.product_code or self.product_code_raw or product.supplier_code or product.default_code,
+                internal_code=self.matched_internal_code or product.default_code,
+                price=self.sale_price_incl_vat,
+                brand=self.supplier_brand or product.tecdoc_supplier_name or product.main_supplier_id.name,
+                qty=max(int(ceil(self.quantity or 1.0)), 1),
+            )
+        return product_model._prepare_label_payload_from_values(
+            name=self.product_description,
+            barcode=self.label_barcode_value,
+            product_code=self.product_code or self.product_code_raw,
+            internal_code='',
+            price=self.sale_price_incl_vat,
+            brand=self.supplier_brand,
+            qty=max(int(ceil(self.quantity or 1.0)), 1),
+        )
 
 
 class InvoiceIngestUploadWizard(models.TransientModel):
     _name = 'invoice.ingest.upload.wizard'
     _description = 'Invoice Ingest Upload Wizard'
 
-    pdf_file = fields.Binary('Document File', required=True)
+    pdf_file = fields.Binary('Document File')
     pdf_filename = fields.Char('Filename')
+    upload_attachment_ids = fields.Many2many('ir.attachment', string='Documents')
     supplier_id = fields.Many2one('res.partner', string='Supplier (Optional)')
 
     def action_import_pdf(self):
         return self.action_import_document()
 
-    def action_import_document(self):
+    def _collect_uploaded_documents(self):
         self.ensure_one()
-        if not self.pdf_file:
-            raise UserError('Please upload a PDF or image first.')
-        filename = (self.pdf_filename or 'invoice_document').strip()
-        binary = base64.b64decode(self.pdf_file)
-        mimetype = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+        documents = []
+        if self.upload_attachment_ids:
+            for attachment in self.upload_attachment_ids:
+                binary = attachment.datas and base64.b64decode(attachment.datas) or b''
+                filename = (attachment.name or 'invoice_document').strip()
+                mimetype = attachment.mimetype or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+                documents.append({
+                    'attachment': attachment,
+                    'filename': filename,
+                    'binary': binary,
+                    'mimetype': mimetype,
+                })
+        elif self.pdf_file:
+            filename = (self.pdf_filename or 'invoice_document').strip()
+            binary = base64.b64decode(self.pdf_file)
+            mimetype = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+            attachment = self.env['ir.attachment'].create({
+                'name': filename,
+                'type': 'binary',
+                'datas': self.pdf_file,
+                'mimetype': mimetype,
+                'res_model': 'invoice.ingest.upload.wizard',
+                'res_id': self.id,
+            })
+            documents.append({
+                'attachment': attachment,
+                'filename': filename,
+                'binary': binary,
+                'mimetype': mimetype,
+            })
+        return documents
+
+    def _queue_document_job(self, document, batch_uid, batch_name, batch_index, batch_total):
+        self.ensure_one()
+        filename = document['filename']
+        binary = document['binary']
+        mimetype = document['mimetype']
+        attachment = document['attachment']
         kind = self._detect_attachment_kind(binary, filename=filename, mimetype=mimetype)
         if kind not in {'pdf', 'image'}:
-            raise UserError('Please upload a PDF or image file.')
+            raise UserError(f'Please upload a PDF or image file. Invalid file: {filename}')
         if kind == 'image' and not shutil.which('tesseract'):
             raise UserError('Image OCR requires Tesseract OCR to be installed on the server.')
-        file_checksum = hashlib.sha256(binary).hexdigest()
 
+        file_checksum = hashlib.sha256(binary).hexdigest()
         job = self.env['invoice.ingest.job'].search([
             ('source', '=', 'ocr'),
             ('external_id', '=', file_checksum),
@@ -3037,17 +3234,34 @@ class InvoiceIngestUploadWizard(models.TransientModel):
                 'state': 'pending',
                 'partner_id': self.supplier_id.id if self.supplier_id else False,
                 'ai_model': self.env['invoice.ingest.job']._default_ai_model(),
+                'batch_uid': batch_uid,
+                'batch_name': batch_name,
+                'batch_index': batch_index,
+                'batch_total': batch_total,
+                'queued_at': fields.Datetime.now(),
             })
+        else:
+            queue_vals = {
+                'batch_uid': batch_uid,
+                'batch_name': batch_name,
+                'batch_index': batch_index,
+                'batch_total': batch_total,
+            }
+            if job.state in {'failed', 'needs_review'}:
+                queue_vals.update({
+                    'state': 'pending',
+                    'queued_at': fields.Datetime.now(),
+                    'started_at': False,
+                    'finished_at': False,
+                    'error': False,
+                })
+            if not job.partner_id and self.supplier_id:
+                queue_vals['partner_id'] = self.supplier_id.id
+            if queue_vals:
+                job.write(queue_vals)
 
         if not job.attachment_id:
-            attachment = self.env['ir.attachment'].create({
-                'name': filename,
-                'type': 'binary',
-                'datas': self.pdf_file,
-                'mimetype': mimetype,
-                'res_model': 'invoice.ingest.job',
-                'res_id': job.id,
-            })
+            attachment.write({'res_model': 'invoice.ingest.job', 'res_id': job.id})
             job.write({'attachment_id': attachment.id})
 
         job._audit_log(
@@ -3059,19 +3273,61 @@ class InvoiceIngestUploadWizard(models.TransientModel):
                 'partner_id': job.partner_id.id if job.partner_id else False,
                 'external_id': job.external_id,
                 'reused_existing_job': reused_existing_job,
+                'batch_uid': job.batch_uid,
+                'batch_name': job.batch_name,
+                'batch_index': job.batch_index,
+                'batch_total': job.batch_total,
             },
         )
+        return job
 
-        db_name = self.env.cr.dbname
-        self.env.cr.postcommit.add(
-            lambda db_name=db_name, job_id=job.id: _start_invoice_ingest_background_worker(db_name, job_id)
-        )
+    def action_import_document(self):
+        self.ensure_one()
+        documents = self._collect_uploaded_documents()
+        if not documents:
+            raise UserError('Please upload at least one PDF or image first.')
 
+        batch_uid = uuid.uuid4().hex
+        batch_name = (self.pdf_filename or documents[0]['filename'] or 'invoice batch').strip()
+        async_batch = self.env['automotive.async.batch'].sudo().create({
+            'name': batch_name,
+            'job_type': 'invoice_ingest',
+            'company_id': self.env.company.id,
+            'requested_by_id': self.env.user.id,
+        })
+        jobs = self.env['invoice.ingest.job']
+        total = len(documents)
+        for index, document in enumerate(documents, start=1):
+            job = self._queue_document_job(
+                document,
+                batch_uid=batch_uid,
+                batch_name=batch_name,
+                batch_index=index,
+                batch_total=total,
+            )
+            job._enqueue_async_processing(
+                batch=async_batch,
+                batch_uid=batch_uid,
+                batch_name=batch_name,
+                force=True,
+                priority=85,
+            )
+            jobs |= job
+
+        if len(jobs) == 1:
+            return {
+                'name': 'Invoice Ingest Job',
+                'type': 'ir.actions.act_window',
+                'res_model': 'invoice.ingest.job',
+                'res_id': jobs.id,
+                'view_mode': 'form',
+                'target': 'current',
+            }
         return {
-            'name': 'Invoice Ingest Job',
+            'name': 'Invoice Ingest Batch',
             'type': 'ir.actions.act_window',
-            'res_model': 'invoice.ingest.job',
-            'res_id': job.id,
+            'res_model': 'automotive.async.batch',
+            'res_id': async_batch.id,
             'view_mode': 'form',
             'target': 'current',
         }

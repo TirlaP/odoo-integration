@@ -3,6 +3,8 @@ from . import res_partner
 from . import product_product
 from . import sale_order
 from . import account_move
+from . import automotive_async_job
+from . import label_print_wizard
 from . import stock_move
 from . import stock_move_line
 from . import stock_picking

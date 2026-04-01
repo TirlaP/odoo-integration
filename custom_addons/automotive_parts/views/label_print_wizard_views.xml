@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_automotive_label_print_wizard_form" model="ir.ui.view">
+        <field name="name">automotive.label.print.wizard.form</field>
+        <field name="model">automotive.label.print.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Generate Label">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="source_display_name" readonly="1"/>
+                            <field name="output_mode"/>
+                            <field name="label_count"/>
+                            <field name="total_labels" readonly="1"/>
+                        </group>
+                        <group>
+                            <field name="copies"/>
+                            <field name="job_name"/>
+                            <field name="printer_name" invisible="output_mode != 'queue_print'"/>
+                            <field name="print_command" invisible="output_mode != 'queue_print'"/>
+                        </group>
+                    </group>
+                    <group string="Source">
+                        <field name="source_model" readonly="1"/>
+                        <field name="source_res_id" readonly="1"/>
+                    </group>
+                    <group string="Label Payload" invisible="1">
+                        <field name="label_payload_json" widget="text"/>
+                    </group>
+                    <div class="text-muted">
+                        Preview PDF keeps the manual flow. Queue Print sends the label job to the background job queue and then to the configured printer.
+                    </div>
+                </sheet>
+                <footer>
+                    <button name="action_preview_pdf" type="object" string="Preview PDF" class="btn-secondary"/>
+                    <button name="action_process" type="object" string="Generate" class="btn-primary"/>
+                    <button string="Cancel" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_automotive_label_print_wizard" model="ir.actions.act_window">
+        <field name="name">Generate Label</field>
+        <field name="path">automotive-label-print</field>
+        <field name="res_model">automotive.label.print.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="view_id" ref="view_automotive_label_print_wizard_form"/>
+        <field name="target">new</field>
+    </record>
+</odoo>

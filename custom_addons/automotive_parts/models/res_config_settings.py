@@ -32,6 +32,11 @@ class ResConfigSettings(models.TransientModel):
         config_parameter='automotive.label_print_command',
         help='Optional override for the server-side print command. Leave empty to auto-detect lp/lpr.',
     )
+    automotive_label_default_copies = fields.Integer(
+        string='Default label copies',
+        config_parameter='automotive.label_default_copies',
+        default=1,
+    )
     automotive_ready_email_enabled = fields.Boolean(
         related='company_id.automotive_ready_email_enabled',
         readonly=False,

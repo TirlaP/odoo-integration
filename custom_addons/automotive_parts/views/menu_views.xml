@@ -179,4 +179,21 @@
               parent="menu_automotive_root"
               action="action_audit_log"
               sequence="90"/>
+
+    <menuitem id="menu_background_jobs"
+              name="Background Jobs"
+              parent="menu_automotive_root"
+              sequence="95"/>
+
+    <menuitem id="menu_background_job_queue"
+              name="Queue"
+              parent="menu_background_jobs"
+              action="action_automotive_async_jobs"
+              sequence="10"/>
+
+    <menuitem id="menu_background_job_batches"
+              name="Batches"
+              parent="menu_background_jobs"
+              action="action_automotive_async_batches"
+              sequence="20"/>
 </odoo>

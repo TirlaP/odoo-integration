@@ -30,6 +30,10 @@
                             <label for="automotive_label_print_command" class="o_light_label me-2"/>
                             <field name="automotive_label_print_command" placeholder="lp"/>
                         </div>
+                        <div class="mt8">
+                            <label for="automotive_label_default_copies" class="o_light_label me-2"/>
+                            <field name="automotive_label_default_copies"/>
+                        </div>
                     </div>
                 </setting>
             </xpath>

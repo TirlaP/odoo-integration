@@ -228,14 +228,18 @@ class StockPicking(models.Model):
         """Print labels for the products on this reception."""
         self.ensure_one()
         labels = []
-        product_model = self.env['product.product']
         for move in self.move_ids_without_package:
             if move.product_id:
                 qty_source = move.quantity or move.product_uom_qty or 0.0
                 copies = max(1, int(ceil(qty_source))) if qty_source else 1
                 for _idx in range(copies):
                     labels.append(move.product_id._prepare_label_payload())
-        return product_model._action_print_labels_report(labels)
+        return self.env['automotive.label.print.wizard'].open_wizard(
+            labels=labels,
+            source_record=self,
+            label_count=1,
+            job_name=self.name or self.nir_number or self.display_name,
+        )
 
     def action_link_invoice(self):
         """Link supplier invoice from ANAF"""
