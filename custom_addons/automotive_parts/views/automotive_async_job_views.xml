@@ -185,7 +185,6 @@
 
     <record id="action_automotive_async_jobs" model="ir.actions.act_window">
         <field name="name">Background Jobs</field>
-        <field name="path">automotive-background-jobs</field>
         <field name="res_model">automotive.async.job</field>
         <field name="view_mode">list,form</field>
         <field name="search_view_id" ref="view_automotive_async_job_search"/>
@@ -193,7 +192,6 @@
 
     <record id="action_automotive_async_batches" model="ir.actions.act_window">
         <field name="name">Background Batches</field>
-        <field name="path">automotive-background-batches</field>
         <field name="res_model">automotive.async.batch</field>
         <field name="view_mode">list,form</field>
         <field name="search_view_id" ref="view_automotive_async_batch_search"/>

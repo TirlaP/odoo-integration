@@ -68,8 +68,8 @@
     </record>
 
     <record id="action_tecdoc_fast_import_runs" model="ir.actions.act_window">
-        <field name="name">TecDoc Fast Import</field>
-        <field name="path">fast-import</field>
+        <field name="name">Import rapid TecDoc</field>
+        <field name="path">import-rapid-tecdoc</field>
         <field name="res_model">tecdoc.fast.import.run</field>
         <field name="view_mode">list,form</field>
     </record>
@@ -145,8 +145,8 @@
     </record>
 
     <record id="action_tecdoc_fast_suppliers" model="ir.actions.act_window">
-        <field name="name">TecDoc Suppliers</field>
-        <field name="path">suppliers</field>
+        <field name="name">Furnizori TecDoc</field>
+        <field name="path">furnizori-tecdoc</field>
         <field name="res_model">tecdoc.supplier</field>
         <field name="view_mode">list,form</field>
     </record>

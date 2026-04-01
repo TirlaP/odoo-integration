@@ -4,7 +4,7 @@
         <field name="name">automotive.payment.allocation.tree</field>
         <field name="model">automotive.payment.allocation</field>
         <field name="arch" type="xml">
-            <list string="Automotive Payment Allocations">
+            <list string="Alocări plăți">
                 <field name="payment_date"/>
                 <field name="payment_id"/>
                 <field name="partner_id"/>
@@ -23,9 +23,9 @@
         <field name="name">automotive.payment.allocation.form</field>
         <field name="model">automotive.payment.allocation</field>
         <field name="arch" type="xml">
-            <form string="Automotive Payment Allocation">
+            <form string="Alocare plată">
                 <header>
-                    <button name="action_open_deliveries" type="object" string="Open Deliveries"
+                    <button name="action_open_deliveries" type="object" string="Deschide livrările"
                             class="btn-secondary" invisible="delivery_count == 0"/>
                     <field name="payment_state" widget="badge"/>
                 </header>
@@ -49,7 +49,7 @@
                     <group>
                         <field name="note" placeholder="Explain what this payment allocation covers..."/>
                     </group>
-                    <group string="Operational linkage">
+                <group string="Legături operaționale">
                         <field name="delivery_picking_ids" readonly="1" widget="many2many_tags"/>
                     </group>
                     <chatter/>
@@ -62,35 +62,35 @@
         <field name="name">automotive.payment.allocation.search</field>
         <field name="model">automotive.payment.allocation</field>
         <field name="arch" type="xml">
-            <search string="Automotive Payment Allocations">
+            <search string="Alocări plăți">
                 <field name="payment_id"/>
                 <field name="partner_id"/>
                 <field name="sale_order_id"/>
                 <field name="sale_order_line_id"/>
                 <field name="account_move_id"/>
                 <filter string="Active" name="active" domain="[('active', '=', True)]"/>
-                <filter string="Paid" name="paid" domain="[('payment_state', '=', 'paid')]"/>
-                <filter string="In Process" name="in_process" domain="[('payment_state', '=', 'in_process')]"/>
-                <group expand="0" string="Group By">
-                    <filter string="Mechanic / Customer" name="group_partner" context="{'group_by': 'partner_id'}"/>
-                    <filter string="Order" name="group_order" context="{'group_by': 'sale_order_id'}"/>
-                    <filter string="Payment" name="group_payment" context="{'group_by': 'payment_id'}"/>
-                    <filter string="State" name="group_state" context="{'group_by': 'payment_state'}"/>
+                <filter string="Plătite" name="paid" domain="[('payment_state', '=', 'paid')]"/>
+                <filter string="În proces" name="in_process" domain="[('payment_state', '=', 'in_process')]"/>
+                <group expand="0" string="Grupează după">
+                    <filter string="Mecanic / client" name="group_partner" context="{'group_by': 'partner_id'}"/>
+                    <filter string="Comandă" name="group_order" context="{'group_by': 'sale_order_id'}"/>
+                    <filter string="Plată" name="group_payment" context="{'group_by': 'payment_id'}"/>
+                    <filter string="Stare" name="group_state" context="{'group_by': 'payment_state'}"/>
                 </group>
             </search>
         </field>
     </record>
 
     <record id="action_automotive_payment_allocations" model="ir.actions.act_window">
-        <field name="name">Payment Allocations</field>
-        <field name="path">automotive-payment-allocations</field>
+        <field name="name">Alocări plăți</field>
+        <field name="path">alocari-plati</field>
         <field name="res_model">automotive.payment.allocation</field>
         <field name="view_mode">list,form</field>
         <field name="search_view_id" ref="view_automotive_payment_allocation_search"/>
     </record>
 
     <menuitem id="menu_automotive_payment_allocations"
-              name="Payment Allocations"
+              name="Alocări plăți"
               parent="menu_automotive_root"
               action="action_automotive_payment_allocations"
               sequence="75"
@@ -113,9 +113,9 @@
                 <field name="automotive_unallocated_amount" widget="monetary" readonly="1"/>
             </xpath>
             <xpath expr="//notebook[@name='payment_notebook']" position="inside">
-                <page string="Automotive Allocations" name="automotive_allocations" invisible="partner_type != 'customer'">
+                <page string="Alocări plăți" name="automotive_allocations" invisible="partner_type != 'customer'">
                     <div class="d-flex gap-2 mb-3">
-                        <button name="action_generate_automotive_allocations" type="object" string="Generate From Invoices"
+                        <button name="action_generate_automotive_allocations" type="object" string="Generează din facturi"
                                 class="btn-primary" invisible="state == 'canceled'"/>
                     </div>
                     <field name="automotive_allocation_ids" nolabel="1"

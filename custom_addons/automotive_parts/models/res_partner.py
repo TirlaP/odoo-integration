@@ -276,7 +276,7 @@ class ResPartner(models.Model):
     def action_view_automotive_payment_allocations(self):
         self.ensure_one()
         return {
-            'name': 'Automotive Payment Allocations',
+            'name': 'Alocări plăți',
             'type': 'ir.actions.act_window',
             'res_model': 'automotive.payment.allocation',
             'view_mode': 'list,form',

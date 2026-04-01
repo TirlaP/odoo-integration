@@ -4,7 +4,7 @@
         <field name="name">invoice.ingest.job.tree</field>
         <field name="model">invoice.ingest.job</field>
         <field name="arch" type="xml">
-            <list string="Invoice Ingest Jobs">
+            <list string="Importuri facturi">
                 <field name="create_date"/>
                 <field name="batch_name" optional="show"/>
                 <field name="batch_index" optional="show"/>
@@ -29,7 +29,7 @@
         <field name="name">invoice.ingest.job.search</field>
         <field name="model">invoice.ingest.job</field>
         <field name="arch" type="xml">
-            <search string="Invoice Ingest Jobs">
+            <search string="Importuri facturi">
                 <field name="name"/>
                 <field name="batch_name"/>
                 <field name="partner_id"/>
@@ -58,7 +58,7 @@
             <form string="Invoice Ingest Job">
                 <header>
                     <button name="action_open_upload_wizard" type="object" class="btn-primary"
-                            string="Import AI (PDF/Image)"/>
+                            string="Import AI facturi"/>
                     <button name="action_run" type="object" class="btn-primary" string="Queue Processing"
                             invisible="state not in ('pending','failed')"/>
                     <button name="action_create_draft_vendor_bill" type="object" class="btn-secondary"
@@ -143,8 +143,8 @@
     </record>
 
     <record id="action_invoice_ingest_jobs" model="ir.actions.act_window">
-        <field name="name">Invoice Ingest Jobs</field>
-        <field name="path">automotive-invoice-ingest</field>
+        <field name="name">Importuri facturi</field>
+        <field name="path">importuri-facturi</field>
         <field name="res_model">invoice.ingest.job</field>
         <field name="view_mode">list,form</field>
         <field name="search_view_id" ref="view_invoice_ingest_job_search"/>
@@ -154,7 +154,7 @@
         <field name="name">invoice.ingest.upload.wizard.form</field>
         <field name="model">invoice.ingest.upload.wizard</field>
         <field name="arch" type="xml">
-            <form string="Import AI (PDF/Image)">
+            <form string="Import AI facturi (PDF/Imagine)">
                 <sheet>
                     <group>
                         <field name="upload_attachment_ids" widget="many2many_binary"
@@ -168,21 +168,21 @@
                         <field name="supplier_id"/>
                     </group>
                     <div class="text-muted">
-                        Drop one or more PDFs or images and click Import. Each file becomes a queued ingest job.
-                        PDF text extraction runs first; scanned pages and images fall back to OCR when the server has Tesseract installed.
+                        Încarcă unul sau mai multe PDF-uri sau imagini și apasă Importă. Fiecare fișier devine un job pus la coadă.
+                        Extracția textului din PDF rulează prima; paginile scanate și imaginile folosesc OCR dacă serverul are Tesseract instalat.
                     </div>
                 </sheet>
                 <footer>
-                    <button name="action_import_document" type="object" string="Queue Documents" class="btn-primary"/>
-                    <button string="Cancel" class="btn-secondary" special="cancel"/>
+                    <button name="action_import_document" type="object" string="Importă documente" class="btn-primary"/>
+                    <button string="Anulează" class="btn-secondary" special="cancel"/>
                 </footer>
             </form>
         </field>
     </record>
 
     <record id="action_invoice_ingest_upload_wizard" model="ir.actions.act_window">
-        <field name="name">Import AI (PDF/Image)</field>
-        <field name="path">automotive-invoice-upload</field>
+        <field name="name">Import AI facturi</field>
+        <field name="path">import-ai-facturi</field>
         <field name="res_model">invoice.ingest.upload.wizard</field>
         <field name="view_mode">form</field>
         <field name="target">new</field>

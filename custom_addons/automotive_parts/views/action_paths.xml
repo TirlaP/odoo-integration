@@ -15,64 +15,64 @@
     </record>
 
     <record id="action_automotive_stock_workspace" model="ir.actions.act_window">
-        <field name="path">automotive-stock-workspace</field>
+        <field name="path">stocuri</field>
     </record>
 
     <record id="stock.action_view_quants" model="ir.actions.server">
-        <field name="path">automotive-stock-quants</field>
+        <field name="path">stocuri-cantitati</field>
     </record>
 
     <record id="stock.action_view_inventory_tree" model="ir.actions.server">
-        <field name="path">automotive-stock-adjustments</field>
+        <field name="path">ajustari-inventar</field>
     </record>
 
     <record id="stock.action_picking_tree_incoming" model="ir.actions.act_window">
-        <field name="path">automotive-receptions</field>
+        <field name="path">receptii-nir</field>
     </record>
 
     <record id="stock.action_picking_tree_outgoing" model="ir.actions.act_window">
-        <field name="path">automotive-deliveries</field>
+        <field name="path">livrari</field>
     </record>
 
     <record id="stock.action_picking_tree_internal" model="ir.actions.act_window">
-        <field name="path">automotive-transfers</field>
+        <field name="path">transferuri-interne</field>
     </record>
 
     <record id="stock.action_orderpoint" model="ir.actions.act_window">
-        <field name="path">automotive-replenishment</field>
+        <field name="path">reaprovizionare</field>
     </record>
 
     <record id="action_automotive_payment_allocations" model="ir.actions.act_window">
-        <field name="path">automotive-payment-allocations</field>
+        <field name="path">alocari-plati</field>
     </record>
 
     <record id="action_mechanic_portal_requests" model="ir.actions.act_window">
-        <field name="path">automotive-mechanic-requests</field>
+        <field name="path">cereri-mecanici</field>
     </record>
 
     <record id="action_commercial_document_archive" model="ir.actions.act_window">
-        <field name="path">automotive-commercial-documents</field>
+        <field name="path">documente-comerciale</field>
     </record>
 
     <record id="action_invoice_ingest_jobs" model="ir.actions.act_window">
-        <field name="path">automotive-invoice-ingest</field>
+        <field name="path">importuri-facturi</field>
     </record>
 
     <record id="action_invoice_ingest_upload_wizard" model="ir.actions.act_window">
-        <field name="path">automotive-invoice-import</field>
+        <field name="path">import-ai-facturi</field>
     </record>
 
     <record id="action_anaf_efactura" model="ir.actions.act_window">
-        <field name="path">automotive-anaf-config</field>
+        <field name="path">configurare-anaf</field>
     </record>
 
     <record id="action_audit_log" model="ir.actions.act_window">
-        <field name="path">automotive-audit-log</field>
+        <field name="path">jurnal-audit</field>
     </record>
 
     <record id="action_automotive_parts_root" model="ir.actions.act_window">
-        <field name="name">Automotive Parts</field>
-        <field name="path">automotive-parts</field>
+        <field name="name">Piese Auto</field>
+        <field name="path">piese-auto</field>
         <field name="res_model">product.template</field>
         <field name="view_mode">list,form</field>
         <field name="search_view_id" ref="automotive_parts.view_product_template_search_tecdoc_fast"/>

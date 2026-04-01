@@ -469,7 +469,7 @@ class AccountPayment(models.Model):
     def action_view_automotive_allocations(self):
         self.ensure_one()
         return {
-            'name': 'Automotive Payment Allocations',
+            'name': 'Alocări plăți',
             'type': 'ir.actions.act_window',
             'res_model': 'automotive.payment.allocation',
             'view_mode': 'list,form',
@@ -606,7 +606,7 @@ class SaleOrder(models.Model):
     automotive_payment_allocation_ids = fields.One2many(
         'automotive.payment.allocation',
         'sale_order_id',
-        string='Payment Allocations',
+        string='Alocări plăți',
     )
     automotive_paid_amount = fields.Monetary(
         string='Paid Amount',
@@ -620,16 +620,16 @@ class SaleOrder(models.Model):
     )
     automotive_payment_status = fields.Selection(
         [
-            ('unpaid', 'Unpaid'),
-            ('partial', 'Partial'),
-            ('paid', 'Paid'),
-            ('overpaid', 'Overpaid'),
+            ('unpaid', 'Neplătită'),
+            ('partial', 'Parțială'),
+            ('paid', 'Plătită'),
+            ('overpaid', 'Supraplătită'),
         ],
-        string='Automotive Payment Status',
+        string='Stare plată',
         compute='_compute_automotive_payment_summary',
     )
     automotive_payment_count = fields.Integer(
-        string='Payment Allocations',
+        string='Alocări plăți',
         compute='_compute_automotive_payment_summary',
     )
 
@@ -660,7 +660,7 @@ class SaleOrder(models.Model):
     def action_view_automotive_payment_allocations(self):
         self.ensure_one()
         return {
-            'name': 'Payment Allocations',
+            'name': 'Alocări plăți',
             'type': 'ir.actions.act_window',
             'res_model': 'automotive.payment.allocation',
             'view_mode': 'list,form',
@@ -678,7 +678,7 @@ class SaleOrderLine(models.Model):
     automotive_payment_allocation_ids = fields.One2many(
         'automotive.payment.allocation',
         'sale_order_line_id',
-        string='Line Payment Allocations',
+        string='Alocări plăți pe poziție',
     )
     automotive_paid_amount = fields.Monetary(
         string='Paid Amount',

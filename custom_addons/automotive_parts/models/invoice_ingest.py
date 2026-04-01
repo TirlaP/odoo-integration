@@ -347,7 +347,7 @@ class InvoiceIngestJob(models.Model):
     def action_open_upload_wizard(self, *args, **kwargs):
         self.ensure_one()
         return {
-            'name': 'Import AI (PDF/Image)',
+            'name': 'Import AI facturi',
             'type': 'ir.actions.act_window',
             'res_model': 'invoice.ingest.upload.wizard',
             'view_mode': 'form',

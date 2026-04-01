@@ -4,7 +4,7 @@
         <field name="name">automotive.stock.workspace.search</field>
         <field name="model">stock.quant</field>
         <field name="arch" type="xml">
-            <search string="Automotive Stock Workspace">
+            <search string="Stocuri">
                 <field name="product_id"/>
                 <field name="product_tmpl_id"/>
                 <field name="location_id"/>
@@ -36,7 +36,7 @@
         <field name="name">automotive.stock.workspace.tree</field>
         <field name="model">stock.quant</field>
         <field name="arch" type="xml">
-            <list string="Automotive Stock Workspace"
+            <list string="Stocuri"
                   create="0" edit="0" delete="0"
                   default_order="product_id, location_id"
                   decoration-success="quantity &gt; 0 and reserved_quantity == 0"
@@ -52,8 +52,8 @@
                 <field name="package_id" optional="hide"/>
                 <field name="owner_id" optional="hide"/>
                 <field name="company_id" groups="base.group_multi_company" optional="hide"/>
-                <button name="action_view_stock_moves" string="History" type="object" class="btn-link" icon="fa-history"/>
-                <button name="action_view_orderpoints" string="Replenishment" type="object" class="btn-link" icon="fa-refresh"/>
+                <button name="action_view_stock_moves" string="Istoric" type="object" class="btn-link" icon="fa-history"/>
+                <button name="action_view_orderpoints" string="Reaprovizionare" type="object" class="btn-link" icon="fa-refresh"/>
             </list>
         </field>
     </record>
@@ -67,18 +67,18 @@
                 <div class="oe_button_box" name="button_box">
                     <button name="action_view_stock_moves" type="object" class="oe_stat_button" icon="fa-history">
                         <div class="o_stat_info">
-                            <span class="o_stat_text">Lifecycle</span>
-                            <span class="o_stat_text">History</span>
+                            <span class="o_stat_text">Istoric</span>
+                            <span class="o_stat_text">ciclu viață</span>
                         </div>
                     </button>
                     <button name="action_view_orderpoints" type="object" class="oe_stat_button" icon="fa-refresh">
                         <div class="o_stat_info">
-                            <span class="o_stat_text">Replenishment</span>
-                            <span class="o_stat_text">Rule</span>
+                            <span class="o_stat_text">Regulă</span>
+                            <span class="o_stat_text">reaprovizionare</span>
                         </div>
                     </button>
                 </div>
-                <group string="Automotive Lifecycle">
+                <group string="Ciclu de viață stoc">
                     <group>
                         <field name="product_id" readonly="1"/>
                         <field name="location_id" readonly="1"/>
@@ -105,8 +105,8 @@
     </record>
 
     <record id="action_automotive_stock_workspace" model="ir.actions.act_window">
-        <field name="name">Stock Workspace</field>
-        <field name="path">automotive-stock-workspace</field>
+        <field name="name">Stocuri</field>
+        <field name="path">stocuri</field>
         <field name="res_model">stock.quant</field>
         <field name="view_mode">list,form,pivot,graph</field>
         <field name="view_id" ref="view_automotive_stock_workspace_tree"/>
@@ -114,10 +114,10 @@
         <field name="context">{'search_default_internal_loc': 1}</field>
         <field name="help" type="html">
             <p class="o_view_nocontent_smiling_face">
-                View stock by product, location, warehouse, and reservation state.
+                Vezi stocul după produs, locație, depozit și stare de rezervare.
             </p>
             <p>
-                Use the row actions to inspect lifecycle history or the linked replenishment rule.
+                Folosește acțiunile din rând pentru istoric și regula de reaprovizionare.
             </p>
         </field>
     </record>
@@ -137,7 +137,7 @@
             <xpath expr="//header" position="inside">
                 <button name="%(action_automotive_stock_workspace)d"
                         type="action"
-                        string="Stock Workspace"
+                        string="Stocuri"
                         class="btn-secondary"
                         context="{'search_default_product_tmpl_id': id, 'search_default_internal_loc': 1}"/>
             </xpath>
