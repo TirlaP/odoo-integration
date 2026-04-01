@@ -80,6 +80,41 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertTrue(async_job, 'Queueing an invoice import should enqueue a background job.')
         self.assertEqual(async_job.state, 'queued')
 
+    def test_invoice_ingest_cron_skips_empty_manual_jobs(self):
+        manual_job = self.env['invoice.ingest.job'].create({
+            'name': 'Manual Placeholder',
+            'source': 'manual',
+            'state': 'pending',
+        })
+
+        queued = self.env['invoice.ingest.job'].cron_process_jobs()
+
+        self.assertEqual(queued, 0)
+        self.assertFalse(
+            self.env['automotive.async.job'].search_count([
+                ('target_model', '=', 'invoice.ingest.job'),
+                ('target_res_id', '=', manual_job.id),
+            ]),
+            'Empty manual jobs should not be sent to the async OCR queue.',
+        )
+
+    def test_invoice_ingest_shows_message_when_no_lines_extracted(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Header Only',
+            'source': 'ocr',
+            'state': 'needs_review',
+            'attachment_id': self.env['ir.attachment'].create({
+                'name': 'header_only.pdf',
+                'datas': base64.b64encode(b'%PDF-1.4\n% header only\n'),
+                'res_model': 'invoice.ingest.job',
+                'type': 'binary',
+                'mimetype': 'application/pdf',
+            }).id,
+        })
+
+        self.assertFalse(job.line_ids)
+        self.assertIn('No invoice lines were extracted', job.line_extraction_message or '')
+
     def test_label_print_wizard_queue_mode_creates_async_job(self):
         icp = self.env['ir.config_parameter'].sudo()
         icp.set_param('automotive.label_direct_print_enabled', 'true')

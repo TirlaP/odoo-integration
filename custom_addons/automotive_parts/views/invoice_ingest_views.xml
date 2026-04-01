@@ -105,8 +105,9 @@
                             <field name="receipt_sync_state" readonly="1"/>
                         </group>
                     </group>
-                    <group string="Extracted Lines" class="o_invoice_ingest_lines_wrap" invisible="not line_ids">
-                        <field name="line_ids" nolabel="1">
+                    <group string="Extracted Lines" class="o_invoice_ingest_lines_wrap">
+                        <field name="line_extraction_message" nolabel="1" readonly="1" invisible="line_ids"/>
+                        <field name="line_ids" nolabel="1" invisible="not line_ids">
                             <list editable="bottom" class="o_invoice_ingest_lines_table">
                                 <field name="sequence" widget="handle"/>
                                 <field name="label_display_name" string="Denumire" readonly="1"/>

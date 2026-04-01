@@ -71,6 +71,22 @@ class InvoiceIngestJob(models.Model):
         'started_at',
         'finished_at',
     }
+    _AUDIT_WRITE_FIELDS = {
+        'name',
+        'source',
+        'picking_id',
+        'attachment_id',
+        'partner_id',
+        'invoice_number',
+        'invoice_date',
+        'currency_id',
+        'amount_total',
+        'vat_rate',
+        'document_type',
+        'external_id',
+        'account_move_id',
+        'ai_model',
+    }
     _sql_constraints = [
         (
             'invoice_ingest_source_external_unique',
@@ -149,6 +165,10 @@ class InvoiceIngestJob(models.Model):
     queued_at = fields.Datetime('Queued At', readonly=True, index=True)
     started_at = fields.Datetime('Started At', readonly=True, index=True)
     finished_at = fields.Datetime('Finished At', readonly=True, index=True)
+    line_extraction_message = fields.Text(
+        'Line Extraction Message',
+        compute='_compute_line_extraction_message',
+    )
 
     def _audit_snapshot(self, field_names=None):
         self.ensure_one()
@@ -163,6 +183,30 @@ class InvoiceIngestJob(models.Model):
             else:
                 snapshot[field_name] = value
         return snapshot
+
+    @api.depends('line_ids', 'state', 'source', 'attachment_id')
+    def _compute_line_extraction_message(self):
+        for job in self:
+            if job.line_ids:
+                job.line_extraction_message = False
+            elif job.state == 'running':
+                job.line_extraction_message = _(
+                    'Invoice extraction is running in the background.'
+                )
+            elif job.state == 'pending':
+                job.line_extraction_message = _(
+                    'Invoice extraction is queued and will start automatically.'
+                )
+            elif job.source == 'ocr' and job.attachment_id and job.state in {'needs_review', 'done'}:
+                job.line_extraction_message = _(
+                    'No invoice lines were extracted from this document. Review the header values or retry with a clearer PDF/image.'
+                )
+            elif job.state == 'failed' and job.error:
+                job.line_extraction_message = _(
+                    'Invoice extraction failed. Check the error field and retry the import.'
+                )
+            else:
+                job.line_extraction_message = False
 
     def _audit_line_summary(self):
         self.ensure_one()
@@ -302,7 +346,7 @@ class InvoiceIngestJob(models.Model):
 
     def write(self, vals):
         context = dict(self.env.context or {})
-        tracked_fields = [field_name for field_name in vals.keys() if field_name in self._AUDIT_FIELDS]
+        tracked_fields = [field_name for field_name in vals.keys() if field_name in self._AUDIT_WRITE_FIELDS]
         old_by_id = {}
         state_before = {}
         if tracked_fields and context.get('skip_audit_log') is not True:
@@ -2727,7 +2771,15 @@ class InvoiceIngestJob(models.Model):
 
     @api.model
     def cron_process_jobs(self):
-        jobs = self.search([('state', 'in', ['pending', 'failed'])], order='queued_at asc, id asc', limit=10)
+        jobs = self.search(
+            [
+                ('state', 'in', ['pending', 'failed']),
+                ('source', '=', 'ocr'),
+                ('attachment_id', '!=', False),
+            ],
+            order='queued_at asc, id asc',
+            limit=10,
+        )
         queued = 0
         for job in jobs:
             with self.env.cr.savepoint():
