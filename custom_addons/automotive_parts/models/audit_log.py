@@ -45,6 +45,7 @@ class AutomotiveAuditLog(models.Model):
 
     old_values = fields.Text('Old Values')
     new_values = fields.Text('New Values')
+    change_summary = fields.Text('Changes', compute='_compute_change_summary')
 
     create_date = fields.Datetime('Date & Time', readonly=True, index=True)
 
@@ -110,6 +111,64 @@ class AutomotiveAuditLog(models.Model):
             return AutomotiveAuditLog._truncate_payload(payload)
         rendered = json.dumps(payload, ensure_ascii=False, default=str, sort_keys=True, separators=(',', ':'))
         return AutomotiveAuditLog._truncate_payload(rendered)
+
+    @staticmethod
+    def _parse_payload(payload):
+        if not payload:
+            return {}
+        if isinstance(payload, (dict, list)):
+            return payload
+        if not isinstance(payload, str):
+            return payload
+        try:
+            return json.loads(payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return payload
+
+    @classmethod
+    def _format_value(cls, value):
+        if value in (None, False, ''):
+            return 'empty'
+        if isinstance(value, dict):
+            return ', '.join(f"{key}: {cls._format_value(sub_value)}" for key, sub_value in value.items()) or 'empty'
+        if isinstance(value, list):
+            return ', '.join(cls._format_value(item) for item in value) or 'empty'
+        return str(value)
+
+    @api.depends('old_values', 'new_values')
+    def _compute_change_summary(self):
+        for log in self:
+            old_payload = self._parse_payload(log.old_values)
+            new_payload = self._parse_payload(log.new_values)
+
+            if isinstance(old_payload, dict) or isinstance(new_payload, dict):
+                old_dict = old_payload if isinstance(old_payload, dict) else {}
+                new_dict = new_payload if isinstance(new_payload, dict) else {}
+                keys = sorted(set(old_dict) | set(new_dict))
+                lines = []
+                for key in keys:
+                    old_value = self._format_value(old_dict.get(key))
+                    new_value = self._format_value(new_dict.get(key))
+                    if old_value == new_value:
+                        lines.append(f"{key}: {new_value}")
+                    else:
+                        lines.append(f"{key}: {old_value} -> {new_value}")
+                log.change_summary = '\n'.join(lines) if lines else False
+                continue
+
+            if isinstance(new_payload, list):
+                log.change_summary = '\n'.join(self._format_value(item) for item in new_payload) or False
+                continue
+
+            if new_payload not in ({}, [], False, None, ''):
+                log.change_summary = self._format_value(new_payload)
+                continue
+
+            if old_payload not in ({}, [], False, None, ''):
+                log.change_summary = self._format_value(old_payload)
+                continue
+
+            log.change_summary = False
 
     @api.model
     def log_change(self, action, record, description=None, old_values=None, new_values=None):
