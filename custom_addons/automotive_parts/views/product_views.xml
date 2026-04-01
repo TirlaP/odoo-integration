@@ -140,6 +140,26 @@
                         string="Stocuri"
                         class="btn-secondary"
                         context="{'search_default_product_tmpl_id': id, 'search_default_internal_loc': 1}"/>
+                <button name="action_view_compatible_vehicles"
+                        string="Mașini compatibile"
+                        type="object"
+                        class="btn-secondary"
+                        invisible="not tecdoc_article_no"/>
+                <button name="action_open_fast_oem_numbers"
+                        string="Coduri OEM"
+                        type="object"
+                        class="btn-secondary"
+                        invisible="not tecdoc_variant_count"/>
+                <button name="action_open_fast_cross_numbers"
+                        string="Echivalente"
+                        type="object"
+                        class="btn-secondary"
+                        invisible="not tecdoc_variant_count"/>
+                <button name="action_open_fast_specs"
+                        string="Specificații"
+                        type="object"
+                        class="btn-secondary"
+                        invisible="not tecdoc_variant_count"/>
             </xpath>
 
             <!-- Odoo 18 base view doesn't show default_code by default on product.template; inject it. -->
@@ -175,20 +195,6 @@
                         <button name="action_sync_from_tecdoc" string="Sync from TecDoc"
                                 type="object" class="btn-primary"
                                 invisible="tecdoc_fast_managed or (not tecdoc_article_no and not tecdoc_id)"/>
-                        <button name="action_view_compatible_vehicles" string="Mașini compatibile"
-                                type="object" class="btn-secondary"
-                                invisible="not tecdoc_article_no"/>
-                        <button name="action_open_fast_oem_numbers" string="Coduri OEM"
-                                type="object" class="btn-secondary"
-                                invisible="not tecdoc_variant_count"/>
-                        <button name="action_open_fast_cross_numbers" string="Echivalente"
-                                type="object" class="btn-secondary"
-                                invisible="not tecdoc_variant_count"/>
-                        <button name="action_open_fast_specs" string="Specificații"
-                                type="object" class="btn-secondary"
-                                invisible="not tecdoc_variant_count"/>
-                        <button name="action_generate_label" string="Genereaza eticheta"
-                                type="object" class="btn-secondary"/>
                     </group>
                 </page>
 
