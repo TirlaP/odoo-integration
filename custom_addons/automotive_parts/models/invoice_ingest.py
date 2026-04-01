@@ -2466,8 +2466,6 @@ class InvoiceIngestJob(models.Model):
             if len(eligible_jobs) == 1
             else f'{len(eligible_jobs)} jobs queued for background processing.'
         )
-        if batch:
-            return batch.action_open_jobs()
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
@@ -3315,20 +3313,19 @@ class InvoiceIngestUploadWizard(models.TransientModel):
             )
             jobs |= job
 
-        if len(jobs) == 1:
-            return {
-                'name': 'Invoice Ingest Job',
-                'type': 'ir.actions.act_window',
-                'res_model': 'invoice.ingest.job',
-                'res_id': jobs.id,
-                'view_mode': 'form',
-                'target': 'current',
-            }
+        message = (
+            '1 document queued for background import.'
+            if len(jobs) == 1
+            else f'{len(jobs)} documents queued for background import.'
+        )
         return {
-            'name': 'Invoice Ingest Batch',
-            'type': 'ir.actions.act_window',
-            'res_model': 'automotive.async.batch',
-            'res_id': async_batch.id,
-            'view_mode': 'form',
-            'target': 'current',
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Invoice Ingest',
+                'message': message,
+                'type': 'success',
+                'sticky': False,
+                'next': {'type': 'ir.actions.act_window_close'},
+            },
         }
