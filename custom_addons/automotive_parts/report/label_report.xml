@@ -8,10 +8,10 @@
             <field name="page_width">280</field>
             <field name="page_height">423</field>
             <field name="orientation">Landscape</field>
-            <field name="margin_top">5</field>
-            <field name="margin_bottom">5</field>
-            <field name="margin_left">5</field>
-            <field name="margin_right">5</field>
+            <field name="margin_top">0</field>
+            <field name="margin_bottom">0</field>
+            <field name="margin_left">0</field>
+            <field name="margin_right">0</field>
             <field name="header_line" eval="False"/>
             <field name="header_spacing">0</field>
             <field name="dpi">96</field>
@@ -73,8 +73,8 @@
         <template id="report_product_label">
             <t t-call="web.html_container">
                 <t t-foreach="docs" t-as="label">
-                    <div class="page" style="margin: 0; padding: 0; width: 423mm; height: 280mm;">
-                        <div style="width: 423mm; height: 280mm; padding: 6mm 10mm 8mm 10mm; box-sizing: border-box; background: #fff; color: #000; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;">
+                    <div class="page" style="margin: 0; padding: 0; width: 100%; height: 100%;">
+                        <div style="width: 100%; height: 100%; min-height: 280mm; padding: 6mm 10mm 8mm 10mm; box-sizing: border-box; background: #fff; color: #000; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; overflow: hidden;">
                             <div style="height: 22mm; text-align: center; font-weight: 500; font-size: 8mm; line-height: 1.05; margin: 0 0 3mm 0; white-space: nowrap; overflow: hidden; text-overflow: clip;">
                                 <t t-esc="label.get('denumire')"/>
                             </div>
