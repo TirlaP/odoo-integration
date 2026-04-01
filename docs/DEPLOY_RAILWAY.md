@@ -5,6 +5,7 @@ This project now includes a Railway-ready container setup:
 - `Dockerfile`
 - `railway.json`
 - `scripts/railway_start.sh`
+- `scripts/railway_migrate.sh`
 
 ## 1. Create Railway resources
 
@@ -97,6 +98,39 @@ What CD does:
 - Railway rebuilds and redeploys the app service from `main`
 - production DB remains in place
 - schema changes must still be applied by upgrading `automotive_parts`
+
+## 6. Production-safe migrations
+
+Do not rely on `ODOO_AUTO_UPDATE_MODULES=true` on the web service in production. It delays HTTP startup and can fail Railway healthchecks while Odoo is still migrating.
+
+Use a dedicated migration step instead:
+
+1. Keep the normal web service start command unchanged.
+2. In Railway, set the service **Pre-deploy Command** to:
+
+```bash
+/app/scripts/railway_migrate.sh
+```
+
+3. Set:
+
+- `ODOO_UPDATE_MODULES=automotive_parts`
+
+This runs the Odoo module upgrade before the new deployment goes live, without tying schema updates to the web server healthcheck window.
+
+Manual fallback:
+
+- open a Railway shell for the app service and run:
+
+```bash
+/app/scripts/railway_migrate.sh
+```
+
+The script reads the same Railway env vars as the normal start flow and runs:
+
+```bash
+python3 /app/odoo/odoo-bin -c /tmp/odoo-railway.conf -d "$ODOO_DB_NAME" -u "$ODOO_UPDATE_MODULES" --stop-after-init --no-http --logfile -
+```
 
 Suggested environments:
 

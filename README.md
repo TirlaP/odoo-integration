@@ -49,6 +49,7 @@ Complete ERP system for automotive parts distribution with TecDoc integration.
   - `Dockerfile`
   - `railway.json`
   - `scripts/railway_start.sh`
+  - `scripts/railway_migrate.sh`
 
 ## TecDoc data export (from XML)
 
