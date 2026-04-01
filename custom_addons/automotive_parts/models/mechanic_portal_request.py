@@ -128,7 +128,6 @@ class MechanicPortalRequest(models.Model):
             new_values=new_values,
         )
 
-    @api.depends('id')
     def _compute_access_url(self):
         super()._compute_access_url()
         for request_record in self:
