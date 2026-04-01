@@ -30,6 +30,46 @@
             <field name="print_report_name">'Automotive Label'</field>
         </record>
 
+        <record id="product.report_product_template_label_2x7" model="ir.actions.report">
+            <field name="name">Automotive Label</field>
+            <field name="report_name">automotive_parts.report_product_label</field>
+            <field name="report_file">automotive_parts.report_product_label</field>
+            <field name="paperformat_id" ref="automotive_parts.paperformat_automotive_label"/>
+            <field name="print_report_name">'Automotive Label'</field>
+        </record>
+
+        <record id="product.report_product_template_label_4x7" model="ir.actions.report">
+            <field name="name">Automotive Label</field>
+            <field name="report_name">automotive_parts.report_product_label</field>
+            <field name="report_file">automotive_parts.report_product_label</field>
+            <field name="paperformat_id" ref="automotive_parts.paperformat_automotive_label"/>
+            <field name="print_report_name">'Automotive Label'</field>
+        </record>
+
+        <record id="product.report_product_template_label_4x12" model="ir.actions.report">
+            <field name="name">Automotive Label</field>
+            <field name="report_name">automotive_parts.report_product_label</field>
+            <field name="report_file">automotive_parts.report_product_label</field>
+            <field name="paperformat_id" ref="automotive_parts.paperformat_automotive_label"/>
+            <field name="print_report_name">'Automotive Label'</field>
+        </record>
+
+        <record id="product.report_product_template_label_4x12_noprice" model="ir.actions.report">
+            <field name="name">Automotive Label</field>
+            <field name="report_name">automotive_parts.report_product_label</field>
+            <field name="report_file">automotive_parts.report_product_label</field>
+            <field name="paperformat_id" ref="automotive_parts.paperformat_automotive_label"/>
+            <field name="print_report_name">'Automotive Label'</field>
+        </record>
+
+        <record id="product.report_product_template_label_dymo" model="ir.actions.report">
+            <field name="name">Automotive Label</field>
+            <field name="report_name">automotive_parts.report_product_label</field>
+            <field name="report_file">automotive_parts.report_product_label</field>
+            <field name="paperformat_id" ref="automotive_parts.paperformat_automotive_label"/>
+            <field name="print_report_name">'Automotive Label'</field>
+        </record>
+
         <template id="report_product_label">
             <t t-call="web.html_container">
                 <t t-foreach="docs" t-as="label">
