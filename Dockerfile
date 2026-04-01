@@ -41,7 +41,7 @@ RUN pip install --upgrade pip setuptools wheel && \
 COPY custom_addons /app/custom_addons
 COPY scripts /app/scripts
 
-RUN chmod +x /app/scripts/railway_start.sh
+RUN chmod +x /app/scripts/railway_start.sh /app/scripts/railway_migrate.sh
 
 # Railway injects PORT; default for local docker runs.
 ENV PORT=8069 \
