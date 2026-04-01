@@ -509,8 +509,8 @@
     </record>
 
     <record id="action_tecdoc_fast_products" model="ir.actions.act_window">
-        <field name="name">Products (Catalog)</field>
-        <field name="path">products</field>
+        <field name="name">Produse</field>
+        <field name="path">produse</field>
         <field name="res_model">product.template</field>
         <field name="view_mode">list,form</field>
         <field name="search_view_id" ref="view_product_template_search_tecdoc_fast"/>
@@ -551,32 +551,6 @@
                 </group>
             </xpath>
 
-            <xpath expr="//notebook" position="inside">
-                <page string="Compatible Cars" name="compatibility_fast">
-                    <group>
-                        <button name="action_open_fast_vehicles" type="object" class="btn-primary"
-                                string="Open Compatible Cars"
-                                invisible="not tecdoc_variant_count"/>
-                        <p invisible="tecdoc_variant_count">
-                            No preloaded compatibility found. Run TecDoc → Fast Import.
-                        </p>
-                    </group>
-                </page>
-
-                <page string="Equivalents" name="equivalents_fast">
-                    <group>
-                        <button name="action_open_fast_oem_numbers" type="object" class="btn-primary"
-                                string="Open OEM Numbers"
-                                invisible="not tecdoc_variant_count"/>
-                        <button name="action_open_fast_cross_numbers" type="object" class="btn-primary"
-                                string="Open Cross Numbers (AM)"
-                                invisible="not tecdoc_variant_count"/>
-                        <button name="action_open_fast_specs" type="object" class="btn-secondary"
-                                string="Open Specifications"
-                                invisible="not tecdoc_variant_count"/>
-                    </group>
-                </page>
-            </xpath>
         </field>
     </record>
 </odoo>

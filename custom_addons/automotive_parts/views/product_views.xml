@@ -145,15 +145,13 @@
             <!-- Odoo 18 base view doesn't show default_code by default on product.template; inject it. -->
             <xpath expr="//page[@name='general_information']//group[@name='group_general']" position="inside">
                 <field name="active"/>
-                <field name="default_code" string="Article No"/>
-                <field name="barcode"/>
-                <field name="barcode_internal"/>
+                <field name="barcode_internal" invisible="not barcode_internal or barcode_internal == barcode or product_variant_count != 1"/>
                 <field name="supplier_code"/>
                 <field name="main_supplier_id"/>
             </xpath>
 
             <notebook position="inside">
-                <page string="Product Data" name="tecdoc">
+                <page string="TecDoc" name="tecdoc">
                     <group>
                         <group string="Supplier">
                             <field name="tecdoc_supplier_id" string="Supplier ID"/>
@@ -161,21 +159,10 @@
                         </group>
                     </group>
 
-                    <group string="Identifiers">
-                        <field name="default_code" string="Cod Intern"/>
-                        <field name="barcode" string="EAN"/>
-                        <field name="barcode_internal"/>
-                        <field name="supplier_code"/>
-                        <field name="tecdoc_ean" string="EAN TecDoc" readonly="1"/>
+                    <group string="TecDoc Data">
+                        <field name="tecdoc_article_no" string="TecDoc Article" readonly="1" invisible="not tecdoc_article_no"/>
+                        <field name="tecdoc_ean" string="EAN TecDoc" readonly="1" invisible="not tecdoc_ean or tecdoc_ean == barcode"/>
                         <field name="tecdoc_oem_numbers" string="OEM Numbers" widget="text"/>
-                    </group>
-
-                    <group string="Specifications">
-                        <field name="tecdoc_specifications" string="Specifications (legacy)" widget="text" invisible="1"/>
-                    </group>
-
-                    <group string="Vehicle Compatibility">
-                        <field name="tecdoc_compatibility" string="Compatibility (legacy)" widget="text" invisible="1"/>
                     </group>
 
                     <group string="Media">
@@ -185,19 +172,21 @@
                     </group>
 
                     <group>
-                        <group string="Stock">
-                            <field name="stock_available" readonly="1"/>
-                            <field name="stock_reserved" readonly="1"/>
-                        </group>
-                    </group>
-
-                    <group>
                         <button name="action_sync_from_tecdoc" string="Sync from TecDoc"
                                 type="object" class="btn-primary"
                                 invisible="tecdoc_fast_managed or (not tecdoc_article_no and not tecdoc_id)"/>
-                        <button name="action_view_compatible_vehicles" string="Compatible Vehicles"
+                        <button name="action_view_compatible_vehicles" string="Compatible Cars"
                                 type="object" class="btn-secondary"
                                 invisible="not tecdoc_article_no"/>
+                        <button name="action_open_fast_oem_numbers" string="OEM Numbers"
+                                type="object" class="btn-secondary"
+                                invisible="not tecdoc_variant_count"/>
+                        <button name="action_open_fast_cross_numbers" string="Cross Numbers"
+                                type="object" class="btn-secondary"
+                                invisible="not tecdoc_variant_count"/>
+                        <button name="action_open_fast_specs" string="Specifications"
+                                type="object" class="btn-secondary"
+                                invisible="not tecdoc_variant_count"/>
                         <button name="action_generate_label" string="Genereaza eticheta"
                                 type="object" class="btn-secondary"/>
                     </group>

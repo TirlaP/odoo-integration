@@ -27,63 +27,14 @@
     <menuitem id="menu_tecdoc_products"
               name="Produse"
               parent="menu_tecdoc"
-              action="action_tecdoc_products"
+              action="action_tecdoc_fast_products"
               sequence="25"/>
-
-    <menuitem id="menu_tecdoc_cache"
-              name="Cache"
-              parent="menu_tecdoc"
-              action="action_tecdoc_api_cache"
-              sequence="30"
-              groups="base.group_user"/>
 
     <menuitem id="menu_tecdoc_fast_import"
               name="Import rapid"
               parent="menu_tecdoc"
               action="action_tecdoc_fast_import_runs"
-              sequence="40"/>
-
-    <menuitem id="menu_tecdoc_fast_suppliers"
-              name="Furnizori (rapid)"
-              parent="menu_tecdoc"
-              action="action_tecdoc_fast_suppliers"
-              sequence="45"/>
-
-    <menuitem id="menu_tecdoc_fast_products"
-              name="Produse (catalog)"
-              parent="menu_tecdoc"
-              action="action_tecdoc_fast_products"
-              sequence="50"/>
-
-    <menuitem id="menu_tecdoc_fast_variants"
-              name="Variante (rapid)"
-              parent="menu_tecdoc"
-              action="action_tecdoc_fast_variants"
-              sequence="60"/>
-
-    <menuitem id="menu_tecdoc_fast_vehicles"
-              name="Vehicule (rapid)"
-              parent="menu_tecdoc"
-              action="action_tecdoc_fast_vehicles"
-              sequence="70"/>
-
-    <menuitem id="menu_tecdoc_fast_oem_numbers"
-              name="Coduri OEM (rapid)"
-              parent="menu_tecdoc"
-              action="action_tecdoc_fast_oem_numbers"
-              sequence="80"/>
-
-    <menuitem id="menu_tecdoc_fast_cross_numbers"
-              name="Coduri cross (rapid)"
-              parent="menu_tecdoc"
-              action="action_tecdoc_fast_cross_numbers"
-              sequence="90"/>
-
-    <menuitem id="menu_tecdoc_fast_specs"
-              name="Specificații (rapid)"
-              parent="menu_tecdoc"
-              action="action_tecdoc_fast_criteria"
-              sequence="100"/>
+              sequence="30"/>
 
     <!-- ANAF Menu -->
     <menuitem id="menu_anaf"
