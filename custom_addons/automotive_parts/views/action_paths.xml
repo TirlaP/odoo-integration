@@ -14,10 +14,6 @@
         <field name="path">sale-products</field>
     </record>
 
-    <record id="action_automotive_stock_workspace" model="ir.actions.act_window">
-        <field name="path">stocuri</field>
-    </record>
-
     <record id="stock.action_view_quants" model="ir.actions.server">
         <field name="path">stocuri-cantitati</field>
     </record>
@@ -40,34 +36,6 @@
 
     <record id="stock.action_orderpoint" model="ir.actions.act_window">
         <field name="path">reaprovizionare</field>
-    </record>
-
-    <record id="action_automotive_payment_allocations" model="ir.actions.act_window">
-        <field name="path">alocari-plati</field>
-    </record>
-
-    <record id="action_mechanic_portal_requests" model="ir.actions.act_window">
-        <field name="path">cereri-mecanici</field>
-    </record>
-
-    <record id="action_commercial_document_archive" model="ir.actions.act_window">
-        <field name="path">documente-comerciale</field>
-    </record>
-
-    <record id="action_invoice_ingest_jobs" model="ir.actions.act_window">
-        <field name="path">importuri-facturi</field>
-    </record>
-
-    <record id="action_invoice_ingest_upload_wizard" model="ir.actions.act_window">
-        <field name="path">import-ai-facturi</field>
-    </record>
-
-    <record id="action_anaf_efactura" model="ir.actions.act_window">
-        <field name="path">configurare-anaf</field>
-    </record>
-
-    <record id="action_audit_log" model="ir.actions.act_window">
-        <field name="path">jurnal-audit</field>
     </record>
 
     <record id="action_automotive_parts_root" model="ir.actions.act_window">
