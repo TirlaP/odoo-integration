@@ -9,7 +9,8 @@ import { FormController } from "@web/views/form/form_controller";
 import { onWillUnmount, useEffect } from "@odoo/owl";
 
 const ACTIVE_STATES = new Set(["pending", "running"]);
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 500;
+const INITIAL_POLL_DELAY_MS = 150;
 
 patch(FormController.prototype, {
     setup() {
@@ -17,6 +18,7 @@ patch(FormController.prototype, {
         this.notification = useService("notification");
         this.actionService = useService("action");
         this._invoiceIngestPollTimer = null;
+        this._invoiceIngestInitialPollTimer = null;
         this._invoiceIngestPolling = false;
         this._closeInvoiceIngestNotification = null;
 
@@ -50,6 +52,12 @@ patch(FormController.prototype, {
     _syncInvoiceIngestPolling() {
         if (this._isInvoiceIngestProcessing()) {
             this._showInvoiceIngestNotification();
+            if (!this._invoiceIngestInitialPollTimer) {
+                this._invoiceIngestInitialPollTimer = browser.setTimeout(() => {
+                    this._invoiceIngestInitialPollTimer = null;
+                    this._pollInvoiceIngestRecord();
+                }, INITIAL_POLL_DELAY_MS);
+            }
             if (!this._invoiceIngestPollTimer) {
                 this._invoiceIngestPollTimer = browser.setInterval(
                     () => this._pollInvoiceIngestRecord(),
@@ -81,6 +89,10 @@ patch(FormController.prototype, {
         if (this._invoiceIngestPollTimer) {
             browser.clearInterval(this._invoiceIngestPollTimer);
             this._invoiceIngestPollTimer = null;
+        }
+        if (this._invoiceIngestInitialPollTimer) {
+            browser.clearTimeout(this._invoiceIngestInitialPollTimer);
+            this._invoiceIngestInitialPollTimer = null;
         }
         if (this._closeInvoiceIngestNotification) {
             this._closeInvoiceIngestNotification();

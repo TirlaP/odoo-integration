@@ -15,6 +15,10 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             'name': 'Test Supplier',
             'supplier_rank': 1,
         })
+        cls.auto_total_supplier = cls.env['res.partner'].create({
+            'name': 'S.C. AD AUTO TOTAL S.R.L.',
+            'supplier_rank': 1,
+        })
         cls.product_tmpl = cls.env['product.template'].create({
             'name': 'Test Automotive Product',
             'default_code': 'AUTO-TEST-001',
@@ -184,6 +188,58 @@ class TestAutomotiveOperatorFlows(TransactionCase):
 
         self.assertEqual(duplicate.duplicate_of_job_id, original)
         self.assertIn(original.display_name, duplicate.duplicate_warning_message or '')
+
+    def test_progressive_trim_is_disabled_for_non_auto_total_supplier(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'Normal Supplier OCR',
+            'source': 'ocr',
+            'partner_id': self.supplier.id,
+        })
+
+        normalized = job._normalize_payload_line({
+            'product_code_raw': 'C2W029ABE',
+            'product_code': 'C2W029ABE',
+            'product_description': 'Set placute frana',
+        }, supplier=self.supplier)
+
+        self.assertEqual(normalized['product_code'], 'C2W029ABE')
+
+    def test_progressive_trim_stays_enabled_for_auto_total_supplier(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'Auto Total OCR',
+            'source': 'ocr',
+            'partner_id': self.auto_total_supplier.id,
+        })
+
+        normalized = job._normalize_payload_line({
+            'product_code_raw': 'C2W029ABE',
+            'product_code': 'C2W029ABE',
+            'product_description': 'Set placute frana',
+        }, supplier=self.auto_total_supplier)
+
+        self.assertEqual(normalized['product_code'], 'C2W029')
+
+    def test_openai_prompt_preserves_full_code_for_normal_suppliers(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'Prompt Normal Supplier',
+            'source': 'ocr',
+        })
+
+        prompt = job._build_openai_extraction_prompt('INTER CARS ROMANIA SRL')
+
+        self.assertIn('product_code_raw must preserve the exact printed article code', prompt)
+        self.assertIn('do not remove trailing letters or suffixes', prompt)
+        self.assertNotIn('Special case for Auto Total invoices', prompt)
+
+    def test_openai_prompt_allows_auto_total_special_case(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'Prompt Auto Total',
+            'source': 'ocr',
+        })
+
+        prompt = job._build_openai_extraction_prompt('S.C. AD AUTO TOTAL S.R.L.')
+
+        self.assertIn('Special case for Auto Total invoices', prompt)
 
     def test_reprocess_existing_ocr_job_requeues_same_record(self):
         attachment = self.env['ir.attachment'].create({

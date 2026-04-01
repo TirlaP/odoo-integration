@@ -36,6 +36,7 @@ INVOICE_TRIM_SUFFIXES = ('CT', 'V')
 AUTO_MATCH_CONFIDENCE_THRESHOLD = 88.0
 PROGRESSIVE_TRIM_MIN_LEN = 5
 PROGRESSIVE_TRIM_MAX_STEPS = 8
+PROGRESSIVE_TRIM_SUPPLIER_TOKENS = ('AUTO TOTAL',)
 
 _logger = logging.getLogger(__name__)
 
@@ -807,7 +808,7 @@ class InvoiceIngestJob(models.Model):
             supplier_brand=parsed_supplier_brand,
             extra_codes=parsed_identity.get('code_candidates') or [],
         )
-        if not product and parsed_code:
+        if not product and parsed_code and self._allow_progressive_tail_trim(supplier):
             progressive_candidates = self._progressive_tail_trim_candidates(parsed_code)
             if progressive_candidates:
                 parsed_code = progressive_candidates[-1]
@@ -1644,6 +1645,54 @@ class InvoiceIngestJob(models.Model):
         return candidates
 
     @api.model
+    def _allow_progressive_tail_trim(self, supplier=None):
+        supplier_rec = supplier
+        if isinstance(supplier_rec, str):
+            return self._allow_progressive_tail_trim_name(supplier_rec)
+        if not supplier_rec:
+            return False
+        if not isinstance(supplier_rec, models.BaseModel):
+            try:
+                supplier_rec = self.env['res.partner'].browse(int(supplier_rec))
+            except Exception:
+                return False
+        supplier_rec = supplier_rec[:1]
+        if not supplier_rec or supplier_rec._name != 'res.partner':
+            return False
+        return self._allow_progressive_tail_trim_name(supplier_rec.name or '')
+
+    @api.model
+    def _allow_progressive_tail_trim_name(self, supplier_name=''):
+        normalized_name = self._normalize_code_value(supplier_name or '')
+        return any(token in normalized_name for token in PROGRESSIVE_TRIM_SUPPLIER_TOKENS)
+
+    @api.model
+    def _build_openai_extraction_prompt(self, supplier_name_hint=''):
+        prompt = (
+            "Extract invoice data from Romanian automotive supplier invoice text. "
+            "Return strict JSON with keys: "
+            "supplier_name, supplier_code, invoice_number, invoice_date, invoice_due_date, "
+            "invoice_currency, vat_rate, amount_total, confidence, warnings, document_type, invoice_lines. "
+            "supplier_name must be the invoice issuer/vendor from the Furnizor or supplier section, never the client/customer. "
+            "invoice_number must be the exact invoice number shown on the document header. "
+            "document_type must be one of invoice, credit_note, refund, or unknown when the document is clearly a supplier credit note or refund. "
+            "invoice_lines is an array of objects with: "
+            "quantity, product_code, product_code_raw, supplier_brand, product_description, unit_price. "
+            "product_code_raw must preserve the exact printed article code from the document. "
+            "For normal suppliers, product_code must also preserve the full printed article code; do not remove trailing letters or suffixes. "
+            "supplier_brand should contain only the supplier brand token (e.g. TRW, BOSCH, SKF). "
+            "Exclude NC= and CPV= values from product_code. "
+            "Use ISO date format YYYY-MM-DD. If unknown, use null. confidence must be 0..100."
+        )
+        if self._allow_progressive_tail_trim_name(supplier_name_hint):
+            prompt += (
+                " Special case for Auto Total invoices: if the printed code clearly contains supplier suffix letters "
+                "glued to the end of the main article code, keep the exact printed value in product_code_raw and "
+                "you may place the trimmed main article in product_code."
+            )
+        return prompt
+
+    @api.model
     def _code_candidates(self, value, extra=None):
         candidates = []
 
@@ -1847,7 +1896,11 @@ class InvoiceIngestJob(models.Model):
                 }
 
         # 2b) Progressive tail-trim pass (only if strict candidates failed).
-        trim_candidates = self._progressive_tail_trim_candidates(product_code)
+        trim_candidates = (
+            self._progressive_tail_trim_candidates(product_code)
+            if self._allow_progressive_tail_trim(supplier)
+            else []
+        )
         for code in trim_candidates:
             # Exact match only for this fallback.
             for field_name in ('tecdoc_article_no', 'default_code', 'supplier_code', 'barcode_internal', 'barcode'):
@@ -1957,7 +2010,7 @@ class InvoiceIngestJob(models.Model):
                     supplier_brand=supplier_brand,
                     extra_codes=parsed.get('code_candidates') or [],
                 )
-                if not product and parsed_code:
+                if not product and parsed_code and self._allow_progressive_tail_trim(self.partner_id):
                     # Keep UI code cleaner if no strict match and we can isolate a canonical base.
                     progressive_candidates = self._progressive_tail_trim_candidates(parsed_code)
                     if progressive_candidates:
@@ -2339,20 +2392,8 @@ class InvoiceIngestJob(models.Model):
                 filename=job.attachment_id.name if job.attachment_id else job.name,
             )
 
-            prompt = (
-                "Extract invoice data from Romanian automotive supplier invoice text. "
-                "Return strict JSON with keys: "
-                "supplier_name, supplier_code, invoice_number, invoice_date, invoice_due_date, "
-                "invoice_currency, vat_rate, amount_total, confidence, warnings, document_type, invoice_lines. "
-                "supplier_name must be the invoice issuer/vendor from the Furnizor or supplier section, never the client/customer. "
-                "invoice_number must be the exact invoice number shown on the document header. "
-                "document_type must be one of invoice, credit_note, refund, or unknown when the document is clearly a supplier credit note or refund. "
-                "invoice_lines is an array of objects with: "
-                "quantity, product_code, product_code_raw, supplier_brand, product_description, unit_price. "
-                "product_code must be the main article code only (e.g. GDB1956, 56789, VKBA 6649). "
-                "supplier_brand should contain only the supplier brand token (e.g. TRW, BOSCH, SKF). "
-                "Exclude NC= and CPV= values from product_code. "
-                "Use ISO date format YYYY-MM-DD. If unknown, use null. confidence must be 0..100."
+            prompt = job._build_openai_extraction_prompt(
+                supplier_name_hint=pdf_header.get('supplier_name') or '',
             )
             body = {
                 'model': job.ai_model or job._default_ai_model(),
@@ -2466,7 +2507,7 @@ class InvoiceIngestJob(models.Model):
                     supplier_brand=parsed_supplier_brand,
                     extra_codes=parsed_identity.get('code_candidates') or [],
                 )
-                if not product and parsed_code:
+                if not product and parsed_code and job._allow_progressive_tail_trim(supplier):
                     progressive_candidates = job._progressive_tail_trim_candidates(parsed_code)
                     if progressive_candidates:
                         parsed_code = progressive_candidates[-1]
@@ -3171,7 +3212,7 @@ class InvoiceIngestJobLine(models.Model):
                 supplier_brand=parsed_supplier_brand,
                 extra_codes=parsed.get('code_candidates') or [],
             )
-            if not product and parsed_code:
+            if not product and parsed_code and line.job_id._allow_progressive_tail_trim(line.job_id.partner_id):
                 progressive_candidates = line.job_id._progressive_tail_trim_candidates(parsed_code)
                 if progressive_candidates:
                     parsed_code = progressive_candidates[-1]
