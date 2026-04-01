@@ -462,7 +462,7 @@ class ProductProduct(models.Model):
             price = self.lst_price or self.product_tmpl_id.list_price or 0.0
 
         return self._prepare_label_payload_from_values(
-            name=overrides.get('name') or self.display_name,
+            name=overrides.get('name') or self.name,
             barcode=overrides.get('barcode') or self.barcode or self.barcode_internal,
             product_code=overrides.get('product_code') or self.supplier_code or self.default_code or self.tecdoc_article_no,
             internal_code=overrides.get('internal_code') or self.default_code,

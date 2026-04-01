@@ -5,8 +5,8 @@
             <field name="name">Automotive Label Large</field>
             <field name="default" eval="False"/>
             <field name="format">custom</field>
-            <field name="page_width">423</field>
-            <field name="page_height">280</field>
+            <field name="page_width">280</field>
+            <field name="page_height">423</field>
             <field name="orientation">Landscape</field>
             <field name="margin_top">5</field>
             <field name="margin_bottom">5</field>
@@ -73,24 +73,22 @@
         <template id="report_product_label">
             <t t-call="web.html_container">
                 <t t-foreach="docs" t-as="label">
-                    <div class="page" style="margin: 0; padding: 0;">
-                        <div style="width: 413mm; min-height: 270mm; padding: 5mm 6mm; box-sizing: border-box; background: #fff; color: #000; font-family: 'DejaVu Sans', Arial, sans-serif;">
-                            <div style="text-align: center; font-weight: 500; font-size: 15mm; line-height: 1.05; margin: 0 0 2mm 0; overflow-wrap: anywhere; word-break: break-word;">
+                    <div class="page" style="margin: 0; padding: 0; width: 423mm; height: 280mm;">
+                        <div style="width: 423mm; height: 280mm; padding: 6mm 10mm 8mm 10mm; box-sizing: border-box; background: #fff; color: #000; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;">
+                            <div style="height: 22mm; text-align: center; font-weight: 500; font-size: 8mm; line-height: 1.05; margin: 0 0 3mm 0; white-space: nowrap; overflow: hidden; text-overflow: clip;">
                                 <t t-esc="label.get('denumire')"/>
                             </div>
                             <div style="width: 100%; text-align: center; margin: 0 0 2mm 0;">
                                 <t t-if="label.get('barcode')">
-                                    <div t-out="label.get('barcode')" t-options="{'widget': 'barcode', 'quiet': 0, 'symbology': 'Code128', 'img_style': 'width:100%;height:63mm;'}"/>
+                                    <div t-out="label.get('barcode')" t-options="{'widget': 'barcode', 'quiet': 0, 'symbology': 'Code128', 'img_style': 'width:100%;height:70mm;'}"/>
                                 </t>
                             </div>
-                            <div style="text-align: center; font-weight: 700; font-size: 18mm; line-height: 1; margin: 0 0 18mm 0;">
-                                PRET:
-                                <span t-out="label.get('price', 0.0)" t-options="{'widget': 'monetary', 'display_currency': company.currency_id}"/>
-                                /BUC
+                            <div style="text-align: center; font-weight: 700; font-size: 15mm; line-height: 1; margin: 0 0 20mm 0;">
+                                PRET: <t t-esc="format_price(label.get('price'))"/>/BUC
                             </div>
-                            <div style="display: flex; justify-content: space-between; align-items: flex-end; min-height: 82mm; gap: 18mm;">
-                                <div style="flex: 1 1 auto; font-size: 13mm; line-height: 1.35; padding-left: 6mm;">
-                                    <div>
+                            <div style="display: flex; justify-content: space-between; align-items: flex-end; min-height: 105mm; gap: 12mm;">
+                                <div style="flex: 1 1 auto; font-size: 10mm; line-height: 1.45; padding-left: 4mm; padding-bottom: 8mm;">
+                                    <div style="margin-bottom: 6mm;">
                                         <strong>Cod Comanda:</strong>
                                         <t t-esc="label.get('product_code') or '-'"/>
                                     </div>
@@ -98,13 +96,13 @@
                                         <strong>Brand:</strong>
                                         <t t-esc="label.get('brand') or '-'"/>
                                     </div>
-                                    <div t-if="label.get('internal_code') and label.get('internal_code') != label.get('product_code')" style="font-size: 8mm; margin-top: 4mm;">
+                                    <div t-if="label.get('internal_code') and label.get('internal_code') != label.get('product_code')" style="font-size: 6mm; margin-top: 6mm;">
                                         <strong>Cod intern:</strong>
                                         <t t-esc="label.get('internal_code')"/>
                                     </div>
                                 </div>
-                                <div style="flex: 0 0 132mm; text-align: right; padding-right: 4mm;">
-                                    <img t-if="company.logo" t-att-src="image_data_uri(company.logo)" alt="Company Logo" style="max-width: 132mm; max-height: 62mm; object-fit: contain;"/>
+                                <div style="flex: 0 0 150mm; min-height: 80mm; text-align: right; padding-right: 4mm; display: flex; align-items: flex-end; justify-content: flex-end;">
+                                    <img t-if="company.logo" t-att-src="image_data_uri(company.logo)" alt="Company Logo" style="max-width: 150mm; max-height: 80mm; object-fit: contain;"/>
                                 </div>
                             </div>
                         </div>

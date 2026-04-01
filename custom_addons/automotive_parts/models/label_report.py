@@ -7,6 +7,15 @@ class ReportAutomotiveLabel(models.AbstractModel):
     _name = 'report.automotive_parts.report_product_label'
     _description = 'Automotive Product Label Report'
 
+    @staticmethod
+    def _format_price(price):
+        try:
+            value = float(price or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        formatted = f"{value:.2f}".rstrip('0').rstrip('.')
+        return formatted or '0'
+
     def _build_labels_from_records(self, records):
         ProductProduct = self.env['product.product']
         labels = []
@@ -17,7 +26,7 @@ class ReportAutomotiveLabel(models.AbstractModel):
             if not product or product._name != 'product.product':
                 continue
             labels.append(ProductProduct._prepare_label_payload_from_values(
-                name=product.display_name,
+                name=product.name,
                 barcode=product.barcode or product.barcode_internal,
                 product_code=product.supplier_code or product.default_code or product.tecdoc_article_no,
                 internal_code=product.default_code,
@@ -39,4 +48,5 @@ class ReportAutomotiveLabel(models.AbstractModel):
             'doc_model': self.env.context.get('active_model') or 'product.template',
             'docs': labels,
             'company': self.env.company,
+            'format_price': self._format_price,
         }
