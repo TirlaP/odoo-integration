@@ -175,16 +175,16 @@
                         <button name="action_sync_from_tecdoc" string="Sync from TecDoc"
                                 type="object" class="btn-primary"
                                 invisible="tecdoc_fast_managed or (not tecdoc_article_no and not tecdoc_id)"/>
-                        <button name="action_view_compatible_vehicles" string="Compatible Cars"
+                        <button name="action_view_compatible_vehicles" string="Mașini compatibile"
                                 type="object" class="btn-secondary"
                                 invisible="not tecdoc_article_no"/>
-                        <button name="action_open_fast_oem_numbers" string="OEM Numbers"
+                        <button name="action_open_fast_oem_numbers" string="Coduri OEM"
                                 type="object" class="btn-secondary"
                                 invisible="not tecdoc_variant_count"/>
-                        <button name="action_open_fast_cross_numbers" string="Cross Numbers"
+                        <button name="action_open_fast_cross_numbers" string="Coduri cross"
                                 type="object" class="btn-secondary"
                                 invisible="not tecdoc_variant_count"/>
-                        <button name="action_open_fast_specs" string="Specifications"
+                        <button name="action_open_fast_specs" string="Specificații"
                                 type="object" class="btn-secondary"
                                 invisible="not tecdoc_variant_count"/>
                         <button name="action_generate_label" string="Genereaza eticheta"
