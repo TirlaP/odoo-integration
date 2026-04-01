@@ -44,7 +44,7 @@ _logger = logging.getLogger(__name__)
 class InvoiceIngestJob(models.Model):
     _name = 'invoice.ingest.job'
     _description = 'Invoice Ingest Job'
-    _order = 'id desc'
+    _order = 'queued_at desc, id desc'
     _AUDIT_FIELDS = {
         'name',
         'source',
@@ -3369,19 +3369,35 @@ class InvoiceIngestUploadWizard(models.TransientModel):
             )
             jobs |= job
 
-        message = (
-            '1 document queued for background import.'
-            if len(jobs) == 1
-            else f'{len(jobs)} documents queued for background import.'
-        )
+        if len(jobs) == 1:
+            job = jobs[:1]
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Invoice Ingest',
+                    'message': 'Document queued for background import.',
+                    'type': 'success',
+                    'sticky': False,
+                    'next': {
+                        'type': 'ir.actions.act_window',
+                        'name': 'Importuri facturi',
+                        'res_model': 'invoice.ingest.job',
+                        'res_id': job.id,
+                        'view_mode': 'form',
+                        'target': 'current',
+                    },
+                },
+            }
+
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
             'params': {
                 'title': 'Invoice Ingest',
-                'message': message,
+                'message': f'{len(jobs)} documents queued for background import.',
                 'type': 'success',
                 'sticky': False,
-                'next': {'type': 'ir.actions.act_window_close'},
+                'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
             },
         }
