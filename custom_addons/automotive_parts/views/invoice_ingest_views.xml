@@ -54,8 +54,6 @@
                 <header>
                     <button name="action_open_upload_wizard" type="object" class="btn-primary"
                             string="Import AI facturi"/>
-                    <button name="action_run" type="object" class="btn-primary" string="Queue Processing"
-                            invisible="state not in ('pending','failed')"/>
                     <button name="action_create_draft_vendor_bill" type="object" class="btn-secondary"
                             string="Create Draft Vendor Bill" invisible="account_move_id != False"/>
                     <button name="action_sync_receipt_stock" type="object" class="btn-secondary"

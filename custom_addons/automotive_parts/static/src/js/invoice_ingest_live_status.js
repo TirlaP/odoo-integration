@@ -57,17 +57,19 @@ patch(FormController.prototype, {
     },
 
     _showInvoiceIngestNotification() {
+        const isRunning = this.model.root?.data?.state === "running";
+        const title = isRunning ? _t("Background Import") : _t("Import Queued");
+        const message = isRunning
+            ? _t("Import is processing in the background. This page updates automatically.")
+            : _t("Import is queued in the background and will start automatically.");
         if (this._closeInvoiceIngestNotification) {
             return;
         }
-        this._closeInvoiceIngestNotification = this.notification.add(
-            _t("Import is processing in the background. This page updates automatically."),
-            {
-                title: _t("Background Import"),
-                type: "info",
-                sticky: true,
-            }
-        );
+        this._closeInvoiceIngestNotification = this.notification.add(message, {
+            title,
+            type: "info",
+            sticky: true,
+        });
     },
 
     _stopInvoiceIngestPolling() {
