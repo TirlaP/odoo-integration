@@ -169,6 +169,10 @@ class InvoiceIngestJob(models.Model):
         'Line Extraction Message',
         compute='_compute_line_extraction_message',
     )
+    allow_test_duplicate_action = fields.Boolean(
+        'Allow Test Duplicate Action',
+        compute='_compute_allow_test_duplicate_action',
+    )
 
     def _audit_snapshot(self, field_names=None):
         self.ensure_one()
@@ -207,6 +211,28 @@ class InvoiceIngestJob(models.Model):
                 )
             else:
                 job.line_extraction_message = False
+
+    @api.model
+    def _allow_test_duplicate_jobs(self):
+        env_name = (
+            os.getenv('ODOO_ENV')
+            or os.getenv('RAILWAY_ENVIRONMENT')
+            or os.getenv('RAILWAY_ENVIRONMENT_NAME')
+            or ''
+        ).strip().lower()
+        base_url = (
+            self.env['ir.config_parameter'].sudo().get_param('web.base.url')
+            or ''
+        ).strip().lower()
+        if env_name in {'dev', 'development', 'local', 'staging', 'test'}:
+            return True
+        return any(token in base_url for token in ('localhost', '127.0.0.1', 'staging'))
+
+    @api.depends_context('uid')
+    def _compute_allow_test_duplicate_action(self):
+        allowed = self._allow_test_duplicate_jobs()
+        for job in self:
+            job.allow_test_duplicate_action = allowed
 
     def _audit_line_summary(self):
         self.ensure_one()
@@ -281,6 +307,92 @@ class InvoiceIngestJob(models.Model):
         )
         self.write(values)
         return values['batch_uid']
+
+    def action_reprocess(self):
+        self.ensure_one()
+        if self.source != 'ocr' or not self.attachment_id:
+            raise UserError('Only OCR imports with an attached document can be reprocessed.')
+
+        self.write({
+            'state': 'pending',
+            'queued_at': fields.Datetime.now(),
+            'started_at': False,
+            'finished_at': False,
+            'error': False,
+        })
+        self._enqueue_async_processing(
+            batch_uid=self.batch_uid or uuid.uuid4().hex,
+            batch_name=self.batch_name or self.display_name,
+            priority=85,
+        )
+        self._audit_log(
+            action='custom',
+            description=f'Invoice OCR import reprocessed: {self.display_name}',
+            new_values={
+                'state': self.state,
+                'attachment_id': self.attachment_id.id,
+                'external_id': self.external_id,
+                'reprocess': True,
+            },
+        )
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Invoice Ingest',
+                'message': 'Existing import requeued for background processing.',
+                'type': 'success',
+                'sticky': False,
+                'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
+            },
+        }
+
+    def action_create_test_copy(self):
+        self.ensure_one()
+        if not self._allow_test_duplicate_jobs():
+            raise UserError('Creating a duplicate test import is only allowed on local or staging environments.')
+        if self.source != 'ocr' or not self.attachment_id:
+            raise UserError('Only OCR imports with an attached document can be duplicated for testing.')
+
+        now = fields.Datetime.now()
+        new_job = self.create({
+            'name': f'{self.display_name} (test)',
+            'source': 'ocr',
+            'external_id': f'{self.external_id or uuid.uuid4().hex}:test:{uuid.uuid4().hex}',
+            'state': 'pending',
+            'partner_id': self.partner_id.id,
+            'document_type': self.document_type or 'invoice',
+            'attachment_id': self.attachment_id.id,
+            'ai_model': self.ai_model or self._default_ai_model(),
+            'batch_uid': uuid.uuid4().hex,
+            'batch_name': self.batch_name or self.display_name,
+            'batch_index': 1,
+            'batch_total': 1,
+            'queued_at': now,
+        })
+        new_job._enqueue_async_processing(
+            batch_uid=new_job.batch_uid,
+            batch_name=new_job.batch_name,
+            priority=85,
+        )
+        new_job._audit_log(
+            action='custom',
+            description=f'Invoice OCR test copy created: {new_job.display_name}',
+            new_values={
+                'source_job_id': self.id,
+                'source_external_id': self.external_id,
+                'attachment_id': self.attachment_id.id,
+                'state': new_job.state,
+            },
+        )
+        return {
+            'type': 'ir.actions.act_window',
+            'name': 'Importuri facturi',
+            'res_model': 'invoice.ingest.job',
+            'res_id': new_job.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
 
     def _get_async_processing_job(self, states=('queued', 'running')):
         self.ensure_one()
@@ -3335,7 +3447,7 @@ class InvoiceIngestUploadWizard(models.TransientModel):
                 'batch_total': job.batch_total,
             },
         )
-        return job
+        return job, reused_existing_job
 
     def action_import_document(self):
         self.ensure_one()
@@ -3352,15 +3464,18 @@ class InvoiceIngestUploadWizard(models.TransientModel):
             'requested_by_id': self.env.user.id,
         })
         jobs = self.env['invoice.ingest.job']
+        reused_count = 0
         total = len(documents)
         for index, document in enumerate(documents, start=1):
-            job = self._queue_document_job(
+            job, reused_existing_job = self._queue_document_job(
                 document,
                 batch_uid=batch_uid,
                 batch_name=batch_name,
                 batch_index=index,
                 batch_total=total,
             )
+            if reused_existing_job:
+                reused_count += 1
             job._enqueue_async_processing(
                 batch=async_batch,
                 batch_uid=batch_uid,
@@ -3371,12 +3486,17 @@ class InvoiceIngestUploadWizard(models.TransientModel):
 
         if len(jobs) == 1:
             job = jobs[:1]
+            message = (
+                'Existing import requeued for background processing.'
+                if reused_count
+                else 'Document queued for background import.'
+            )
             return {
                 'type': 'ir.actions.client',
                 'tag': 'display_notification',
                 'params': {
                     'title': 'Invoice Ingest',
-                    'message': 'Document queued for background import.',
+                    'message': message,
                     'type': 'success',
                     'sticky': False,
                     'next': {
@@ -3395,7 +3515,11 @@ class InvoiceIngestUploadWizard(models.TransientModel):
             'tag': 'display_notification',
             'params': {
                 'title': 'Invoice Ingest',
-                'message': f'{len(jobs)} documents queued for background import.',
+                'message': (
+                    f'{len(jobs)} documents queued for background import.'
+                    if not reused_count
+                    else f'{len(jobs)} documents queued for background import ({reused_count} existing imports reprocessed).'
+                ),
                 'type': 'success',
                 'sticky': False,
                 'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},

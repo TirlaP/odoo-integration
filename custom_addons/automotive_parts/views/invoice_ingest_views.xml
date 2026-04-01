@@ -54,6 +54,12 @@
                 <header>
                     <button name="action_open_upload_wizard" type="object" class="btn-primary"
                             string="Import AI facturi"/>
+                    <button name="action_reprocess" type="object" class="btn-secondary"
+                            string="Reprocesează"
+                            invisible="source != 'ocr' or not attachment_id or state == 'running'"/>
+                    <button name="action_create_test_copy" type="object" class="btn-secondary"
+                            string="Creează copie test"
+                            invisible="not allow_test_duplicate_action or source != 'ocr' or not attachment_id"/>
                     <button name="action_create_draft_vendor_bill" type="object" class="btn-secondary"
                             string="Create Draft Vendor Bill" invisible="account_move_id != False"/>
                     <button name="action_sync_receipt_stock" type="object" class="btn-secondary"

@@ -115,6 +115,76 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertFalse(job.line_ids)
         self.assertIn('No invoice lines were extracted', job.line_extraction_message or '')
 
+    def test_reprocess_existing_ocr_job_requeues_same_record(self):
+        attachment = self.env['ir.attachment'].create({
+            'name': 'reprocess.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% reprocess\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Existing',
+            'source': 'ocr',
+            'state': 'needs_review',
+            'attachment_id': attachment.id,
+            'external_id': 'existing-checksum',
+        })
+
+        action = job.action_reprocess()
+
+        self.assertEqual(action['type'], 'ir.actions.client')
+        self.assertEqual(job.state, 'pending')
+        async_job = self.env['automotive.async.job'].search(
+            [
+                ('target_model', '=', 'invoice.ingest.job'),
+                ('target_method', '=', '_process_ingest_job'),
+                ('target_res_id', '=', job.id),
+            ],
+            order='id desc',
+            limit=1,
+        )
+        self.assertTrue(async_job)
+        self.assertEqual(async_job.state, 'queued')
+
+    def test_create_test_copy_creates_new_ocr_job_on_local(self):
+        self.env['ir.config_parameter'].sudo().set_param('web.base.url', 'http://localhost:8069')
+        attachment = self.env['ir.attachment'].create({
+            'name': 'duplicate.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% duplicate\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Existing',
+            'source': 'ocr',
+            'state': 'needs_review',
+            'attachment_id': attachment.id,
+            'external_id': 'same-checksum',
+            'partner_id': self.supplier.id,
+        })
+
+        action = job.action_create_test_copy()
+
+        self.assertEqual(action['type'], 'ir.actions.act_window')
+        new_job = self.env['invoice.ingest.job'].browse(action['res_id'])
+        self.assertTrue(new_job.exists())
+        self.assertNotEqual(new_job.id, job.id)
+        self.assertEqual(new_job.attachment_id, job.attachment_id)
+        self.assertEqual(new_job.state, 'pending')
+        self.assertNotEqual(new_job.external_id, job.external_id)
+        async_job = self.env['automotive.async.job'].search(
+            [
+                ('target_model', '=', 'invoice.ingest.job'),
+                ('target_method', '=', '_process_ingest_job'),
+                ('target_res_id', '=', new_job.id),
+            ],
+            order='id desc',
+            limit=1,
+        )
+        self.assertTrue(async_job)
+
     def test_label_print_wizard_queue_mode_creates_async_job(self):
         icp = self.env['ir.config_parameter'].sudo()
         icp.set_param('automotive.label_direct_print_enabled', 'true')
