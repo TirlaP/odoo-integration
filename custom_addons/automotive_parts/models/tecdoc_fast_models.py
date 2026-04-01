@@ -429,7 +429,7 @@ class ProductTemplateTecDocFast(models.Model):
         self.ensure_one()
         return {
             'type': 'ir.actions.act_window',
-            'name': 'Cross Numbers',
+            'name': 'Echivalente',
             'res_model': 'tecdoc.cross.number',
             'view_mode': 'list,form',
             'domain': [('cross_link_ids.variant_id.product_tmpl_id', '=', self.id)],

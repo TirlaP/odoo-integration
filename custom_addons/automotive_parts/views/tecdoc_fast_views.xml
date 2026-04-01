@@ -422,12 +422,12 @@
         <field name="view_mode">list,form</field>
     </record>
 
-    <!-- TecDoc Fast: Cross Numbers -->
+    <!-- TecDoc Fast: Echivalente -->
     <record id="view_tecdoc_cross_number_list" model="ir.ui.view">
         <field name="name">tecdoc.cross.number.list</field>
         <field name="model">tecdoc.cross.number</field>
         <field name="arch" type="xml">
-            <list string="Cross Numbers">
+            <list string="Echivalente">
                 <field name="manufacturer"/>
                 <field name="display_no"/>
                 <field name="number_key"/>
@@ -452,7 +452,7 @@
     </record>
 
     <record id="action_tecdoc_fast_cross_numbers" model="ir.actions.act_window">
-        <field name="name">Cross Numbers</field>
+        <field name="name">Echivalente</field>
         <field name="path">cross</field>
         <field name="res_model">tecdoc.cross.number</field>
         <field name="view_mode">list,form</field>

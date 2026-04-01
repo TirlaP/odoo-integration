@@ -181,7 +181,7 @@
                         <button name="action_open_fast_oem_numbers" string="Coduri OEM"
                                 type="object" class="btn-secondary"
                                 invisible="not tecdoc_variant_count"/>
-                        <button name="action_open_fast_cross_numbers" string="Coduri cross"
+                        <button name="action_open_fast_cross_numbers" string="Echivalente"
                                 type="object" class="btn-secondary"
                                 invisible="not tecdoc_variant_count"/>
                         <button name="action_open_fast_specs" string="Specificații"
