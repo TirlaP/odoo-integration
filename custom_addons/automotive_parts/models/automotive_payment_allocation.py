@@ -347,6 +347,22 @@ class AutomotivePaymentAllocation(models.Model):
 class AccountPayment(models.Model):
     _inherit = 'account.payment'
 
+    _AUDIT_FIELDS = {
+        'name',
+        'date',
+        'amount',
+        'state',
+        'payment_type',
+        'partner_type',
+        'partner_id',
+        'journal_id',
+        'payment_method_line_id',
+        'currency_id',
+        'partner_bank_id',
+        'memo',
+        'move_id',
+    }
+
     automotive_allocation_ids = fields.One2many(
         'automotive.payment.allocation',
         'payment_id',
@@ -374,6 +390,81 @@ class AccountPayment(models.Model):
             payment.automotive_allocated_amount = sum(active_allocations.mapped('amount'))
             payment.automotive_unallocated_amount = payment.amount - payment.automotive_allocated_amount
             payment.automotive_order_count = len(active_allocations.mapped('sale_order_id'))
+
+    def _audit_snapshot(self, field_names=None):
+        self.ensure_one()
+        tracked_fields = field_names or self._AUDIT_FIELDS
+        snapshot = {
+            'automotive_allocated_amount': self.automotive_allocated_amount,
+            'automotive_unallocated_amount': self.automotive_unallocated_amount,
+            'automotive_order_count': self.automotive_order_count,
+            'reconciled_invoice_ids': self.reconciled_invoice_ids.ids,
+        }
+        for field_name in tracked_fields:
+            if field_name not in self._fields:
+                continue
+            value = self[field_name]
+            if isinstance(value, models.BaseModel):
+                snapshot[field_name] = value.ids
+            else:
+                snapshot[field_name] = value
+        return snapshot
+
+    def _audit_log(self, action, description, old_values=None, new_values=None):
+        self.ensure_one()
+        if self.env.context.get('skip_audit_log') is True:
+            return False
+        return self.env['automotive.audit.log'].log_change(
+            action=action,
+            record=self,
+            description=description,
+            old_values=old_values,
+            new_values=new_values,
+        )
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        payments = super().create(vals_list)
+        if self.env.context.get('skip_audit_log') is not True:
+            for payment, vals in zip(payments, vals_list):
+                tracked_fields = [field_name for field_name in vals.keys() if field_name in payment._AUDIT_FIELDS] or None
+                payment._audit_log(
+                    action='create',
+                    description=f'Account payment created: {payment.display_name}',
+                    new_values=payment._audit_snapshot(tracked_fields),
+                )
+        return payments
+
+    def write(self, vals):
+        context = dict(self.env.context or {})
+        tracked_fields = [field_name for field_name in vals.keys() if field_name in self._AUDIT_FIELDS]
+        old_by_id = {}
+        if tracked_fields and context.get('skip_audit_log') is not True and context.get('skip_payment_lifecycle_audit') is not True:
+            old_by_id = {payment.id: payment._audit_snapshot(tracked_fields) for payment in self}
+
+        result = super().write(vals)
+
+        if tracked_fields and context.get('skip_audit_log') is not True and context.get('skip_payment_lifecycle_audit') is not True:
+            for payment in self:
+                payment._audit_log(
+                    action='write',
+                    description=f'Account payment updated: {payment.display_name}',
+                    old_values=old_by_id.get(payment.id),
+                    new_values=payment._audit_snapshot(tracked_fields),
+                )
+        return result
+
+    def unlink(self):
+        context = dict(self.env.context or {})
+        snapshots = {payment.id: payment._audit_snapshot() for payment in self}
+        if context.get('skip_audit_log') is not True:
+            for payment in self:
+                payment._audit_log(
+                    action='unlink',
+                    description=f'Account payment deleted: {payment.display_name}',
+                    old_values=snapshots.get(payment.id),
+                )
+        return super().unlink()
 
     def action_view_automotive_allocations(self):
         self.ensure_one()
@@ -470,7 +561,43 @@ class AccountPayment(models.Model):
     def action_post(self):
         for payment in self:
             payment.automotive_allocation_ids._check_allocation_consistency()
-        return super().action_post()
+        old_by_id = {payment.id: payment._audit_snapshot() for payment in self}
+        result = super(AccountPayment, self.with_context(skip_payment_lifecycle_audit=True)).action_post()
+        if self.env.context.get('skip_audit_log') is not True:
+            for payment in self:
+                payment._audit_log(
+                    action='custom',
+                    description=f'Account payment posted: {payment.display_name}',
+                    old_values=old_by_id.get(payment.id),
+                    new_values=payment._audit_snapshot(),
+                )
+        return result
+
+    def action_cancel(self):
+        old_by_id = {payment.id: payment._audit_snapshot() for payment in self}
+        result = super(AccountPayment, self.with_context(skip_payment_lifecycle_audit=True)).action_cancel()
+        if self.env.context.get('skip_audit_log') is not True:
+            for payment in self:
+                payment._audit_log(
+                    action='custom',
+                    description=f'Account payment cancelled: {payment.display_name}',
+                    old_values=old_by_id.get(payment.id),
+                    new_values=payment._audit_snapshot(),
+                )
+        return result
+
+    def action_draft(self):
+        old_by_id = {payment.id: payment._audit_snapshot() for payment in self}
+        result = super(AccountPayment, self.with_context(skip_payment_lifecycle_audit=True)).action_draft()
+        if self.env.context.get('skip_audit_log') is not True:
+            for payment in self:
+                payment._audit_log(
+                    action='custom',
+                    description=f'Account payment reset to draft: {payment.display_name}',
+                    old_values=old_by_id.get(payment.id),
+                    new_values=payment._audit_snapshot(),
+                )
+        return result
 
 
 class SaleOrder(models.Model):

@@ -1,5 +1,127 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
+    <record id="view_automotive_stock_workspace_search" model="ir.ui.view">
+        <field name="name">automotive.stock.workspace.search</field>
+        <field name="model">stock.quant</field>
+        <field name="arch" type="xml">
+            <search string="Automotive Stock Workspace">
+                <field name="product_id"/>
+                <field name="product_tmpl_id"/>
+                <field name="location_id"/>
+                <field name="warehouse_id"/>
+                <field name="lot_id"/>
+                <field name="package_id"/>
+                <field name="owner_id"/>
+                <field name="company_id"/>
+                <field name="inventory_date"/>
+                <field name="last_count_date"/>
+                <filter string="Internal Locations" name="internal_loc" domain="[('location_id.usage', '=', 'internal')]"/>
+                <filter string="Transit Locations" name="transit_loc" domain="[('location_id.usage', '=', 'transit')]"/>
+                <filter string="Available" name="available" domain="[('quantity', '&gt;', 0.0), ('reserved_quantity', '=', 0.0)]"/>
+                <filter string="Reserved" name="reserved" domain="[('reserved_quantity', '&gt;', 0.0)]"/>
+                <filter string="Zero / Negative" name="zero_negative" domain="[('quantity', '&lt;=', 0.0)]"/>
+                <filter string="With Lot/Serial" name="with_lot" domain="[('lot_id', '!=', False)]"/>
+                <group expand="0" string="Group By">
+                    <filter string="Product" name="group_product" context="{'group_by': 'product_id'}"/>
+                    <filter string="Location" name="group_location" context="{'group_by': 'location_id'}"/>
+                    <filter string="Warehouse" name="group_warehouse" context="{'group_by': 'warehouse_id'}"/>
+                    <filter string="Company" name="group_company" context="{'group_by': 'company_id'}"/>
+                    <filter string="Lot / Serial" name="group_lot" context="{'group_by': 'lot_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="view_automotive_stock_workspace_tree" model="ir.ui.view">
+        <field name="name">automotive.stock.workspace.tree</field>
+        <field name="model">stock.quant</field>
+        <field name="arch" type="xml">
+            <list string="Automotive Stock Workspace"
+                  create="0" edit="0" delete="0"
+                  default_order="product_id, location_id"
+                  decoration-success="quantity &gt; 0 and reserved_quantity == 0"
+                  decoration-warning="reserved_quantity &gt; 0"
+                  decoration-danger="quantity &lt;= 0">
+                <field name="product_id"/>
+                <field name="location_id"/>
+                <field name="warehouse_id" optional="show"/>
+                <field name="quantity"/>
+                <field name="reserved_quantity"/>
+                <field name="available_quantity"/>
+                <field name="lot_id" optional="show"/>
+                <field name="package_id" optional="hide"/>
+                <field name="owner_id" optional="hide"/>
+                <field name="company_id" groups="base.group_multi_company" optional="hide"/>
+                <button name="action_view_stock_moves" string="History" type="object" class="btn-link" icon="fa-history"/>
+                <button name="action_view_orderpoints" string="Replenishment" type="object" class="btn-link" icon="fa-refresh"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_automotive_stock_workspace_form" model="ir.ui.view">
+        <field name="name">automotive.stock.workspace.form</field>
+        <field name="model">stock.quant</field>
+        <field name="inherit_id" ref="stock.view_stock_quant_form_editable"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet" position="inside">
+                <div class="oe_button_box" name="button_box">
+                    <button name="action_view_stock_moves" type="object" class="oe_stat_button" icon="fa-history">
+                        <div class="o_stat_info">
+                            <span class="o_stat_text">Lifecycle</span>
+                            <span class="o_stat_text">History</span>
+                        </div>
+                    </button>
+                    <button name="action_view_orderpoints" type="object" class="oe_stat_button" icon="fa-refresh">
+                        <div class="o_stat_info">
+                            <span class="o_stat_text">Replenishment</span>
+                            <span class="o_stat_text">Rule</span>
+                        </div>
+                    </button>
+                </div>
+                <group string="Automotive Lifecycle">
+                    <group>
+                        <field name="product_id" readonly="1"/>
+                        <field name="location_id" readonly="1"/>
+                        <field name="warehouse_id" readonly="1"/>
+                    </group>
+                    <group>
+                        <field name="quantity" readonly="1"/>
+                        <field name="reserved_quantity" readonly="1"/>
+                        <field name="available_quantity" readonly="1"/>
+                    </group>
+                    <group>
+                        <field name="inventory_date" readonly="1"/>
+                        <field name="last_count_date" readonly="1"/>
+                        <field name="lot_id" readonly="1"/>
+                        <field name="package_id" readonly="1"/>
+                    </group>
+                    <group>
+                        <field name="owner_id" readonly="1"/>
+                        <field name="company_id" readonly="1"/>
+                    </group>
+                </group>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="action_automotive_stock_workspace" model="ir.actions.act_window">
+        <field name="name">Stock Workspace</field>
+        <field name="path">automotive-stock-workspace</field>
+        <field name="res_model">stock.quant</field>
+        <field name="view_mode">list,form,pivot,graph</field>
+        <field name="view_id" ref="view_automotive_stock_workspace_tree"/>
+        <field name="search_view_id" ref="view_automotive_stock_workspace_search"/>
+        <field name="context">{'search_default_internal_loc': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                View stock by product, location, warehouse, and reservation state.
+            </p>
+            <p>
+                Use the row actions to inspect lifecycle history or the linked replenishment rule.
+            </p>
+        </field>
+    </record>
+
     <!-- Extended Product Template Form View (this is what Inventory → Products opens) -->
     <record id="view_product_template_form_automotive" model="ir.ui.view">
         <field name="name">product.template.form.automotive</field>
@@ -11,6 +133,13 @@
                         string="Genereaza eticheta"
                         type="object"
                         invisible="type == 'service'"/>
+            </xpath>
+            <xpath expr="//header" position="inside">
+                <button name="%(action_automotive_stock_workspace)d"
+                        type="action"
+                        string="Stock Workspace"
+                        class="btn-secondary"
+                        context="{'search_default_product_tmpl_id': id, 'search_default_internal_loc': 1}"/>
             </xpath>
 
             <!-- Odoo 18 base view doesn't show default_code by default on product.template; inject it. -->

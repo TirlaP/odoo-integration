@@ -45,6 +45,35 @@ class SaleOrder(models.Model):
     ], string='Status Stoc', compute='_compute_stock_status', store=True)
 
     observations = fields.Text('Observații')
+    automotive_inbound_paid_amount = fields.Monetary(
+        string='Plăți încasate',
+        currency_field='currency_id',
+        compute='_compute_automotive_financial_truth',
+    )
+    automotive_refund_amount = fields.Monetary(
+        string='Retururi / refund-uri',
+        currency_field='currency_id',
+        compute='_compute_automotive_financial_truth',
+    )
+    automotive_return_amount = fields.Monetary(
+        string='Retururi operaționale',
+        currency_field='currency_id',
+        compute='_compute_automotive_financial_truth',
+    )
+    automotive_credit_adjustment_total = fields.Monetary(
+        string='Ajustări credit folosite în sold',
+        currency_field='currency_id',
+        compute='_compute_automotive_financial_truth',
+    )
+    automotive_financial_balance_due = fields.Monetary(
+        string='Sold operațional ajustat',
+        currency_field='currency_id',
+        compute='_compute_automotive_financial_truth',
+    )
+    automotive_balance_formula = fields.Char(
+        string='Formula sold',
+        compute='_compute_automotive_financial_truth',
+    )
     _READY_ACTIVITY_SUMMARY = 'Comanda gata de pregătire'
 
     def _audit_snapshot(self, field_names):
@@ -231,6 +260,97 @@ class SaleOrder(models.Model):
         partner = self._get_ready_notification_partner()
         return partner.name or ''
 
+    def _get_returned_amount_total(self):
+        self.ensure_one()
+        total = 0.0
+        relevant_lines = self.order_line.filtered(lambda line: line.product_id and line.product_id.is_storable and not line.display_type)
+        for line in relevant_lines:
+            delivered_moves = line.move_ids.filtered(
+                lambda move: move.state == 'done'
+                and not move.scrapped
+                and move.location_dest_id.usage == 'customer'
+            )
+            if not delivered_moves:
+                continue
+
+            returned_qty = 0.0
+            for delivery_move in delivered_moves:
+                for returned_move in delivery_move.returned_move_ids.filtered(
+                    lambda move: move.state == 'done' and not move.scrapped
+                ):
+                    returned_qty += returned_move.product_uom._compute_quantity(
+                        returned_move.quantity,
+                        line.product_uom,
+                        rounding_method='HALF-UP',
+                    )
+
+            if float_compare(returned_qty, 0.0, precision_rounding=line.product_uom.rounding) <= 0:
+                continue
+
+            ordered_qty = line.product_uom_qty
+            if float_compare(ordered_qty, 0.0, precision_rounding=line.product_uom.rounding) <= 0:
+                continue
+
+            effective_return_qty = min(returned_qty, ordered_qty)
+            total += abs(line.price_total) * (effective_return_qty / ordered_qty)
+
+        return total
+
+    @api.depends(
+        'amount_total',
+        'invoice_ids.state',
+        'invoice_ids.move_type',
+        'invoice_ids.amount_total',
+        'order_line.price_total',
+        'order_line.product_id',
+        'order_line.product_uom_qty',
+        'order_line.product_uom',
+        'order_line.display_type',
+        'order_line.move_ids.state',
+        'order_line.move_ids.scrapped',
+        'order_line.move_ids.location_dest_id.usage',
+        'order_line.move_ids.quantity',
+        'order_line.move_ids.product_uom',
+        'order_line.move_ids.returned_move_ids.state',
+        'order_line.move_ids.returned_move_ids.scrapped',
+        'order_line.move_ids.returned_move_ids.quantity',
+        'order_line.move_ids.returned_move_ids.product_uom',
+        'automotive_payment_allocation_ids.amount',
+        'automotive_payment_allocation_ids.payment_type',
+        'automotive_payment_allocation_ids.active',
+        'automotive_payment_allocation_ids.payment_state',
+    )
+    def _compute_automotive_financial_truth(self):
+        for order in self:
+            active_allocations = order.automotive_payment_allocation_ids.filtered(
+                lambda allocation: allocation.active and allocation.payment_state == 'paid'
+            )
+            inbound_paid_amount = sum(
+                active_allocations.filtered(lambda allocation: allocation.payment_type == 'inbound').mapped('amount')
+            )
+            outbound_refund_amount = sum(
+                active_allocations.filtered(lambda allocation: allocation.payment_type == 'outbound').mapped('amount')
+            )
+            invoice_refund_amount = sum(
+                abs(move.amount_total)
+                for move in order.invoice_ids.filtered(
+                    lambda move: move.state == 'posted' and move.move_type == 'out_refund'
+                )
+            )
+            refund_amount = max(outbound_refund_amount, invoice_refund_amount)
+            return_amount = order._get_returned_amount_total()
+            credit_adjustment_total = max(refund_amount, return_amount)
+
+            order.automotive_inbound_paid_amount = inbound_paid_amount
+            order.automotive_refund_amount = refund_amount
+            order.automotive_return_amount = return_amount
+            order.automotive_credit_adjustment_total = credit_adjustment_total
+            order.automotive_financial_balance_due = order.amount_total - inbound_paid_amount - credit_adjustment_total
+            order.automotive_balance_formula = (
+                'Sold operațional = Total comenzi - Plăți încasate - Ajustări retur/refund '
+                '(ajustarea folosește valoarea confirmată cea mai mare dintre retururile operaționale și documentele de credit)'
+            )
+
     def _reserve_stock(self):
         """Reserve stock for order lines"""
         for order in self:
@@ -246,6 +366,20 @@ class SaleOrder(models.Model):
                                 f'Disponibil: {available}, necesar: {line.product_uom_qty}.'
                             )
                         )
+
+    def action_confirm(self):
+        result = super().action_confirm()
+        commercial_archive = self.env['commercial.document.archive']
+        for order in self:
+            commercial_archive.sync_from_source_document(
+                order,
+                document_type='internal',
+                note=f'Automatically linked from order confirmation {order.name}.',
+                archive=True,
+            )
+            order._sync_mechanic_followers()
+            order._update_auto_state()
+        return result
 
     def _update_auto_state(self):
         """Update automatic state based on stock availability"""
@@ -484,6 +618,18 @@ class SaleOrderLine(models.Model):
     """Extended Sale Order Line"""
     _inherit = 'sale.order.line'
 
+    _AUDIT_FIELDS = {
+        'order_id',
+        'product_id',
+        'name',
+        'product_uom_qty',
+        'product_uom',
+        'price_unit',
+        'discount',
+        'tax_id',
+        'display_type',
+    }
+
     # Line-specific stock info
     qty_reserved = fields.Float('Cantitate Rezervată', compute='_compute_qty_reserved', store=True)
     qty_received = fields.Float('Cantitate Recepționată', compute='_compute_qty_received', store=True)
@@ -492,6 +638,81 @@ class SaleOrderLine(models.Model):
         ('incomplete', 'Necompletată'),
         ('complete', 'Completată'),
     ], string='Stare Poziție', default='incomplete', compute='_compute_line_state', store=True)
+
+    def _audit_snapshot(self, field_names=None):
+        self.ensure_one()
+        tracked_fields = field_names or self._AUDIT_FIELDS
+        snapshot = {
+            'currency_id': self.currency_id.id if self.currency_id else False,
+            'qty_reserved': self.qty_reserved,
+            'qty_received': self.qty_received,
+            'line_state': self.line_state,
+        }
+        for field_name in tracked_fields:
+            if field_name not in self._fields:
+                continue
+            value = self[field_name]
+            if isinstance(value, models.BaseModel):
+                snapshot[field_name] = value.ids
+            else:
+                snapshot[field_name] = value
+        return snapshot
+
+    def _audit_log(self, action, description, old_values=None, new_values=None):
+        self.ensure_one()
+        if self.env.context.get('skip_audit_log') is True:
+            return False
+        return self.env['automotive.audit.log'].log_change(
+            action=action,
+            record=self,
+            description=description,
+            old_values=old_values,
+            new_values=new_values,
+        )
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        lines = super().create(vals_list)
+        if self.env.context.get('skip_audit_log') is not True:
+            for line, vals in zip(lines, vals_list):
+                tracked_fields = [field_name for field_name in vals.keys() if field_name in line._AUDIT_FIELDS] or None
+                line._audit_log(
+                    action='create',
+                    description=f'Sale order line created on {line.order_id.name or line.order_id.display_name}: {line.display_name}',
+                    new_values=line._audit_snapshot(tracked_fields),
+                )
+        return lines
+
+    def write(self, vals):
+        context = dict(self.env.context or {})
+        tracked_fields = [field_name for field_name in vals.keys() if field_name in self._AUDIT_FIELDS]
+        old_by_id = {}
+        if tracked_fields and context.get('skip_audit_log') is not True:
+            old_by_id = {line.id: line._audit_snapshot(tracked_fields) for line in self}
+
+        result = super().write(vals)
+
+        if tracked_fields and context.get('skip_audit_log') is not True:
+            for line in self:
+                line._audit_log(
+                    action='write',
+                    description=f'Sale order line modified on {line.order_id.name or line.order_id.display_name}: {line.display_name}',
+                    old_values=old_by_id.get(line.id),
+                    new_values=line._audit_snapshot(tracked_fields),
+                )
+        return result
+
+    def unlink(self):
+        context = dict(self.env.context or {})
+        snapshots = {line.id: line._audit_snapshot() for line in self}
+        if context.get('skip_audit_log') is not True:
+            for line in self:
+                line._audit_log(
+                    action='unlink',
+                    description=f'Sale order line deleted from {line.order_id.name or line.order_id.display_name}: {line.display_name}',
+                    old_values=snapshots.get(line.id),
+                )
+        return super().unlink()
 
     @api.depends(
         'state',

@@ -76,6 +76,7 @@
 
     <record id="action_mechanic_portal_requests" model="ir.actions.act_window">
         <field name="name">Mechanic Requests</field>
+        <field name="path">mechanic-requests</field>
         <field name="res_model">mechanic.portal.request</field>
         <field name="view_mode">list,form</field>
         <field name="search_view_id" ref="view_mechanic_portal_request_search"/>
@@ -118,6 +119,16 @@
                         <div class="fs-2 fw-semibold"><t t-out="mechanic_invoice_count"/></div>
                         <div class="small text-muted mb-2">Scadente: <t t-out="mechanic_overdue_invoice_count"/></div>
                         <a href="/my/invoices?filterby=invoices" class="stretched-link">Open financial docs</a>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-lg-3">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <div class="text-muted small">Documente</div>
+                        <div class="fs-2 fw-semibold"><t t-out="mechanic_document_count"/></div>
+                        <div class="small text-muted mb-2">Facturi, livrări și arhivă</div>
+                        <a href="/my/mechanic/documents" class="stretched-link">Open documents</a>
                     </div>
                 </div>
             </div>
@@ -205,6 +216,21 @@
         </xpath>
     </template>
 
+    <template id="portal_my_home_mechanic_documents" inherit_id="automotive_parts.portal_my_home_mechanic" priority="34">
+        <xpath expr="//div[hasclass('o_portal_docs')]" position="inside">
+            <t t-if="is_mechanic_portal">
+                <t t-call="portal.portal_docs_entry">
+                    <t t-set="bg_color" t-value="'alert alert-light border align-items-center'"/>
+                    <t t-set="placeholder_count" t-value="'mechanic_document_count'"/>
+                    <t t-set="title">Document Workspace</t>
+                    <t t-set="url" t-value="'/my/mechanic/documents'"/>
+                    <t t-set="text">Invoices, deliveries, and archived commercial documents.</t>
+                    <t t-set="show_count" t-value="True"/>
+                </t>
+            </t>
+        </xpath>
+    </template>
+
     <template id="portal_mechanic_request_breadcrumbs" inherit_id="portal.portal_breadcrumbs" priority="40">
         <xpath expr="//ol[hasclass('o_portal_submenu')]" position="inside">
             <li t-if="page_name == 'mechanic_requests'" class="breadcrumb-item active">
@@ -218,6 +244,15 @@
             </li>
             <li t-if="page_name == 'mechanic_request_detail' and mechanic_request" class="breadcrumb-item active">
                 <span t-out="mechanic_request.name"/>
+            </li>
+            <li t-if="page_name == 'mechanic_documents'" class="breadcrumb-item active">
+                <span>Document Workspace</span>
+            </li>
+            <li t-if="page_name == 'mechanic_document_detail'" class="breadcrumb-item">
+                <a href="/my/mechanic/documents">Document Workspace</a>
+            </li>
+            <li t-if="page_name == 'mechanic_document_detail' and mechanic_document" class="breadcrumb-item active">
+                <span t-out="mechanic_document.name"/>
             </li>
         </xpath>
     </template>
@@ -363,6 +398,156 @@
                                     <div t-field="message.body"/>
                                 </div>
                             </t>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </t>
+    </template>
+
+    <template id="portal_my_mechanic_documents" name="Mechanic Document Workspace">
+        <t t-call="portal.portal_layout">
+            <t t-set="breadcrumbs_searchbar" t-value="True"/>
+            <t t-call="portal.portal_searchbar">
+                <t t-set="title">Document Workspace</t>
+            </t>
+
+            <div class="row g-4">
+                <div class="col-12 col-xl-4">
+                    <div class="card shadow-sm h-100">
+                        <div class="card-header bg-transparent"><strong>Invoices</strong></div>
+                        <div class="list-group list-group-flush">
+                            <t t-if="not mechanic_invoices">
+                                <div class="list-group-item text-muted">No invoices visible for this account.</div>
+                            </t>
+                            <t t-foreach="mechanic_invoices" t-as="invoice">
+                                <div class="list-group-item d-flex justify-content-between align-items-start gap-3">
+                                    <div>
+                                        <div class="fw-semibold">
+                                            <a t-att-href="invoice.get_portal_url()"><t t-out="invoice.name or invoice.ref or invoice.display_name"/></a>
+                                        </div>
+                                        <div class="small text-muted">
+                                            <span t-field="invoice.invoice_date"/>
+                                        </div>
+                                    </div>
+                                    <span t-out="invoice.amount_total" t-options="{'widget': 'monetary', 'display_currency': invoice.currency_id}"/>
+                                </div>
+                            </t>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-12 col-xl-4">
+                    <div class="card shadow-sm h-100">
+                        <div class="card-header bg-transparent"><strong>Deliveries</strong></div>
+                        <div class="list-group list-group-flush">
+                            <t t-if="not mechanic_deliveries">
+                                <div class="list-group-item text-muted">No deliveries archived yet for this account.</div>
+                            </t>
+                            <t t-foreach="mechanic_deliveries" t-as="delivery">
+                                <div class="list-group-item d-flex justify-content-between align-items-start gap-3">
+                                    <div>
+                                        <div class="fw-semibold">
+                                            <t t-out="delivery.name"/>
+                                        </div>
+                                        <div class="small text-muted">
+                                            <span t-field="delivery.scheduled_date"/>
+                                        </div>
+                                    </div>
+                                    <span class="badge text-bg-light"><t t-out="delivery.state"/></span>
+                                </div>
+                            </t>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-12 col-xl-4">
+                    <div class="card shadow-sm h-100">
+                        <div class="card-header bg-transparent d-flex justify-content-between align-items-center">
+                            <strong>Archived documents</strong>
+                            <span class="badge text-bg-light"><t t-out="mechanic_document_count"/></span>
+                        </div>
+                        <div class="list-group list-group-flush">
+                            <t t-if="not mechanic_archived_documents">
+                                <div class="list-group-item text-muted">No archived commercial documents available yet.</div>
+                            </t>
+                            <t t-foreach="mechanic_archived_documents" t-as="archive">
+                                <div class="list-group-item">
+                                    <div class="d-flex justify-content-between align-items-start gap-3">
+                                        <div>
+                                            <div class="fw-semibold">
+                                                <a t-att-href="'/my/mechanic/documents/%s' % archive.id"><t t-out="archive.name"/></a>
+                                            </div>
+                                            <div class="small text-muted">
+                                                <t t-out="dict(archive._fields['document_type'].selection).get(archive.document_type)"/>
+                                                <t t-if="archive.source_reference"> · <t t-out="archive.source_reference"/></t>
+                                            </div>
+                                        </div>
+                                        <span class="badge text-bg-light"><t t-out="archive.attachment_name or 'file'"/></span>
+                                    </div>
+                                </div>
+                            </t>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <t t-if="pager">
+                <div class="mt-4">
+                    <t t-call="portal.portal_pager"/>
+                </div>
+            </t>
+        </t>
+    </template>
+
+    <template id="portal_my_mechanic_document_detail" name="Mechanic Document Detail">
+        <t t-call="portal.portal_layout">
+            <div class="row g-4">
+                <div class="col-12 col-lg-4">
+                    <div class="card shadow-sm">
+                        <div class="card-body">
+                            <div class="text-muted small">Archive</div>
+                            <h3 class="mb-3"><t t-out="mechanic_document.name"/></h3>
+                            <div class="mb-2"><strong>Type:</strong> <t t-out="dict(mechanic_document._fields['document_type'].selection).get(mechanic_document.document_type)"/></div>
+                            <div class="mb-2"><strong>Partner:</strong> <t t-out="mechanic_document.partner_id.display_name or '-'"/></div>
+                            <div class="mb-2"><strong>Source:</strong> <t t-out="mechanic_document.source_reference or '-'"/></div>
+                            <div class="mb-2"><strong>Archived:</strong> <span t-field="mechanic_document.archived_at"/></div>
+                            <div class="mb-3"><strong>File:</strong> <t t-out="mechanic_document.attachment_name or '-'"/></div>
+                            <a t-if="mechanic_document.attachment_id"
+                               t-att-href="'/my/mechanic/documents/%s/attachment' % mechanic_document.id"
+                               class="btn btn-primary">
+                                Download attachment
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-12 col-lg-8">
+                    <div class="card shadow-sm mb-4">
+                        <div class="card-header bg-transparent"><strong>Linked records</strong></div>
+                        <div class="card-body">
+                            <div class="mb-2" t-if="mechanic_document.sale_order_id">
+                                <strong>Order:</strong>
+                                <a t-att-href="mechanic_document.sale_order_id.get_portal_url()"><t t-out="mechanic_document.sale_order_id.name"/></a>
+                            </div>
+                            <div class="mb-2" t-if="mechanic_document.account_move_id">
+                                <strong>Invoice:</strong>
+                                <a t-att-href="mechanic_document.account_move_id.get_portal_url()"><t t-out="mechanic_document.account_move_id.name or mechanic_document.account_move_id.ref or mechanic_document.account_move_id.display_name"/></a>
+                            </div>
+                            <div class="mb-2" t-if="mechanic_document.picking_id">
+                                <strong>Picking:</strong>
+                                <t t-out="mechanic_document.picking_id.name"/>
+                            </div>
+                            <div class="text-muted" t-if="not mechanic_document.sale_order_id and not mechanic_document.account_move_id and not mechanic_document.picking_id">
+                                No linked source documents were recorded for this archive entry.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card shadow-sm">
+                        <div class="card-header bg-transparent"><strong>Notes</strong></div>
+                        <div class="card-body">
+                            <div t-if="mechanic_document.note" style="white-space: pre-wrap;"><t t-out="mechanic_document.note"/></div>
+                            <div t-else="" class="text-muted">No additional notes for this document.</div>
                         </div>
                     </div>
                 </div>

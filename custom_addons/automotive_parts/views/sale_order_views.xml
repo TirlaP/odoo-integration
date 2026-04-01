@@ -43,8 +43,14 @@
                        decoration-success="automotive_payment_status == 'paid'"
                        decoration-warning="automotive_payment_status == 'partial'"
                        decoration-danger="automotive_payment_status == 'unpaid'"/>
-                <field name="automotive_paid_amount" widget="monetary" groups="account.group_account_user,sales_team.group_sale_manager"/>
-                <field name="automotive_amount_due" widget="monetary" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                <field name="automotive_paid_amount" widget="monetary" string="Plăți nete" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                <field name="automotive_amount_due" widget="monetary" string="Sold net" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                <field name="automotive_inbound_paid_amount" widget="monetary" string="Plăți încasate" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                <field name="automotive_refund_amount" widget="monetary" string="Refund-uri / note de credit" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                <field name="automotive_return_amount" widget="monetary" string="Retururi operaționale" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                <field name="automotive_credit_adjustment_total" widget="monetary" string="Ajustări folosite în sold" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                <field name="automotive_financial_balance_due" widget="monetary" string="Sold operațional ajustat" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                <field name="automotive_balance_formula" readonly="1" groups="account.group_account_user,sales_team.group_sale_manager"/>
             </field>
 
             <!-- Add observations field -->
@@ -99,9 +105,15 @@
                     <group>
                         <group string="Rezumat plăți">
                             <field name="amount_total" readonly="1"/>
-                            <field name="automotive_paid_amount" readonly="1"/>
-                            <field name="automotive_amount_due" readonly="1"/>
+                            <field name="automotive_paid_amount" readonly="1" string="Plăți nete"/>
+                            <field name="automotive_amount_due" readonly="1" string="Sold net"/>
+                            <field name="automotive_inbound_paid_amount" readonly="1"/>
+                            <field name="automotive_refund_amount" readonly="1"/>
+                            <field name="automotive_return_amount" readonly="1"/>
+                            <field name="automotive_credit_adjustment_total" readonly="1"/>
+                            <field name="automotive_financial_balance_due" readonly="1"/>
                             <field name="automotive_payment_status" readonly="1"/>
+                            <field name="automotive_balance_formula" readonly="1"/>
                         </group>
                         <group string="Legături operaționale">
                             <field name="mechanic_partner_id" readonly="1"/>
@@ -168,6 +180,7 @@
                 <field name="auto_state" widget="badge"/>
                 <field name="automotive_payment_status" widget="badge" optional="show"/>
                 <field name="automotive_amount_due" optional="show"/>
+                <field name="automotive_financial_balance_due" optional="show"/>
                 <field name="stock_status" widget="badge"
                        decoration-success="stock_status == 'full'"
                        decoration-warning="stock_status == 'partial'"

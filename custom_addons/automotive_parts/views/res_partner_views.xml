@@ -22,10 +22,14 @@
                             <field name="is_mechanic" readonly="1"/>
                         </group>
                         <group string="Financiar">
-                            <field name="current_balance" widget="monetary"/>
-                            <field name="automotive_order_total" widget="monetary" groups="account.group_account_user,sales_team.group_sale_manager"/>
-                            <field name="automotive_paid_total" widget="monetary" groups="account.group_account_user,sales_team.group_sale_manager"/>
-                            <field name="automotive_balance_due" widget="monetary" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                            <field name="current_balance" widget="monetary" string="Sold contabil"/>
+                            <field name="automotive_order_total" widget="monetary" string="Total comenzi brute" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                            <field name="automotive_paid_total" widget="monetary" string="Plăți încasate" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                            <field name="automotive_refund_total" widget="monetary" string="Refund-uri" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                            <field name="automotive_return_total" widget="monetary" string="Retururi" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                            <field name="automotive_credit_adjustment_total" widget="monetary" string="Ajustări credit folosite în sold" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                            <field name="automotive_balance_due" widget="monetary" string="Sold operațional ajustat" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                            <field name="automotive_balance_formula" readonly="1" groups="account.group_account_user,sales_team.group_sale_manager"/>
                         </group>
                         <group string="Portal Mecanic" invisible="client_type != 'mechanic'">
                             <field name="mechanic_portal_access" readonly="1"/>
@@ -78,6 +82,10 @@
                 <field name="client_type"/>
                 <field name="cui"/>
                 <field name="current_balance"/>
+                <field name="automotive_paid_total" optional="show" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                <field name="automotive_refund_total" optional="show" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                <field name="automotive_return_total" optional="show" groups="account.group_account_user,sales_team.group_sale_manager"/>
+                <field name="automotive_credit_adjustment_total" optional="show" groups="account.group_account_user,sales_team.group_sale_manager"/>
                 <field name="automotive_balance_due" optional="show" groups="account.group_account_user,sales_team.group_sale_manager"/>
             </field>
         </field>

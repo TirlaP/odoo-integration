@@ -14,6 +14,62 @@
         <field name="path">sale-products</field>
     </record>
 
+    <record id="action_automotive_stock_workspace" model="ir.actions.act_window">
+        <field name="path">automotive-stock-workspace</field>
+    </record>
+
+    <record id="stock.action_view_quants" model="ir.actions.server">
+        <field name="path">automotive-stock-quants</field>
+    </record>
+
+    <record id="stock.action_view_inventory_tree" model="ir.actions.server">
+        <field name="path">automotive-stock-adjustments</field>
+    </record>
+
+    <record id="stock.action_picking_tree_incoming" model="ir.actions.act_window">
+        <field name="path">automotive-receptions</field>
+    </record>
+
+    <record id="stock.action_picking_tree_outgoing" model="ir.actions.act_window">
+        <field name="path">automotive-deliveries</field>
+    </record>
+
+    <record id="stock.action_picking_tree_internal" model="ir.actions.act_window">
+        <field name="path">automotive-transfers</field>
+    </record>
+
+    <record id="stock.action_orderpoint" model="ir.actions.act_window">
+        <field name="path">automotive-replenishment</field>
+    </record>
+
+    <record id="action_automotive_payment_allocations" model="ir.actions.act_window">
+        <field name="path">automotive-payment-allocations</field>
+    </record>
+
+    <record id="action_mechanic_portal_requests" model="ir.actions.act_window">
+        <field name="path">automotive-mechanic-requests</field>
+    </record>
+
+    <record id="action_commercial_document_archive" model="ir.actions.act_window">
+        <field name="path">automotive-commercial-documents</field>
+    </record>
+
+    <record id="action_invoice_ingest_jobs" model="ir.actions.act_window">
+        <field name="path">automotive-invoice-ingest</field>
+    </record>
+
+    <record id="action_invoice_ingest_upload_wizard" model="ir.actions.act_window">
+        <field name="path">automotive-invoice-import</field>
+    </record>
+
+    <record id="action_anaf_efactura" model="ir.actions.act_window">
+        <field name="path">automotive-anaf-config</field>
+    </record>
+
+    <record id="action_audit_log" model="ir.actions.act_window">
+        <field name="path">automotive-audit-log</field>
+    </record>
+
     <record id="action_automotive_parts_root" model="ir.actions.act_window">
         <field name="name">Automotive Parts</field>
         <field name="path">automotive-parts</field>
@@ -24,4 +80,3 @@
         <field name="context">{}</field>
     </record>
 </odoo>
-

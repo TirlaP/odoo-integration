@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 import base64
+import glob
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import shutil
@@ -99,7 +101,7 @@ class InvoiceIngestJob(models.Model):
         [
             ('manual', 'Manual'),
             ('anaf', 'ANAF e-Factura'),
-            ('ocr', 'OCR/AI'),
+            ('ocr', 'OCR/AI (PDF/Image)'),
         ],
         default='manual',
         required=True,
@@ -283,7 +285,7 @@ class InvoiceIngestJob(models.Model):
     def action_open_upload_wizard(self, *args, **kwargs):
         self.ensure_one()
         return {
-            'name': 'Import AI (PDF)',
+            'name': 'Import AI (PDF/Image)',
             'type': 'ir.actions.act_window',
             'res_model': 'invoice.ingest.upload.wizard',
             'view_mode': 'form',
@@ -678,26 +680,170 @@ class InvoiceIngestJob(models.Model):
 
         return 'in_invoice'
 
+    @api.model
+    def _detect_attachment_kind(self, binary, filename=None, mimetype=None):
+        name = (filename or '').strip().lower()
+        mime = (mimetype or '').strip().lower()
+        if not binary:
+            return ''
+        if 'pdf' in mime or name.endswith('.pdf') or binary[:4] == b'%PDF':
+            return 'pdf'
+        if mime.startswith('image/') or name.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff')):
+            return 'image'
+        try:
+            from PIL import Image
+            with Image.open(BytesIO(binary)) as image:
+                image.verify()
+            return 'image'
+        except Exception:
+            return ''
+
+    @api.model
+    def _prepare_ocr_image_path(self, image):
+        try:
+            from PIL import Image, ImageOps
+        except Exception:
+            return ''
+        try:
+            if image.mode == 'P':
+                image = image.convert('RGBA')
+            if image.mode in {'RGBA', 'LA'}:
+                background = Image.new('RGBA', image.size, 'white')
+                background.paste(image, mask=image.getchannel('A'))
+                image = background.convert('RGB')
+            else:
+                image = image.convert('RGB')
+            if max(image.size or (0, 0)) < 2400:
+                image = image.resize((max(image.width * 2, 1), max(image.height * 2, 1)), Image.LANCZOS)
+            image = ImageOps.grayscale(image)
+            image = ImageOps.autocontrast(image)
+            tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            tmp.close()
+            image.save(tmp.name, format='PNG')
+            return tmp.name
+        except Exception:
+            return ''
+
+    @api.model
+    def _ocr_image_path(self, image_path):
+        if not image_path or not shutil.which('tesseract'):
+            return ''
+        try:
+            result = subprocess.run(
+                ['tesseract', image_path, 'stdout', '--psm', '6', '--dpi', '300'],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except Exception:
+            return ''
+        if result.returncode != 0:
+            return ''
+        return (result.stdout or '').strip()
+
+    @api.model
+    def _extract_image_text_with_ocr(self, binary):
+        if not binary:
+            return ''
+        try:
+            from PIL import Image, ImageSequence
+        except Exception:
+            return ''
+        if not shutil.which('tesseract'):
+            return ''
+
+        temp_paths = []
+        texts = []
+        try:
+            with Image.open(BytesIO(binary)) as image:
+                frame_count = getattr(image, 'n_frames', 1) or 1
+                frames = ImageSequence.Iterator(image) if frame_count > 1 else [image]
+                for frame in frames:
+                    processed_path = self._prepare_ocr_image_path(frame.copy())
+                    if not processed_path:
+                        continue
+                    temp_paths.append(processed_path)
+                    ocr_text = self._ocr_image_path(processed_path)
+                    if ocr_text:
+                        texts.append(ocr_text)
+        except Exception:
+            return ''
+        finally:
+            for path in temp_paths:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+        return '\n'.join(texts).strip()
+
+    @api.model
+    def _extract_pdf_text_with_ocr(self, binary):
+        if not binary or not shutil.which('pdftoppm') or not shutil.which('tesseract'):
+            return ''
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                pdf_path = os.path.join(temp_dir, 'invoice.pdf')
+                prefix = os.path.join(temp_dir, 'page')
+                with open(pdf_path, 'wb') as handle:
+                    handle.write(binary)
+                result = subprocess.run(
+                    ['pdftoppm', '-png', '-r', '300', pdf_path, prefix],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    return ''
+                texts = []
+                for image_path in sorted(glob.glob(f'{prefix}-*.png')):
+                    ocr_text = self._ocr_image_path(image_path)
+                    if ocr_text:
+                        texts.append(ocr_text)
+                return '\n'.join(texts).strip()
+        except Exception:
+            return ''
+
     def _extract_pdf_text(self):
         self.ensure_one()
         if not self.attachment_id or not self.attachment_id.datas:
-            raise UserError('Attach a PDF first.')
-        if self.attachment_id.mimetype and 'pdf' not in (self.attachment_id.mimetype or '').lower():
-            raise UserError('The attached file is not a PDF.')
+            raise UserError('Attach a PDF or image first.')
 
         binary = base64.b64decode(self.attachment_id.datas)
+        kind = self._detect_attachment_kind(
+            binary,
+            filename=self.attachment_id.name,
+            mimetype=self.attachment_id.mimetype,
+        )
+        if kind == 'image':
+            return self._extract_image_text_with_ocr(binary)
+        if kind != 'pdf':
+            raise UserError('Unsupported attachment type. Upload a PDF or image first.')
+
         layout_text = self._extract_pdf_text_with_pdftotext(binary)
         if layout_text and len(layout_text) >= 20:
             return layout_text
 
-        reader = PdfReader(BytesIO(binary))
-        pages = []
-        for page in reader.pages:
-            try:
-                pages.append(page.extract_text() or '')
-            except Exception:
-                continue
-        text = '\n'.join(pages).strip()
+        text = ''
+        try:
+            reader = PdfReader(BytesIO(binary))
+            pages = []
+            for page in reader.pages:
+                try:
+                    pages.append(page.extract_text() or '')
+                except Exception:
+                    continue
+            text = '\n'.join(pages).strip()
+        except Exception:
+            text = ''
+        if text and len(text) >= 20:
+            return text
+
+        ocr_text = self._extract_pdf_text_with_ocr(binary)
+        if ocr_text:
+            return ocr_text
+
         return text
 
     @api.model
@@ -1918,7 +2064,7 @@ class InvoiceIngestJob(models.Model):
             text = job._extract_pdf_text()
             if not text or len(text) < 20:
                 raise UserError(
-                    'PDF text extraction returned no usable text. Use ANAF XML import or connect an OCR provider.'
+                    'Document text extraction returned no usable text. Use ANAF XML import or install Tesseract OCR for scanned documents.'
                 )
             pdf_totals = job._extract_invoice_totals_from_text(text)
             pdf_header = job._extract_invoice_header_from_text(
@@ -2857,17 +3003,26 @@ class InvoiceIngestUploadWizard(models.TransientModel):
     _name = 'invoice.ingest.upload.wizard'
     _description = 'Invoice Ingest Upload Wizard'
 
-    pdf_file = fields.Binary('PDF File', required=True)
+    pdf_file = fields.Binary('Document File', required=True)
     pdf_filename = fields.Char('Filename')
     supplier_id = fields.Many2one('res.partner', string='Supplier (Optional)')
 
     def action_import_pdf(self):
+        return self.action_import_document()
+
+    def action_import_document(self):
         self.ensure_one()
         if not self.pdf_file:
-            raise UserError('Please upload a PDF first.')
-        filename = (self.pdf_filename or 'invoice.pdf').strip()
-        mimetype = 'application/pdf' if filename.lower().endswith('.pdf') else 'application/octet-stream'
-        file_checksum = hashlib.sha256(base64.b64decode(self.pdf_file)).hexdigest()
+            raise UserError('Please upload a PDF or image first.')
+        filename = (self.pdf_filename or 'invoice_document').strip()
+        binary = base64.b64decode(self.pdf_file)
+        mimetype = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+        kind = self._detect_attachment_kind(binary, filename=filename, mimetype=mimetype)
+        if kind not in {'pdf', 'image'}:
+            raise UserError('Please upload a PDF or image file.')
+        if kind == 'image' and not shutil.which('tesseract'):
+            raise UserError('Image OCR requires Tesseract OCR to be installed on the server.')
+        file_checksum = hashlib.sha256(binary).hexdigest()
 
         job = self.env['invoice.ingest.job'].search([
             ('source', '=', 'ocr'),

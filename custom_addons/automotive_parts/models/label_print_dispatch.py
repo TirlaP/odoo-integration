@@ -19,6 +19,29 @@ class IrActionsReport(models.Model):
         self.ensure_one()
         return self.report_name == self._LABEL_REPORT_NAME
 
+    def _audit_label_request(self, docids, data, settings, dispatch_mode):
+        self.ensure_one()
+        if self.env.context.get('skip_audit_log') is True:
+            return False
+        labels = list((data or {}).get('labels') or [])
+        return self.env['automotive.audit.log'].log_change(
+            action='custom',
+            record=self,
+            description=f'Automotive label report {dispatch_mode}',
+            new_values={
+                'report_name': self.report_name,
+                'report_xmlid': self._LABEL_REPORT_XMLID,
+                'active_model': self.env.context.get('active_model') or False,
+                'docids': docids or [],
+                'label_count': len(labels) or len(docids or []),
+                'dispatch_mode': dispatch_mode,
+                'direct_print_enabled': settings['enabled'],
+                'printer_name': settings['printer_name'],
+                'job_name': settings['job_name'],
+                'copies': settings['copies'],
+            },
+        )
+
     def _get_label_print_settings(self):
         icp = self.env['ir.config_parameter'].sudo()
         return {
@@ -152,7 +175,10 @@ class IrActionsReport(models.Model):
 
         settings = self._get_label_print_settings()
         if not settings['enabled']:
+            self._audit_label_request(docids, data, settings, 'requested (pdf)')
             return super().report_action(docids, data=data, config=config)
 
         pdf_content = self._render_label_report_pdf(data=data)
-        return self._dispatch_label_pdf_to_printer(pdf_content, settings)
+        result = self._dispatch_label_pdf_to_printer(pdf_content, settings)
+        self._audit_label_request(docids, data, settings, 'dispatched to printer')
+        return result

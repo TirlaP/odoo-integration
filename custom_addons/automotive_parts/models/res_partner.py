@@ -47,10 +47,29 @@ class ResPartner(models.Model):
         compute='_compute_automotive_financial_summary',
         currency_field='currency_id',
     )
+    automotive_refund_total = fields.Monetary(
+        'Total Refund-uri',
+        compute='_compute_automotive_financial_summary',
+        currency_field='currency_id',
+    )
+    automotive_return_total = fields.Monetary(
+        'Total Retururi',
+        compute='_compute_automotive_financial_summary',
+        currency_field='currency_id',
+    )
+    automotive_credit_adjustment_total = fields.Monetary(
+        'Ajustări Credit',
+        compute='_compute_automotive_financial_summary',
+        currency_field='currency_id',
+    )
     automotive_balance_due = fields.Monetary(
         'Sold Operațional',
         compute='_compute_automotive_financial_summary',
         currency_field='currency_id',
+    )
+    automotive_balance_formula = fields.Char(
+        'Formula Sold Operațional',
+        compute='_compute_automotive_financial_summary',
     )
     automotive_payment_count = fields.Integer(
         'Plăți Auto',
@@ -130,9 +149,21 @@ class ResPartner(models.Model):
         for partner in self:
             orders = SaleOrder.search(partner._get_automotive_order_domain())
             allocations = Allocation.search(partner._get_automotive_allocation_domain())
+            inbound_allocations = allocations.filtered(lambda allocation: allocation.payment_type == 'inbound')
             partner.automotive_order_total = sum(orders.mapped('amount_total'))
-            partner.automotive_paid_total = sum(allocations.mapped('signed_amount'))
-            partner.automotive_balance_due = partner.automotive_order_total - partner.automotive_paid_total
+            partner.automotive_paid_total = sum(inbound_allocations.mapped('amount'))
+            partner.automotive_refund_total = sum(orders.mapped('automotive_refund_amount'))
+            partner.automotive_return_total = sum(orders.mapped('automotive_return_amount'))
+            partner.automotive_credit_adjustment_total = sum(orders.mapped('automotive_credit_adjustment_total'))
+            partner.automotive_balance_due = (
+                partner.automotive_order_total
+                - partner.automotive_paid_total
+                - partner.automotive_credit_adjustment_total
+            )
+            partner.automotive_balance_formula = (
+                'Sold operațional = Total comenzi - Plăți încasate - Ajustări retur/refund '
+                '(ajustarea folosește valoarea confirmată cea mai mare dintre retururile operaționale și documentele de credit)'
+            )
             partner.automotive_payment_count = len(allocations.mapped('payment_id'))
 
     @api.depends('create_uid', 'write_uid')

@@ -272,8 +272,42 @@ class StockPicking(models.Model):
         if incoming_pickings:
             incoming_pickings._check_supplier_invoice_integrity()
 
+        commercial_archive = self.env['commercial.document.archive']
+
         # Update related sales orders
         for picking in self:
+            if picking.state == 'done':
+                if picking.sale_id:
+                    commercial_archive.sync_from_source_document(
+                        picking.sale_id,
+                        document_type='internal',
+                        note=f'Automatically linked from validated picking {picking.name}.',
+                        archive=True,
+                    )
+
+                if picking.picking_type_code == 'incoming':
+                    commercial_archive.sync_from_source_document(
+                        picking,
+                        document_type='nir',
+                        note=f'Automatically archived from validated reception {picking.name}.',
+                        archive=True,
+                    )
+                elif picking.picking_type_code == 'outgoing':
+                    commercial_archive.sync_from_source_document(
+                        picking,
+                        document_type='delivery_note',
+                        note=f'Automatically archived from validated delivery {picking.name}.',
+                        archive=True,
+                    )
+
+                if picking.supplier_invoice_id:
+                    commercial_archive.sync_from_source_document(
+                        picking.supplier_invoice_id,
+                        document_type='vendor_bill',
+                        note=f'Automatically linked from validated receipt {picking.name}.',
+                        archive=True,
+                    )
+
             if picking.sale_id:
                 picking.sale_id._update_auto_state()
 

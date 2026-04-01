@@ -91,6 +91,47 @@
               parent="menu_automotive_root"
               sequence="20"/>
 
+    <menuitem id="menu_stock_workspace"
+              name="Stock Workspace"
+              parent="menu_automotive_root"
+              sequence="25"/>
+
+    <menuitem id="menu_stock_workspace_overview"
+              name="Workspace"
+              parent="menu_stock_workspace"
+              action="action_automotive_stock_workspace"
+              sequence="10"/>
+
+    <menuitem id="menu_stock_workspace_receptions"
+              name="Recepții / NIR"
+              parent="menu_stock_workspace"
+              action="stock.action_picking_tree_incoming"
+              sequence="20"/>
+
+    <menuitem id="menu_stock_workspace_deliveries"
+              name="Livrări"
+              parent="menu_stock_workspace"
+              action="stock.action_picking_tree_outgoing"
+              sequence="30"/>
+
+    <menuitem id="menu_stock_workspace_internal"
+              name="Transferuri interne"
+              parent="menu_stock_workspace"
+              action="stock.action_picking_tree_internal"
+              sequence="40"/>
+
+    <menuitem id="menu_stock_workspace_inventory"
+              name="Inventory Adjustments"
+              parent="menu_stock_workspace"
+              action="stock.action_view_inventory_tree"
+              sequence="50"/>
+
+    <menuitem id="menu_stock_workspace_replenishment"
+              name="Replenishment"
+              parent="menu_stock_workspace"
+              action="stock.action_orderpoint"
+              sequence="60"/>
+
     <menuitem id="menu_commercial_documents"
               name="Commercial Documents"
               parent="menu_automotive_root"
