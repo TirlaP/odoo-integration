@@ -6,9 +6,6 @@
         <field name="arch" type="xml">
             <list string="Importuri facturi">
                 <field name="create_date"/>
-                <field name="batch_name" optional="show"/>
-                <field name="batch_index" optional="show"/>
-                <field name="batch_total" optional="show"/>
                 <field name="name"/>
                 <field name="source"/>
                 <field name="state"/>
@@ -31,7 +28,6 @@
         <field name="arch" type="xml">
             <search string="Importuri facturi">
                 <field name="name"/>
-                <field name="batch_name"/>
                 <field name="partner_id"/>
                 <field name="invoice_number"/>
                 <field name="source"/>
@@ -42,7 +38,6 @@
                 <filter string="Done" name="done" domain="[('state', '=', 'done')]"/>
                 <filter string="Failed" name="failed" domain="[('state', '=', 'failed')]"/>
                 <group expand="0" string="Group By">
-                    <filter string="Batch" name="group_batch_uid" context="{'group_by': 'batch_name'}"/>
                     <filter string="State" name="group_state" context="{'group_by': 'state'}"/>
                     <filter string="Source" name="group_source" context="{'group_by': 'source'}"/>
                     <filter string="Supplier" name="group_partner" context="{'group_by': 'partner_id'}"/>
@@ -80,10 +75,7 @@
                         <group>
                             <field name="name"/>
                             <field name="source"/>
-                            <field name="batch_name"/>
                             <field name="batch_uid" invisible="1"/>
-                            <field name="batch_index"/>
-                            <field name="batch_total"/>
                             <field name="document_type"/>
                             <field name="picking_id" string="Stock Receipt (Optional)"/>
                             <field name="receipt_sync_state" readonly="1"/>

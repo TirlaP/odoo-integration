@@ -120,7 +120,7 @@
 
     <!-- Audit Log Menu -->
     <menuitem id="menu_audit_log"
-              name="Jurnal audit"
+              name="Audit Logs"
               parent="menu_automotive_root"
               action="action_audit_log"
               sequence="90"/>

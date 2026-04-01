@@ -376,7 +376,7 @@
         <field name="name">automotive.audit.log.tree</field>
         <field name="model">automotive.audit.log</field>
         <field name="arch" type="xml">
-            <list string="Jurnal audit" create="false" delete="false">
+            <list string="Audit Logs" create="false" delete="false">
                 <field name="create_date"/>
                 <field name="company_id" optional="hide"/>
                 <field name="user_id"/>
@@ -394,7 +394,7 @@
         <field name="name">automotive.audit.log.form</field>
         <field name="model">automotive.audit.log</field>
         <field name="arch" type="xml">
-            <form string="Intrare jurnal audit" create="false" delete="false">
+            <form string="Audit Log Entry" create="false" delete="false">
                 <sheet>
                     <group>
                         <group>
@@ -424,7 +424,7 @@
         <field name="name">automotive.audit.log.search</field>
         <field name="model">automotive.audit.log</field>
         <field name="arch" type="xml">
-            <search string="Jurnal audit">
+            <search string="Audit Logs">
                 <field name="create_date"/>
                 <field name="company_id"/>
                 <field name="user_id"/>
@@ -453,7 +453,7 @@
 
     <!-- Audit Log Action -->
     <record id="action_audit_log" model="ir.actions.act_window">
-        <field name="name">Jurnal audit</field>
+        <field name="name">Audit Logs</field>
         <field name="path">jurnal-audit</field>
         <field name="res_model">automotive.audit.log</field>
         <field name="view_mode">list,form</field>
