@@ -57,6 +57,7 @@
         'data/mechanic_portal_request_sequence.xml',
         'data/commercial_document_sequence.xml',
         'data/automotive_async_job_cron.xml',
+        'data/mail_orphan_cleanup_cron.xml',
         'report/label_report.xml',
         'views/label_print_wizard_views.xml',
         'views/res_partner_views.xml',

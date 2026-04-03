@@ -166,6 +166,101 @@ class AutomotivePaymentAllocation(models.Model):
             sign = -1.0 if allocation.payment_type == 'outbound' else 1.0
             allocation.signed_amount = allocation.amount * sign
 
+    def _get_amount_rounding(self):
+        self.ensure_one()
+        currency = (
+            self.currency_id
+            or self.payment_id.currency_id
+            or self.sale_order_id.currency_id
+            or self.env.company.currency_id
+        )
+        return currency.rounding if currency else 0.01
+
+    def _get_payment_remaining_amount(self):
+        self.ensure_one()
+        if not self.payment_id:
+            return 0.0
+        allocated = sum(
+            self.payment_id.automotive_allocation_ids.filtered(
+                lambda item: item.active and item.id != self.id
+            ).mapped('amount')
+        )
+        return max(self.payment_id.amount - allocated, 0.0)
+
+    def _get_target_allocatable_amount(self):
+        self.ensure_one()
+        payment_type = self.payment_type or self.payment_id.payment_type
+        if self.sale_order_line_id:
+            target_total = self.sale_order_line_id.price_total
+            current_net = sum(
+                self.sale_order_line_id.automotive_payment_allocation_ids.filtered(
+                    lambda item: item.active and item.id != self.id
+                ).mapped('signed_amount')
+            )
+        elif self.sale_order_id:
+            target_total = self.sale_order_id.amount_total
+            current_net = sum(
+                self.sale_order_id.automotive_payment_allocation_ids.filtered(
+                    lambda item: item.active and item.id != self.id
+                ).mapped('signed_amount')
+            )
+        else:
+            return self._get_payment_remaining_amount()
+
+        if payment_type == 'outbound':
+            return max(current_net, 0.0)
+        return max(target_total - current_net, 0.0)
+
+    def _get_suggested_amount(self):
+        self.ensure_one()
+        payment_remaining = self._get_payment_remaining_amount()
+        if float_compare(
+            payment_remaining,
+            0.0,
+            precision_rounding=self._get_amount_rounding(),
+        ) <= 0:
+            return 0.0
+        target_allocatable = self._get_target_allocatable_amount()
+        return min(payment_remaining, target_allocatable)
+
+    def _apply_amount_suggestion(self):
+        for allocation in self:
+            rounding = allocation._get_amount_rounding()
+            if float_compare(allocation.amount or 0.0, 0.0, precision_rounding=rounding) > 0:
+                continue
+            suggested_amount = allocation._get_suggested_amount()
+            if float_compare(suggested_amount, 0.0, precision_rounding=rounding) > 0:
+                allocation.amount = suggested_amount
+
+    @api.model
+    def _prepare_create_vals(self, vals):
+        prepared = dict(vals)
+        candidate = self.new(prepared)
+        candidate._apply_amount_suggestion()
+        if candidate.amount:
+            prepared['amount'] = candidate.amount
+        return prepared
+
+    @api.model
+    def _validate_positive_amount(self, amount, rounding):
+        if float_compare(amount or 0.0, 0.0, precision_rounding=rounding) <= 0:
+            raise ValidationError('Set a positive allocated amount before saving the allocation.')
+
+    @api.model
+    def default_get(self, fields_list):
+        defaults = super().default_get(fields_list)
+        if 'amount' not in fields_list:
+            return defaults
+        candidate = self.new(defaults)
+        candidate._apply_amount_suggestion()
+        if candidate.amount:
+            defaults['amount'] = candidate.amount
+        return defaults
+
+    @api.onchange('payment_id', 'sale_order_id', 'sale_order_line_id')
+    def _onchange_amount(self):
+        self._apply_amount_suggestion()
+
     @api.depends('sale_order_id.picking_ids', 'sale_order_id.picking_ids.state', 'sale_order_id.picking_ids.picking_type_code')
     def _compute_delivery_picking_ids(self):
         for allocation in self:
@@ -302,7 +397,13 @@ class AutomotivePaymentAllocation(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
-        allocations = super().create(vals_list)
+        prepared_vals_list = []
+        for vals in vals_list:
+            prepared_vals = self._prepare_create_vals(vals)
+            candidate = self.new(prepared_vals)
+            self._validate_positive_amount(candidate.amount, candidate._get_amount_rounding())
+            prepared_vals_list.append(prepared_vals)
+        allocations = super().create(prepared_vals_list)
         for allocation in allocations:
             allocation._audit_log(
                 action='create',
@@ -312,6 +413,15 @@ class AutomotivePaymentAllocation(models.Model):
         return allocations
 
     def write(self, vals):
+        if 'amount' in vals:
+            for allocation in self:
+                candidate = allocation.new({
+                    'payment_id': vals.get('payment_id', allocation.payment_id.id),
+                    'sale_order_id': vals.get('sale_order_id', allocation.sale_order_id.id),
+                    'sale_order_line_id': vals.get('sale_order_line_id', allocation.sale_order_line_id.id),
+                    'amount': vals.get('amount'),
+                })
+                self._validate_positive_amount(candidate.amount, candidate._get_amount_rounding())
         old_by_id = {allocation.id: allocation._audit_payload() for allocation in self}
         result = super().write(vals)
         for allocation in self:

@@ -183,6 +183,35 @@ class ProductProduct(models.Model):
             # Use Odoo's built-in outgoing_qty which tracks reserved stock
             product.stock_reserved = product.outgoing_qty
 
+    @api.model
+    def _get_pos_config_record(self, config_ref):
+        if 'pos.config' not in self.env.registry:
+            return None
+        if getattr(config_ref, '_name', None) == 'pos.config':
+            return config_ref
+        return self.env['pos.config'].browse(config_ref)
+
+    @api.model
+    def _should_load_pos_product_images(self, config_ref):
+        """Skip product image preloading when the POS UI does not render them."""
+        if 'pos.config' not in self.env.registry:
+            return True
+        config = self._get_pos_config_record(config_ref)
+        return bool(config and config.exists() and config.show_product_images)
+
+    @api.model
+    def _load_pos_data_fields(self, config_id):
+        fields_to_load = list(super()._load_pos_data_fields(config_id))
+        if not self._should_load_pos_product_images(config_id):
+            fields_to_load = [field for field in fields_to_load if field != 'image_128']
+        return fields_to_load
+
+    def _process_pos_ui_product_product(self, products, config_id):
+        if not self._should_load_pos_product_images(config_id):
+            for product in products:
+                product.setdefault('image_128', False)
+        return super()._process_pos_ui_product_product(products, config_id)
+
     def _stock_alert_get_company(self):
         self.ensure_one()
         return self.company_id or self.product_tmpl_id.company_id or self.env.company

@@ -56,10 +56,7 @@
                             string="Import AI facturi"/>
                     <button name="action_reprocess" type="object" class="btn-secondary"
                             string="Reprocesează"
-                            invisible="source != 'ocr' or not attachment_id or state == 'running'"/>
-                    <button name="action_create_test_copy" type="object" class="btn-secondary"
-                            string="Creează copie test"
-                            invisible="not allow_test_duplicate_action or source != 'ocr' or not attachment_id"/>
+                            invisible="source != 'ocr' or not attachment_id or state == 'running' or receipt_sync_state == 'synced'"/>
                     <button name="action_create_draft_vendor_bill" type="object" class="btn-secondary"
                             string="Create Draft Vendor Bill" invisible="account_move_id != False"/>
                     <button name="action_sync_receipt_stock" type="object" class="btn-secondary"
@@ -79,7 +76,6 @@
                         <group>
                             <field name="name"/>
                             <field name="source"/>
-                            <field name="allow_test_duplicate_action" invisible="1"/>
                             <field name="batch_uid" invisible="1"/>
                             <field name="finished_at" invisible="1"/>
                             <field name="duplicate_of_job_id" invisible="1"/>
@@ -117,6 +113,7 @@
                                 <field name="product_id"/>
                                 <field name="match_status" readonly="1"/>
                                 <button name="action_try_match" type="object" icon="fa-search" string="" title="Try match"/>
+                                <button name="action_open_tecdoc_match" type="object" icon="fa-database" string="" title="Match TecDoc" invisible="product_id"/>
                                 <button name="action_clear_match" type="object" icon="fa-eraser" string="" title="Clear match"/>
                                 <button name="action_generate_label" type="object" string="Genereaza eticheta" title="Genereaza eticheta"/>
                             </list>

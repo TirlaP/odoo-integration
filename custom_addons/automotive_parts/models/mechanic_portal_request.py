@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+from markupsafe import Markup, escape
+
 from odoo import _, api, fields, models
 from odoo.exceptions import ValidationError
 from odoo.http import request as http_request
@@ -138,15 +140,17 @@ class MechanicPortalRequest(models.Model):
         for request_record in self:
             if not request_record.sale_order_id:
                 continue
-            if not request_record.sale_order_id.mechanic_partner_id:
+            sale_order = request_record.sale_order_id.sudo()
+            request_partner = request_record.partner_id.sudo().commercial_partner_id
+            if not sale_order.mechanic_partner_id:
                 raise ValidationError(_('The related order is not assigned to a mechanic portal account.'))
-            sale_mechanic = request_record.sale_order_id.mechanic_partner_id.commercial_partner_id
-            if sale_mechanic and sale_mechanic != request_record.partner_id.commercial_partner_id:
+            sale_mechanic = sale_order.mechanic_partner_id.commercial_partner_id
+            if sale_mechanic and sale_mechanic != request_partner:
                 raise ValidationError(_('The related order does not belong to this mechanic portal account.'))
 
     @api.model_create_multi
     def create(self, vals_list):
-        sequence = self.env['ir.sequence']
+        sequence = self.env['ir.sequence'].sudo()
         for vals in vals_list:
             if vals.get('name', '/') == '/':
                 vals['name'] = sequence.next_by_code('mechanic.portal.request') or '/'
@@ -166,6 +170,12 @@ class MechanicPortalRequest(models.Model):
         return requests
 
     def write(self, vals):
+        if 'description' in vals and not self.env.context.get('allow_request_description_write'):
+            new_description = vals.get('description') or ''
+            if any((request_record.description or '') != new_description for request_record in self):
+                raise ValidationError(
+                    _('The original request message cannot be edited after creation. Use the conversation thread instead.')
+                )
         old_values = {}
         state_before = {}
         if vals.get('state') == 'done' and not vals.get('resolved_on'):
@@ -234,3 +244,25 @@ class MechanicPortalRequest(models.Model):
 
     def action_mark_cancelled(self):
         self.write({'state': 'cancelled'})
+
+    def action_portal_reply(self, body):
+        self.ensure_one()
+        self.check_access('read')
+        clean_body = (body or '').strip()
+        if not clean_body:
+            raise ValidationError(_('Enter a message before sending your reply.'))
+        if self.state in ('done', 'cancelled'):
+            raise ValidationError(_('You cannot reply to a closed request.'))
+
+        if self.state == 'waiting_customer':
+            self.sudo().with_context(tracking_disable=True).write({'state': 'in_progress'})
+        formatted_body = Markup('<div style="white-space: pre-wrap;">%s</div>') % (
+            escape(clean_body).replace('\n', Markup('<br/>'))
+        )
+        self.sudo().message_post(
+            author_id=self.env.user.partner_id.id,
+            body=formatted_body,
+            message_type='comment',
+            subtype_xmlid='mail.mt_comment',
+        )
+        return True

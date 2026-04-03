@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 import base64
 import json
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from odoo.tests.common import TransactionCase, tagged
+from odoo.exceptions import UserError, ValidationError
+from odoo.addons.automotive_parts.controllers.portal import CustomerPortal
+from werkzeug.utils import redirect as werkzeug_redirect
 
 
 @tagged('post_install', '-at_install')
@@ -49,6 +54,237 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             self.assertTrue(action.name, f'{xmlid} should always have a display name.')
             self.assertEqual(action.path, expected_path)
 
+    def test_mechanic_portal_delivery_domain_uses_resolved_ids(self):
+        mechanic_partner = self.env['res.partner'].create({
+            'name': 'Portal Mechanic',
+            'client_type': 'mechanic',
+            'email': 'portal.mechanic@example.com',
+        })
+        mechanic_user = self.env['res.users'].with_context(no_reset_password=True).create({
+            'name': 'Portal Mechanic',
+            'login': 'portal.mechanic@example.com',
+            'email': 'portal.mechanic@example.com',
+            'partner_id': mechanic_partner.id,
+            'groups_id': [(6, 0, [self.env.ref('automotive_parts.group_mechanic_portal').id])],
+        })
+        customer = self.env['res.partner'].create({
+            'name': 'Portal Customer',
+            'customer_rank': 1,
+        })
+        order = self.env['sale.order'].create({
+            'partner_id': customer.id,
+            'mechanic_partner_id': mechanic_partner.id,
+        })
+        picking_type = self.env.ref('stock.picking_type_out')
+        delivery = self.env['stock.picking'].create({
+            'partner_id': customer.id,
+            'sale_id': order.id,
+            'picking_type_id': picking_type.id,
+            'location_id': picking_type.default_location_src_id.id,
+            'location_dest_id': picking_type.default_location_dest_id.id,
+        })
+        controller = CustomerPortal()
+        fake_request = SimpleNamespace(env=self.env, user=mechanic_user)
+
+        with patch('odoo.addons.automotive_parts.controllers.portal.request', fake_request):
+            domain = controller._prepare_mechanic_delivery_domain(mechanic_partner)
+
+        self.assertEqual(domain, [('id', 'in', [delivery.id])])
+        count = self.env['stock.picking'].with_user(mechanic_user).search_count(domain)
+        self.assertEqual(count, 1)
+
+    def test_mechanic_portal_status_helper_works_for_portal_user(self):
+        mechanic_partner = self.env['res.partner'].create({
+            'name': 'Portal Mechanic Status',
+            'client_type': 'mechanic',
+            'email': 'portal.mechanic.status@example.com',
+        })
+        mechanic_user = self.env['res.users'].with_context(no_reset_password=True).create({
+            'name': 'Portal Mechanic Status',
+            'login': 'portal.mechanic.status@example.com',
+            'email': 'portal.mechanic.status@example.com',
+            'partner_id': mechanic_partner.id,
+            'groups_id': [(6, 0, [self.env.ref('automotive_parts.group_mechanic_portal').id])],
+        })
+        customer = self.env['res.partner'].create({
+            'name': 'Portal Customer Status',
+            'customer_rank': 1,
+        })
+        order = self.env['sale.order'].create({
+            'partner_id': customer.id,
+            'mechanic_partner_id': mechanic_partner.id,
+        })
+        picking_type = self.env.ref('stock.picking_type_out')
+        delivery = self.env['stock.picking'].create({
+            'partner_id': customer.id,
+            'sale_id': order.id,
+            'picking_type_id': picking_type.id,
+            'location_id': picking_type.default_location_src_id.id,
+            'location_dest_id': picking_type.default_location_dest_id.id,
+            'state': 'assigned',
+        })
+
+        status = order.with_user(mechanic_user)._get_portal_mechanic_status()
+
+        self.assertEqual(status['latest_picking'], delivery)
+        self.assertEqual(status['delivery_label'], 'În magazin / în pregătire')
+
+    def test_mechanic_portal_request_create_works_for_portal_user(self):
+        mechanic_partner = self.env['res.partner'].create({
+            'name': 'Portal Mechanic Request',
+            'client_type': 'mechanic',
+            'email': 'portal.mechanic.request@example.com',
+        })
+        mechanic_user = self.env['res.users'].with_context(no_reset_password=True).create({
+            'name': 'Portal Mechanic Request',
+            'login': 'portal.mechanic.request@example.com',
+            'email': 'portal.mechanic.request@example.com',
+            'partner_id': mechanic_partner.id,
+            'groups_id': [(6, 0, [self.env.ref('automotive_parts.group_mechanic_portal').id])],
+        })
+        customer = self.env['res.partner'].create({
+            'name': 'Portal Customer Request',
+            'customer_rank': 1,
+        })
+        order = self.env['sale.order'].create({
+            'partner_id': customer.id,
+            'mechanic_partner_id': mechanic_partner.id,
+        })
+
+        request_record = self.env['mechanic.portal.request'].with_user(mechanic_user).create({
+            'partner_id': mechanic_partner.id,
+            'request_user_id': mechanic_user.id,
+            'sale_order_id': order.id,
+            'request_type': 'general',
+            'description': 'Need a part quote.',
+        })
+
+        self.assertTrue(request_record.name)
+        self.assertNotEqual(request_record.name, '/')
+        self.assertEqual(request_record.partner_id, mechanic_partner)
+        self.assertEqual(request_record.sale_order_id, order)
+
+    def test_mechanic_request_description_is_immutable_after_create(self):
+        request_record = self.env['mechanic.portal.request'].create({
+            'partner_id': self.env['res.partner'].create({
+                'name': 'Immutable Mechanic',
+                'client_type': 'mechanic',
+            }).id,
+            'request_user_id': self.env.user.id,
+            'request_type': 'general',
+            'description': 'Initial request body',
+        })
+
+        with self.assertRaises(ValidationError):
+            request_record.write({'description': 'Changed body'})
+
+    def test_mechanic_portal_reply_posts_message_and_reopens_request(self):
+        mechanic_partner = self.env['res.partner'].create({
+            'name': 'Portal Mechanic Reply',
+            'client_type': 'mechanic',
+            'email': 'portal.mechanic.reply@example.com',
+        })
+        mechanic_user = self.env['res.users'].with_context(no_reset_password=True).create({
+            'name': 'Portal Mechanic Reply',
+            'login': 'portal.mechanic.reply@example.com',
+            'email': 'portal.mechanic.reply@example.com',
+            'partner_id': mechanic_partner.id,
+            'groups_id': [(6, 0, [self.env.ref('automotive_parts.group_mechanic_portal').id])],
+        })
+        request_record = self.env['mechanic.portal.request'].create({
+            'partner_id': mechanic_partner.id,
+            'request_user_id': mechanic_user.id,
+            'request_type': 'general',
+            'description': 'Initial request body',
+            'state': 'waiting_customer',
+        })
+
+        request_record.with_user(mechanic_user).action_portal_reply('Here is my reply')
+
+        self.assertEqual(request_record.state, 'in_progress')
+        last_message = request_record.message_ids.sorted('id')[-1]
+        self.assertIn('Here is my reply', last_message.body)
+
+    def test_mechanic_document_counts_use_unified_workspace_total(self):
+        mechanic_partner = self.env['res.partner'].create({
+            'name': 'Portal Mechanic Documents',
+            'client_type': 'mechanic',
+            'email': 'portal.mechanic.documents@example.com',
+        })
+        mechanic_user = self.env['res.users'].with_context(no_reset_password=True).create({
+            'name': 'Portal Mechanic Documents',
+            'login': 'portal.mechanic.documents@example.com',
+            'email': 'portal.mechanic.documents@example.com',
+            'partner_id': mechanic_partner.id,
+            'groups_id': [(6, 0, [self.env.ref('automotive_parts.group_mechanic_portal').id])],
+        })
+        customer = self.env['res.partner'].create({
+            'name': 'Portal Customer Documents',
+            'customer_rank': 1,
+        })
+        order = self.env['sale.order'].create({
+            'partner_id': customer.id,
+            'mechanic_partner_id': mechanic_partner.id,
+        })
+        picking_type = self.env.ref('stock.picking_type_out')
+        delivery = self.env['stock.picking'].create({
+            'partner_id': customer.id,
+            'sale_id': order.id,
+            'picking_type_id': picking_type.id,
+            'location_id': picking_type.default_location_src_id.id,
+            'location_dest_id': picking_type.default_location_dest_id.id,
+            'state': 'assigned',
+        })
+        attachment = self.env['ir.attachment'].create({
+            'name': 'mechanic-doc.pdf',
+            'type': 'binary',
+            'datas': base64.b64encode(b'%PDF-1.4\n% mechanic portal archive\n'),
+            'mimetype': 'application/pdf',
+        })
+        self.env['commercial.document.archive'].create({
+            'state': 'archived',
+            'document_type': 'delivery_note',
+            'partner_id': mechanic_partner.id,
+            'attachment_id': attachment.id,
+        })
+
+        controller = CustomerPortal()
+        fake_request = SimpleNamespace(env=self.env, user=mechanic_user)
+
+        with patch('odoo.addons.automotive_parts.controllers.portal.request', fake_request):
+            counts = controller._get_mechanic_document_counts(mechanic_partner)
+
+        self.assertEqual(counts['invoices'], 0)
+        self.assertEqual(counts['deliveries'], 1)
+        self.assertEqual(counts['archived'], 1)
+        self.assertEqual(counts['all'], 2)
+
+    def test_mechanic_payments_route_redirects_to_documents(self):
+        mechanic_partner = self.env['res.partner'].create({
+            'name': 'Portal Mechanic Payments Redirect',
+            'client_type': 'mechanic',
+            'email': 'portal.mechanic.redirect@example.com',
+        })
+        mechanic_user = self.env['res.users'].with_context(no_reset_password=True).create({
+            'name': 'Portal Mechanic Payments Redirect',
+            'login': 'portal.mechanic.redirect@example.com',
+            'email': 'portal.mechanic.redirect@example.com',
+            'partner_id': mechanic_partner.id,
+            'groups_id': [(6, 0, [self.env.ref('automotive_parts.group_mechanic_portal').id])],
+        })
+        controller = CustomerPortal()
+        fake_request = SimpleNamespace(
+            env=self.env,
+            user=mechanic_user,
+            redirect=lambda url: werkzeug_redirect(url),
+        )
+
+        with patch('odoo.addons.automotive_parts.controllers.portal.request', fake_request):
+            redirect = controller.portal_my_mechanic_payments()
+
+        self.assertEqual(redirect.status_code, 302)
+        self.assertEqual(redirect.location, '/my/mechanic/documents')
+
     def test_invoice_upload_wizard_queues_pdf_job(self):
         wizard = self.env['invoice.ingest.upload.wizard'].create({
             'supplier_id': self.supplier.id,
@@ -71,7 +307,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertTrue(job, 'The upload wizard should create an OCR ingest job.')
         self.assertEqual(job.batch_total, 1)
         self.assertEqual(job.batch_index, 1)
-        self.assertEqual(job.state, 'pending')
+        self.assertEqual(job.state, 'running')
         self.assertTrue(job.attachment_id, 'The ingest job should keep the uploaded file as an attachment.')
 
         async_job = self.env['automotive.async.job'].search(
@@ -113,7 +349,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertEqual(action['domain'][0][0], 'batch_uid')
         self.assertEqual(action['views'], [(False, 'list'), (False, 'form')])
 
-    def test_same_uploaded_file_creates_new_ocr_jobs(self):
+    def test_same_uploaded_file_opens_existing_ocr_job(self):
         payload = base64.b64encode(b'%PDF-1.4\n% identical content\n')
         wizard_one = self.env['invoice.ingest.upload.wizard'].create({
             'supplier_id': self.supplier.id,
@@ -122,6 +358,10 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         })
         action_one = wizard_one.action_import_document()
         first_job = self.env['invoice.ingest.job'].browse(action_one['res_id'])
+        job_count_before = self.env['invoice.ingest.job'].search_count([
+            ('source', '=', 'ocr'),
+            ('attachment_id', '!=', False),
+        ])
 
         wizard_two = self.env['invoice.ingest.upload.wizard'].create({
             'supplier_id': self.supplier.id,
@@ -129,10 +369,20 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             'pdf_filename': 'same_file_again.pdf',
         })
         action_two = wizard_two.action_import_document()
-        second_job = self.env['invoice.ingest.job'].browse(action_two['res_id'])
 
-        self.assertNotEqual(first_job.id, second_job.id)
-        self.assertNotEqual(first_job.external_id, second_job.external_id)
+        self.assertEqual(action_two['type'], 'ir.actions.client')
+        self.assertEqual(action_two['tag'], 'display_notification')
+        self.assertEqual(action_two['params']['title'], 'Duplicate Document')
+        self.assertEqual(action_two['params']['message'], 'This document was already imported.')
+        self.assertEqual(action_two['params']['next']['res_model'], 'invoice.ingest.job')
+        self.assertEqual(action_two['params']['next']['res_id'], first_job.id)
+        self.assertEqual(
+            self.env['invoice.ingest.job'].search_count([
+                ('source', '=', 'ocr'),
+                ('attachment_id', '!=', False),
+            ]),
+            job_count_before,
+        )
 
     def test_invoice_ingest_cron_skips_empty_manual_jobs(self):
         manual_job = self.env['invoice.ingest.job'].create({
@@ -204,7 +454,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
 
         self.assertEqual(normalized['product_code'], 'C2W029ABE')
 
-    def test_progressive_trim_stays_enabled_for_auto_total_supplier(self):
+    def test_auto_total_supplier_trims_visible_product_code(self):
         job = self.env['invoice.ingest.job'].create({
             'name': 'Auto Total OCR',
             'source': 'ocr',
@@ -219,6 +469,318 @@ class TestAutomotiveOperatorFlows(TransactionCase):
 
         self.assertEqual(normalized['product_code'], 'C2W029')
 
+    def test_auto_total_supplier_still_matches_on_trimmed_fallback(self):
+        product = self.env['product.product'].create({
+            'name': 'Auto Total Match Candidate',
+            'default_code': 'C2W029',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'Auto Total Match',
+            'source': 'ocr',
+            'partner_id': self.auto_total_supplier.id,
+        })
+
+        matched_product, meta = job._match_product_with_meta(
+            'C2W029ABE',
+            supplier=self.auto_total_supplier,
+            product_description='Set placute frana',
+        )
+
+        self.assertEqual(matched_product, product)
+        self.assertEqual(meta.get('method'), 'progressive_trim:default_code')
+
+    def test_non_auto_total_supplier_never_removes_spaced_suffix_letters(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'Spaced Suffix OCR',
+            'source': 'ocr',
+            'partner_id': self.supplier.id,
+        })
+
+        normalized = job._normalize_payload_line({
+            'product_code_raw': 'C2W029 ABE',
+            'product_code': 'C2W029 ABE',
+            'product_description': 'Set placute frana',
+        }, supplier=self.supplier)
+
+        self.assertEqual(normalized['product_code'], 'C2W029 ABE')
+
+    def test_merge_fallback_line_codes_prefers_fuller_parser_code(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'Fallback Merge OCR',
+            'source': 'ocr',
+            'partner_id': self.supplier.id,
+        })
+
+        merged_lines, recovered_count = job._merge_fallback_line_codes(
+            [{
+                'product_code_raw': 'C2W029',
+                'product_code': 'C2W029',
+                'product_description': 'Set placute frana',
+            }],
+            [{
+                'product_code_raw': 'C2W029ABE',
+                'product_code': 'C2W029ABE',
+                'supplier_brand': 'ABE',
+                'product_description': 'Set placute frana',
+            }],
+        )
+
+        self.assertEqual(recovered_count, 1)
+        self.assertEqual(merged_lines[0].get('product_code'), 'C2W029ABE')
+        self.assertEqual(merged_lines[0].get('product_code_raw'), 'C2W029ABE')
+        self.assertEqual(merged_lines[0].get('supplier_brand'), 'ABE')
+
+    def test_invoice_ingest_line_opens_tecdoc_wizard_with_defaults(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'TecDoc Match Job',
+            'source': 'ocr',
+            'partner_id': self.supplier.id,
+        })
+        line = self.env['invoice.ingest.job.line'].create({
+            'job_id': job.id,
+            'sequence': 10,
+            'product_code': 'A9W045MT',
+            'product_code_raw': 'A9W045MT',
+            'product_description': 'Kit protectie praf amortizor',
+        })
+
+        action = line.action_open_tecdoc_match()
+
+        self.assertEqual(action['type'], 'ir.actions.act_window')
+        self.assertEqual(action['res_model'], 'tecdoc.sync.wizard')
+        wizard = self.env['tecdoc.sync.wizard'].browse(action['res_id'])
+        self.assertEqual(wizard.lookup_type, 'article_no')
+        self.assertEqual(wizard.article_number, 'A9W045MT')
+        self.assertEqual(wizard.invoice_ingest_line_id, line)
+
+    def test_tecdoc_wizard_can_apply_synced_product_to_invoice_line(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'TecDoc Apply Job',
+            'source': 'ocr',
+            'partner_id': self.supplier.id,
+        })
+        line = self.env['invoice.ingest.job.line'].create({
+            'job_id': job.id,
+            'sequence': 20,
+            'product_code': 'AUTO-TEST-001',
+            'product_code_raw': 'AUTO-TEST-001',
+            'product_description': 'Test Automotive Product',
+        })
+        wizard = self.env['tecdoc.sync.wizard'].create({
+            'lookup_type': 'article_no',
+            'article_number': 'AUTO-TEST-001',
+            'invoice_ingest_line_id': line.id,
+        })
+
+        action = wizard._apply_to_invoice_ingest_line(self.product)
+        line.invalidate_recordset()
+
+        self.assertEqual(action['type'], 'ir.actions.client')
+        self.assertEqual(line.product_id, self.product)
+        self.assertEqual(line.match_method, 'exact:tecdoc_sync')
+        self.assertEqual(line.match_confidence, 100.0)
+
+    def test_tecdoc_sync_prefers_post_article_number_details_and_populates_variant_data(self):
+        api = self.env['tecdoc.api'].create({
+            'name': 'TecDoc Test API',
+            'api_key': 'test-key',
+            'lang_id': 21,
+            'country_filter_id': 63,
+        })
+
+        captured = []
+        payload = {
+            'articleNo': 'C2W029ABE',
+            'countArticles': 1,
+            'articles': [
+                {
+                    'articleId': 6183880,
+                    'articleNo': 'C2W029ABE',
+                    'articleProductName': 'set placute frana,frana disc',
+                    'supplierName': 'ABE',
+                    'supplierId': 4426,
+                    'articleMediaType': 'JPEG',
+                    'articleMediaFileName': 'abe.webp',
+                    's3image': 'https://example.com/abe.webp',
+                    'allSpecifications': [
+                        {'criteriaName': 'Partea de montare', 'criteriaValue': 'HA'},
+                    ],
+                    'eanNo': {'eanNumbers': '5900427194311'},
+                    'oemNo': [
+                        {'oemBrand': 'VW', 'oemDisplayNo': '2K5698451'},
+                    ],
+                    'compatibleCars': [
+                        {
+                            'vehicleId': 756,
+                            'modelId': 5431,
+                            'manufacturerName': 'SEAT',
+                            'modelName': 'LEON (1P1)',
+                            'typeEngineName': '1.6 TDI',
+                            'constructionIntervalStart': '2010-11-01',
+                            'constructionIntervalEnd': '2012-12-01',
+                        },
+                    ],
+                },
+            ],
+        }
+
+        api_model = type(api)
+        original_make_request = api_model._make_request
+
+        def fake_make_request(self, endpoint, params=None, method='GET', json_data=None, form_data=None):
+            captured.append({
+                'endpoint': endpoint,
+                'method': method,
+                'params': params,
+                'json_data': json_data,
+                'form_data': dict(form_data or {}),
+            })
+            return payload
+
+        api_model._make_request = fake_make_request
+        try:
+            product = api.sync_product_from_tecdoc(article_no='C2W029ABE')
+        finally:
+            api_model._make_request = original_make_request
+
+        template = product.product_tmpl_id if product._name == 'product.product' else product
+        self.assertTrue(captured, 'TecDoc sync should hit the API.')
+        self.assertEqual(captured[0]['endpoint'], '/articles/article-number-details')
+        self.assertEqual(captured[0]['method'], 'POST')
+        self.assertEqual(captured[0]['form_data']['articleNo'], 'C2W029ABE')
+        self.assertEqual(captured[0]['form_data']['langId'], 21)
+        self.assertEqual(captured[0]['form_data']['countryFilterId'], 63)
+        self.assertEqual(template.tecdoc_article_no, 'C2W029ABE')
+        self.assertEqual(template.tecdoc_supplier_name, 'ABE')
+        self.assertEqual(template.tecdoc_ean, '5900427194311')
+        self.assertIn('VW: 2K5698451', template.tecdoc_oem_numbers or '')
+        self.assertIn('Partea de montare: HA', template.tecdoc_specifications or '')
+        self.assertTrue(template.tecdoc_variant_ids)
+        self.assertEqual(template.tecdoc_variant_ids[:1].supplier_external_id, 4426)
+        self.assertEqual(template.tecdoc_variant_ids[:1].ean_ids[:1].ean, '5900427194311')
+        self.assertTrue(template.tecdoc_variant_ids[:1].vehicle_ids)
+
+    def test_invoice_ingest_auto_tecdoc_match_creates_product_when_local_match_misses(self):
+        api = self.env['tecdoc.api'].create({
+            'name': 'TecDoc Test API Auto Match',
+            'api_key': 'test-key',
+            'lang_id': 21,
+            'country_filter_id': 63,
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'Auto TecDoc OCR',
+            'source': 'ocr',
+            'partner_id': self.supplier.id,
+        })
+
+        api_model = type(api)
+        original_sync = api_model.sync_product_from_tecdoc
+
+        def fake_sync_product_from_tecdoc(self, article_id=None, article_no=None, supplier_id=None):
+            if article_no != 'C2W029ABE':
+                raise UserError('Article not found in TecDoc.')
+            template = self.env['product.template'].create({
+                'name': 'TecDoc Auto Product',
+                'default_code': 'C2W029ABE',
+                'tecdoc_article_no': 'C2W029ABE',
+                'tecdoc_supplier_name': 'ABE',
+                'type': 'consu',
+                'is_storable': True,
+            })
+            return template.product_variant_id
+
+        api_model.sync_product_from_tecdoc = fake_sync_product_from_tecdoc
+        try:
+            normalized = job._normalize_payload_line({
+                'product_code_raw': 'C2W029ABE',
+                'product_code': 'C2W029ABE',
+                'supplier_brand': 'ABE',
+                'product_description': 'Set placute frana',
+            }, supplier=self.supplier)
+        finally:
+            api_model.sync_product_from_tecdoc = original_sync
+
+        self.assertTrue(normalized['matched_product_id'])
+        self.assertEqual(normalized['match_method'], 'exact:tecdoc_auto_sync')
+        self.assertEqual(normalized['supplier_brand'], 'ABE')
+
+    def test_tecdoc_sync_does_not_create_product_for_explicit_empty_article_response(self):
+        api = self.env['tecdoc.api'].create({
+            'name': 'TecDoc Empty Response API',
+            'api_key': 'test-key',
+            'lang_id': 21,
+            'country_filter_id': 63,
+        })
+
+        payload = {
+            'articleNo': 'ATAS2102',
+            'countArticles': None,
+            'articles': None,
+        }
+
+        api_model = type(api)
+        original_make_request = api_model._make_request
+
+        def fake_make_request(self, endpoint, params=None, method='GET', json_data=None, form_data=None):
+            return payload
+
+        existing_templates = self.env['product.template'].search_count([
+            ('tecdoc_article_no', '=', 'ATAS2102'),
+        ])
+
+        api_model._make_request = fake_make_request
+        try:
+            with self.assertRaises(UserError):
+                api.sync_product_from_tecdoc(article_no='ATAS2102')
+        finally:
+            api_model._make_request = original_make_request
+
+        self.assertEqual(
+            self.env['product.template'].search_count([('tecdoc_article_no', '=', 'ATAS2102')]),
+            existing_templates,
+        )
+
+    def test_invoice_ingest_auto_tecdoc_match_skips_explicit_empty_article_response(self):
+        api = self.env['tecdoc.api'].create({
+            'name': 'TecDoc Empty Response Auto Match',
+            'api_key': 'test-key',
+            'lang_id': 21,
+            'country_filter_id': 63,
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'Auto TecDoc OCR Empty Response',
+            'source': 'ocr',
+            'partner_id': self.supplier.id,
+        })
+
+        api_model = type(api)
+        original_sync = api_model.sync_product_from_tecdoc
+
+        def fake_sync_product_from_tecdoc(self, article_id=None, article_no=None, supplier_id=None):
+            raise UserError('Article not found in TecDoc. Verify the article number/ID and your Language/Country Filter IDs.')
+
+        existing_templates = self.env['product.template'].search_count([
+            ('tecdoc_article_no', '=', 'ATAS2102'),
+        ])
+
+        api_model.sync_product_from_tecdoc = fake_sync_product_from_tecdoc
+        try:
+            normalized = job._normalize_payload_line({
+                'product_code_raw': 'ATAS2102',
+                'product_code': 'ATAS2102',
+                'supplier_brand': 'UNKNOWN',
+                'product_description': 'Senzor presiune ulei',
+            }, supplier=self.supplier)
+        finally:
+            api_model.sync_product_from_tecdoc = original_sync
+
+        self.assertFalse(normalized['matched_product_id'])
+        self.assertFalse(normalized.get('match_method'))
+        self.assertEqual(
+            self.env['product.template'].search_count([('tecdoc_article_no', '=', 'ATAS2102')]),
+            existing_templates,
+        )
+
     def test_openai_prompt_preserves_full_code_for_normal_suppliers(self):
         job = self.env['invoice.ingest.job'].create({
             'name': 'Prompt Normal Supplier',
@@ -229,9 +791,10 @@ class TestAutomotiveOperatorFlows(TransactionCase):
 
         self.assertIn('product_code_raw must preserve the exact printed article code', prompt)
         self.assertIn('do not remove trailing letters or suffixes', prompt)
+        self.assertIn('If the printed code looks like C2W029ABE', prompt)
         self.assertNotIn('Special case for Auto Total invoices', prompt)
 
-    def test_openai_prompt_allows_auto_total_special_case(self):
+    def test_openai_prompt_keeps_full_code_for_auto_total_suppliers(self):
         job = self.env['invoice.ingest.job'].create({
             'name': 'Prompt Auto Total',
             'source': 'ocr',
@@ -260,7 +823,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         action = job.action_reprocess()
 
         self.assertEqual(action['type'], 'ir.actions.client')
-        self.assertEqual(job.state, 'pending')
+        self.assertEqual(job.state, 'running')
         async_job = self.env['automotive.async.job'].search(
             [
                 ('target_model', '=', 'invoice.ingest.job'),
@@ -273,43 +836,68 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertTrue(async_job)
         self.assertEqual(async_job.state, 'queued')
 
-    def test_create_test_copy_creates_new_ocr_job_on_local(self):
-        self.env['ir.config_parameter'].sudo().set_param('web.base.url', 'http://localhost:8069')
-        attachment = self.env['ir.attachment'].create({
-            'name': 'duplicate.pdf',
-            'datas': base64.b64encode(b'%PDF-1.4\n% duplicate\n'),
-            'res_model': 'invoice.ingest.job',
-            'type': 'binary',
-            'mimetype': 'application/pdf',
-        })
+    def test_action_create_draft_vendor_bill_marks_job_done_when_receipt_is_validated(self):
         job = self.env['invoice.ingest.job'].create({
-            'name': 'OCR Existing',
+            'name': 'OCR Bill To Done',
             'source': 'ocr',
             'state': 'needs_review',
-            'attachment_id': attachment.id,
-            'external_id': 'same-checksum',
             'partner_id': self.supplier.id,
+            'invoice_number': 'INV-DONE-001',
+            'invoice_date': '2026-04-01',
+            'amount_total': 100.0,
         })
 
-        action = job.action_create_test_copy()
+        job_model = type(job)
+        original_auto_receipt = job_model._auto_create_or_update_receipt
 
-        self.assertEqual(action['type'], 'ir.actions.act_window')
-        new_job = self.env['invoice.ingest.job'].browse(action['res_id'])
-        self.assertTrue(new_job.exists())
-        self.assertNotEqual(new_job.id, job.id)
-        self.assertEqual(new_job.attachment_id, job.attachment_id)
-        self.assertEqual(new_job.state, 'pending')
-        self.assertNotEqual(new_job.external_id, job.external_id)
-        async_job = self.env['automotive.async.job'].search(
-            [
-                ('target_model', '=', 'invoice.ingest.job'),
-                ('target_method', '=', '_process_ingest_job'),
-                ('target_res_id', '=', new_job.id),
-            ],
-            order='id desc',
-            limit=1,
-        )
-        self.assertTrue(async_job)
+        def fake_auto_receipt(self, supplier):
+            return {
+                'created': True,
+                'updated_lines': 1,
+                'validated': True,
+                'unmatched_count': 0,
+            }
+
+        job_model._auto_create_or_update_receipt = fake_auto_receipt
+        try:
+            action = job.action_create_draft_vendor_bill()
+        finally:
+            job_model._auto_create_or_update_receipt = original_auto_receipt
+
+        self.assertEqual(action['type'], 'ir.actions.client')
+        self.assertTrue(job.account_move_id)
+        self.assertEqual(job.state, 'done')
+
+    def test_action_sync_receipt_stock_marks_job_done_when_receipt_is_validated(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Sync To Done',
+            'source': 'ocr',
+            'state': 'needs_review',
+            'partner_id': self.supplier.id,
+            'invoice_number': 'INV-DONE-002',
+            'invoice_date': '2026-04-01',
+            'amount_total': 100.0,
+        })
+
+        job_model = type(job)
+        original_auto_receipt = job_model._auto_create_or_update_receipt
+
+        def fake_auto_receipt(self, supplier):
+            return {
+                'created': False,
+                'updated_lines': 1,
+                'validated': True,
+                'unmatched_count': 0,
+            }
+
+        job_model._auto_create_or_update_receipt = fake_auto_receipt
+        try:
+            action = job.action_sync_receipt_stock()
+        finally:
+            job_model._auto_create_or_update_receipt = original_auto_receipt
+
+        self.assertEqual(action['type'], 'ir.actions.client')
+        self.assertEqual(job.state, 'done')
 
     def test_label_print_wizard_queue_mode_creates_async_job(self):
         icp = self.env['ir.config_parameter'].sudo()

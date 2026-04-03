@@ -2,6 +2,7 @@
 import base64
 
 from odoo import http, _, fields
+from odoo.exceptions import ValidationError
 from odoo.http import content_disposition, request
 from werkzeug.exceptions import NotFound
 
@@ -11,6 +12,12 @@ from odoo.addons.portal.controllers.portal import pager as portal_pager
 
 class CustomerPortal(SaleCustomerPortal):
     """Mechanic-facing portal extensions built on top of standard sale portal."""
+    _MECHANIC_DOCUMENT_FILTERS = ('all', 'invoices', 'deliveries', 'archived')
+    _MECHANIC_DOCUMENT_LABELS = {
+        'invoice': _('Invoice'),
+        'delivery': _('Delivery'),
+        'archived': _('Archived'),
+    }
 
     def _is_mechanic_portal_user(self):
         return request.env.user.has_group('automotive_parts.group_mechanic_portal')
@@ -30,24 +37,98 @@ class CustomerPortal(SaleCustomerPortal):
             ('move_type', 'in', ('out_invoice', 'out_refund', 'out_receipt')),
         ]
 
-    def _prepare_mechanic_payment_allocation_domain(self, partner):
-        return [
-            ('partner_id', 'child_of', [partner.commercial_partner_id.id]),
-            ('active', '=', True),
-            ('payment_state', 'not in', ('draft', 'canceled', 'rejected')),
-        ]
-
     def _prepare_mechanic_delivery_domain(self, partner):
-        return [
+        delivery_ids = self._get_mechanic_delivery_ids(partner)
+        return [('id', 'in', delivery_ids or [0])]
+
+    def _get_mechanic_delivery_ids(self, partner):
+        """Resolve outgoing delivery ids without requiring portal access to picking types."""
+        return request.env['stock.picking'].sudo().search([
             ('sale_id.mechanic_partner_id', 'child_of', [partner.commercial_partner_id.id]),
-            ('picking_type_code', '=', 'outgoing'),
-        ]
+            ('picking_type_id.code', '=', 'outgoing'),
+        ]).ids
 
     def _prepare_mechanic_document_archive_domain(self, partner):
         return [
             ('state', '=', 'archived'),
             ('partner_id', 'child_of', [partner.commercial_partner_id.id]),
         ]
+
+    def _get_mechanic_document_counts(self, partner):
+        AccountMove = request.env['account.move']
+        DeliveryPicking = request.env['stock.picking']
+        CommercialDocumentArchive = request.env['commercial.document.archive']
+
+        invoice_count = AccountMove.search_count(self._prepare_mechanic_invoice_domain(partner)) if AccountMove.has_access('read') else 0
+        delivery_count = DeliveryPicking.search_count(self._prepare_mechanic_delivery_domain(partner)) if DeliveryPicking.has_access('read') else 0
+        archived_count = CommercialDocumentArchive.search_count(self._prepare_mechanic_document_archive_domain(partner)) if CommercialDocumentArchive.has_access('read') else 0
+        return {
+            'invoices': invoice_count,
+            'deliveries': delivery_count,
+            'archived': archived_count,
+            'all': invoice_count + delivery_count + archived_count,
+        }
+
+    def _normalize_mechanic_document_filter(self, doc_filter):
+        return doc_filter if doc_filter in self._MECHANIC_DOCUMENT_FILTERS else 'all'
+
+    def _build_mechanic_document_entries(self, partner, doc_filter='all', limit=None):
+        AccountMove = request.env['account.move']
+        DeliveryPicking = request.env['stock.picking']
+        CommercialDocumentArchive = request.env['commercial.document.archive']
+        doc_filter = self._normalize_mechanic_document_filter(doc_filter)
+        entries = []
+
+        if doc_filter in ('all', 'invoices') and AccountMove.has_access('read'):
+            invoices = AccountMove.search(
+                self._prepare_mechanic_invoice_domain(partner),
+                order='invoice_date desc, id desc',
+            )
+            for invoice in invoices:
+                entries.append({
+                    'kind': 'invoice',
+                    'label': self._MECHANIC_DOCUMENT_LABELS['invoice'],
+                    'name': invoice.name or invoice.ref or invoice.display_name,
+                    'date': invoice.invoice_date,
+                    'url': invoice.get_portal_url(),
+                    'status': invoice.payment_state or invoice.state or '-',
+                    'sort_date': invoice.invoice_date or fields.Date.today(),
+                })
+
+        if doc_filter in ('all', 'deliveries') and DeliveryPicking.has_access('read'):
+            deliveries = DeliveryPicking.search(
+                self._prepare_mechanic_delivery_domain(partner),
+                order='scheduled_date desc, id desc',
+            )
+            for delivery in deliveries:
+                entries.append({
+                    'kind': 'delivery',
+                    'label': self._MECHANIC_DOCUMENT_LABELS['delivery'],
+                    'name': delivery.name,
+                    'date': delivery.scheduled_date.date() if delivery.scheduled_date else False,
+                    'url': False,
+                    'status': delivery.state or '-',
+                    'sort_date': delivery.scheduled_date or fields.Datetime.now(),
+                })
+
+        if doc_filter in ('all', 'archived') and CommercialDocumentArchive.has_access('read'):
+            archives = CommercialDocumentArchive.search(
+                self._prepare_mechanic_document_archive_domain(partner),
+                order='archived_at desc, id desc',
+            )
+            for archive in archives:
+                entries.append({
+                    'kind': 'archived',
+                    'label': self._MECHANIC_DOCUMENT_LABELS['archived'],
+                    'name': archive.name,
+                    'date': archive.archived_at.date() if archive.archived_at else False,
+                    'url': f'/my/mechanic/documents/{archive.id}',
+                    'status': dict(archive._fields['document_type'].selection).get(archive.document_type) or archive.document_type,
+                    'sort_date': archive.archived_at or fields.Datetime.now(),
+                })
+
+        entries.sort(key=lambda entry: entry['sort_date'] or fields.Datetime.now(), reverse=True)
+        return entries[:limit] if limit else entries
 
     def _prepare_quotations_domain(self, partner):
         if not self._is_mechanic_portal_user():
@@ -81,7 +162,6 @@ class CustomerPortal(SaleCustomerPortal):
         AccountMove = request.env['account.move']
         DeliveryPicking = request.env['stock.picking']
         CommercialDocumentArchive = request.env['commercial.document.archive']
-        PaymentAllocation = request.env['automotive.payment.allocation']
 
         if 'mechanic_order_count' in counters:
             values['mechanic_order_count'] = SaleOrder.search_count(self._prepare_orders_domain(partner))
@@ -94,14 +174,7 @@ class CustomerPortal(SaleCustomerPortal):
         if 'mechanic_delivery_count' in counters and DeliveryPicking.has_access('read'):
             values['mechanic_delivery_count'] = DeliveryPicking.search_count(self._prepare_mechanic_delivery_domain(partner))
         if 'mechanic_document_count' in counters and CommercialDocumentArchive.has_access('read'):
-            values['mechanic_document_count'] = CommercialDocumentArchive.search_count(
-                self._prepare_mechanic_document_archive_domain(partner)
-            )
-        if 'mechanic_payment_count' in counters and PaymentAllocation.has_access('read'):
-            values['mechanic_payment_count'] = PaymentAllocation.search_count(
-                self._prepare_mechanic_payment_allocation_domain(partner)
-            )
-
+            values['mechanic_document_count'] = self._get_mechanic_document_counts(partner)['all']
         return values
 
     @http.route(['/my/mechanic'], type='http', auth='user', website=True)
@@ -115,18 +188,17 @@ class CustomerPortal(SaleCustomerPortal):
         AccountMove = request.env['account.move']
         DeliveryPicking = request.env['stock.picking']
         CommercialDocumentArchive = request.env['commercial.document.archive']
-        PaymentAllocation = request.env['automotive.payment.allocation']
         quote_domain = self._prepare_quotations_domain(partner)
         order_domain = self._prepare_orders_domain(partner)
         request_domain = self._prepare_mechanic_request_domain(partner)
         invoice_domain = self._prepare_mechanic_invoice_domain(partner)
         delivery_domain = self._prepare_mechanic_delivery_domain(partner)
         archive_domain = self._prepare_mechanic_document_archive_domain(partner)
-        payment_domain = self._prepare_mechanic_payment_allocation_domain(partner)
         overdue_invoice_domain = invoice_domain + [
             ('payment_state', 'not in', ('in_payment', 'paid', 'reversed', 'blocked', 'invoicing_legacy')),
             ('invoice_date_due', '<', fields.Date.today()),
         ]
+        document_counts = self._get_mechanic_document_counts(partner)
 
         values = self._prepare_portal_layout_values()
         values.update({
@@ -140,21 +212,19 @@ class CustomerPortal(SaleCustomerPortal):
             'mechanic_requests': PortalRequest.search(request_domain, order='create_date desc, id desc', limit=6) if PortalRequest.has_access('read') else PortalRequest,
             'mechanic_balance': partner.current_balance,
             'mechanic_balance_currency': partner.currency_id or request.env.company.currency_id,
-            'mechanic_automotive_balance': partner.automotive_balance_due,
-            'mechanic_automotive_paid_total': partner.automotive_paid_total,
             'mechanic_invoice_count': AccountMove.search_count(invoice_domain) if AccountMove.has_access('read') else 0,
             'mechanic_overdue_invoice_count': AccountMove.search_count(overdue_invoice_domain) if AccountMove.has_access('read') else 0,
             'mechanic_invoices': AccountMove.search(invoice_domain, order='invoice_date desc, id desc', limit=6) if AccountMove.has_access('read') else AccountMove,
             'mechanic_delivery_count': DeliveryPicking.search_count(delivery_domain) if DeliveryPicking.has_access('read') else 0,
             'mechanic_deliveries': DeliveryPicking.search(delivery_domain, order='scheduled_date desc, id desc', limit=6) if DeliveryPicking.has_access('read') else DeliveryPicking,
-            'mechanic_document_count': CommercialDocumentArchive.search_count(archive_domain) if CommercialDocumentArchive.has_access('read') else 0,
+            'mechanic_document_count': document_counts['all'],
+            'mechanic_document_counts': document_counts,
             'mechanic_archived_documents': CommercialDocumentArchive.search(
                 archive_domain,
                 order='archived_at desc, id desc',
                 limit=8,
             ) if CommercialDocumentArchive.has_access('read') else CommercialDocumentArchive,
-            'mechanic_payment_count': PaymentAllocation.search_count(payment_domain) if PaymentAllocation.has_access('read') else 0,
-            'mechanic_payment_allocations': PaymentAllocation.search(payment_domain, order='payment_date desc, id desc', limit=6) if PaymentAllocation.has_access('read') else PaymentAllocation,
+            'mechanic_recent_documents': self._build_mechanic_document_entries(partner, limit=6),
             'mechanic_status_counts': {
                 'waiting_supply': SaleOrder.search_count(order_domain + [('auto_state', '=', 'waiting_supply')]),
                 'partial_received': SaleOrder.search_count(order_domain + [('auto_state', '=', 'partial_received')]),
@@ -187,30 +257,25 @@ class CustomerPortal(SaleCustomerPortal):
         if not (AccountMove.has_access('read') or DeliveryPicking.has_access('read') or CommercialDocumentArchive.has_access('read')):
             return request.redirect('/my/mechanic')
 
-        invoice_domain = self._prepare_mechanic_invoice_domain(partner)
-        delivery_domain = self._prepare_mechanic_delivery_domain(partner)
-        archive_domain = self._prepare_mechanic_document_archive_domain(partner)
-        archive_total = CommercialDocumentArchive.search_count(archive_domain) if CommercialDocumentArchive.has_access('read') else 0
+        doc_filter = self._normalize_mechanic_document_filter(kwargs.get('doc_type'))
+        document_counts = self._get_mechanic_document_counts(partner)
+        document_entries = self._build_mechanic_document_entries(partner, doc_filter=doc_filter)
+        total = len(document_entries)
         pager = portal_pager(
             url='/my/mechanic/documents',
-            total=archive_total,
+            total=total,
             page=page,
             step=self._items_per_page,
+            url_args={'doc_type': doc_filter} if doc_filter != 'all' else {},
         )
         values = self._prepare_portal_layout_values()
         values.update({
             'page_name': 'mechanic_documents',
-            'mechanic_invoice_count': AccountMove.search_count(invoice_domain) if AccountMove.has_access('read') else 0,
-            'mechanic_invoices': AccountMove.search(invoice_domain, order='invoice_date desc, id desc', limit=8) if AccountMove.has_access('read') else AccountMove,
-            'mechanic_delivery_count': DeliveryPicking.search_count(delivery_domain) if DeliveryPicking.has_access('read') else 0,
-            'mechanic_deliveries': DeliveryPicking.search(delivery_domain, order='scheduled_date desc, id desc', limit=8) if DeliveryPicking.has_access('read') else DeliveryPicking,
-            'mechanic_document_count': archive_total,
-            'mechanic_archived_documents': CommercialDocumentArchive.search(
-                archive_domain,
-                order='archived_at desc, id desc',
-                limit=self._items_per_page,
-                offset=pager['offset'],
-            ) if CommercialDocumentArchive.has_access('read') else CommercialDocumentArchive,
+            'mechanic_document_filter': doc_filter,
+            'mechanic_document_filters': self._MECHANIC_DOCUMENT_FILTERS,
+            'mechanic_document_count': document_counts['all'],
+            'mechanic_document_counts': document_counts,
+            'mechanic_documents': document_entries[pager['offset']:pager['offset'] + self._items_per_page],
             'pager': pager,
         })
         return request.render('automotive_parts.portal_my_mechanic_documents', values)
@@ -267,37 +332,7 @@ class CustomerPortal(SaleCustomerPortal):
 
     @http.route(['/my/mechanic/payments', '/my/mechanic/payments/page/<int:page>'], type='http', auth='user', website=True)
     def portal_my_mechanic_payments(self, page=1, **kwargs):
-        if not self._is_mechanic_portal_user():
-            return request.redirect('/my/home')
-
-        partner = self._get_mechanic_partner()
-        PaymentAllocation = request.env['automotive.payment.allocation']
-        if not PaymentAllocation.has_access('read'):
-            return request.redirect('/my/mechanic')
-
-        domain = self._prepare_mechanic_payment_allocation_domain(partner)
-        total = PaymentAllocation.search_count(domain)
-        pager = portal_pager(
-            url='/my/mechanic/payments',
-            total=total,
-            page=page,
-            step=self._items_per_page,
-        )
-        values = self._prepare_portal_layout_values()
-        values.update({
-            'page_name': 'mechanic_payments',
-            'mechanic_payment_allocations': PaymentAllocation.search(
-                domain,
-                order='payment_date desc, id desc',
-                limit=self._items_per_page,
-                offset=pager['offset'],
-            ),
-            'mechanic_automotive_balance': partner.automotive_balance_due,
-            'mechanic_automotive_paid_total': partner.automotive_paid_total,
-            'mechanic_balance_currency': partner.currency_id or request.env.company.currency_id,
-            'pager': pager,
-        })
-        return request.render('automotive_parts.portal_my_mechanic_payments', values)
+        return request.redirect('/my/mechanic/documents')
 
     @http.route(['/my/mechanic/requests', '/my/mechanic/requests/page/<int:page>'], type='http', auth='user', website=True)
     def portal_my_mechanic_requests(self, page=1, **kwargs):
@@ -401,6 +436,7 @@ class CustomerPortal(SaleCustomerPortal):
         values.update({
             'page_name': 'mechanic_request_detail',
             'mechanic_request': request_record,
+            'reply_feedback': kwargs.get('reply'),
             'mechanic_request_messages': request_record.message_ids.filtered(
                 lambda message: (
                     message.message_type in ('comment', 'email')
@@ -409,3 +445,23 @@ class CustomerPortal(SaleCustomerPortal):
             ).sorted(lambda message: message.date or fields.Datetime.now()),
         })
         return request.render('automotive_parts.portal_my_mechanic_request_detail', values)
+
+    @http.route(['/my/mechanic/requests/<int:request_id>/message'], type='http', auth='user', website=True, methods=['POST'], csrf=True)
+    def portal_my_mechanic_request_message(self, request_id, **post):
+        if not self._is_mechanic_portal_user():
+            return request.redirect('/my/home')
+
+        partner = self._get_mechanic_partner()
+        request_record = request.env['mechanic.portal.request'].search(
+            self._prepare_mechanic_request_domain(partner) + [('id', '=', request_id)],
+            limit=1,
+        )
+        if not request_record:
+            return request.redirect('/my/mechanic/requests')
+
+        reply_code = 'posted'
+        try:
+            request_record.action_portal_reply(post.get('message'))
+        except ValidationError:
+            reply_code = 'closed' if request_record.state in ('done', 'cancelled') else 'invalid'
+        return request.redirect(f'{request_record.access_url}?reply={reply_code}')

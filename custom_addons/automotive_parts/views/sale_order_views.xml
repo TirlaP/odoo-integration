@@ -200,6 +200,7 @@
                     <t t-set="url" t-value="'/my/mechanic'"/>
                     <t t-set="text">Orders, quotations and automotive status in one place.</t>
                     <t t-set="show_count" t-value="True"/>
+                    <t t-set="config_card" t-value="True"/>
                 </t>
             </t>
         </xpath>

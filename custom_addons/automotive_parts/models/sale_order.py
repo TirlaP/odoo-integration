@@ -534,6 +534,13 @@ class SaleOrder(models.Model):
         self._compute_stock_status()
         self._update_auto_state()
 
+    def _get_portal_outgoing_picking_ids(self):
+        self.ensure_one()
+        return self.env['stock.picking'].sudo().search([
+            ('sale_id', '=', self.id),
+            ('picking_type_id.code', '=', 'outgoing'),
+        ]).ids
+
     def _get_portal_mechanic_status(self):
         """Return portal-ready automotive status metadata for website pages."""
         self.ensure_one()
@@ -555,8 +562,9 @@ class SaleOrder(models.Model):
             'full': 'success',
         }
 
+        outgoing_picking_ids = set(self._get_portal_outgoing_picking_ids())
         outgoing_pickings = self.picking_ids.filtered(
-            lambda picking: picking.picking_type_id.code == 'outgoing'
+            lambda picking: picking.id in outgoing_picking_ids
         )
         latest_picking = outgoing_pickings.sorted(
             key=lambda picking: picking.scheduled_date or picking.date_done or picking.create_date or fields.Datetime.from_string('1970-01-01 00:00:00'),
@@ -612,6 +620,23 @@ class SaleOrder(models.Model):
             order.with_context(skip_auto_state_update=True, skip_edit_restriction=True).write({'auto_state': 'cancel'})
             order.with_context(skip_edit_restriction=True).action_cancel()
             order._log_auto_state_transition(previous_state, 'cancel', origin='manual')
+
+    def unlink(self):
+        activity_model = self.env['mail.activity'].sudo()
+        message_model = self.env['mail.message'].sudo()
+        activities = activity_model.search([
+            ('res_model', '=', 'sale.order'),
+            ('res_id', 'in', self.ids),
+        ])
+        messages = message_model.search([
+            ('model', '=', 'sale.order'),
+            ('res_id', 'in', self.ids),
+        ])
+        if activities:
+            activities.unlink()
+        if messages:
+            messages.unlink()
+        return super().unlink()
 
 
 class SaleOrderLine(models.Model):

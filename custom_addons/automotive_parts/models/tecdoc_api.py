@@ -6,6 +6,7 @@ from io import BytesIO
 from urllib.parse import quote
 from odoo import models, fields, api
 from odoo.exceptions import UserError
+from .tecdoc_fast_models import _normalize_key
 
 try:
     from PIL import Image, features as pil_features
@@ -127,6 +128,8 @@ class TecDocAPI(models.Model):
             if method == 'GET':
                 response = requests.get(url, headers=headers, params=params or {})
             else:
+                if form_data is not None:
+                    headers = dict(headers, **{'Content-Type': 'application/x-www-form-urlencoded'})
                 if json_data is not None:
                     response = requests.post(url, headers=headers, params=params or {}, json=json_data)
                 else:
@@ -370,6 +373,30 @@ class TecDocAPI(models.Model):
         return []
 
     @staticmethod
+    def _is_explicit_empty_article_response(payload):
+        if not isinstance(payload, dict):
+            return False
+
+        if 'articles' in payload:
+            articles = payload.get('articles')
+            count = payload.get('countArticles')
+            if articles is None:
+                return count in (None, False, 0, '0')
+            if isinstance(articles, list):
+                return not any(isinstance(article, dict) for article in articles)
+
+        data = payload.get('data')
+        if isinstance(data, dict) and 'articles' in data:
+            articles = data.get('articles')
+            count = data.get('countArticles')
+            if articles is None:
+                return count in (None, False, 0, '0')
+            if isinstance(articles, list):
+                return not any(isinstance(article, dict) for article in articles)
+
+        return False
+
+    @staticmethod
     def _normalize_article_record(article):
         """Normalize TecDoc article dicts across provider variants."""
         if not isinstance(article, dict):
@@ -441,26 +468,41 @@ class TecDocAPI(models.Model):
 
     def search_article_by_number(self, article_no):
         """Search article by article number"""
-        # Working endpoint (per RapidAPI examples):
-        endpoint = f"/articles/search-by-article-no/lang-id/{self.lang_id}/article-no/{self._path(article_no)}"
-        try:
-            return self._make_request(endpoint)
-        except UserError:
-            # Backward-compatible fallback for older provider versions:
-            fallback = f"/articles/search/lang-id/{self.lang_id}/article-search/{self._path(article_no)}"
-            return self._make_request(fallback)
+        return self.search_articles_by_article_no(article_no, article_type='ArticleNumber', lang_id=self.lang_id)
 
     def search_article_by_number_and_supplier(self, article_no, supplier_id):
         """Search article by article number and supplier id"""
-        endpoint = (
-            f"/articles/search-by-articles-no-supplier-id/lang-id/{self.lang_id}"
-            f"/supplier-id/{supplier_id}/article-no/{self._path(article_no)}"
-        )
+        params = {
+            'langId': self.lang_id,
+            'articleNo': article_no,
+            'articleType': 'ArticleNumber',
+            'supplierId': supplier_id,
+        }
+        endpoint = "/artlookup/search-articles-by-article-no"
         try:
-            return self._make_request(endpoint)
+            return self._make_request(endpoint, params=params)
         except UserError:
-            fallback = f"/articles/search/lang-id/{self.lang_id}/supplier-id/{supplier_id}/article-search/{self._path(article_no)}"
-            return self._make_request(fallback)
+            fallback_endpoints = [
+                (
+                    f"/artlookup/search-articles-by-article-no/lang-id/{self.lang_id}"
+                    f"/article-type/ArticleNumber/article-no/{self._path(article_no)}"
+                ),
+                (
+                    f"/articles/search-by-articles-no-supplier-id/lang-id/{self.lang_id}"
+                    f"/supplier-id/{supplier_id}/article-no/{self._path(article_no)}"
+                ),
+                (
+                    f"/articles/search/lang-id/{self.lang_id}/supplier-id/{supplier_id}"
+                    f"/article-search/{self._path(article_no)}"
+                ),
+            ]
+            last_error = None
+            for fallback in fallback_endpoints:
+                try:
+                    return self._make_request(fallback)
+                except UserError as err:
+                    last_error = err
+            raise last_error or UserError("TecDoc API Error: supplier article search failed.")
 
     def get_article_details(self, article_id):
         """Get complete article details (tries multiple provider variants)."""
@@ -529,6 +571,19 @@ class TecDocAPI(models.Model):
         """POST article number details (payload as provided by RapidAPI docs)"""
         endpoint = "/articles/article-number-details"
         return self._make_request(endpoint, method='POST', json_data=payload)
+
+    def post_article_details_by_number_form(self, article_no, type_id=1, lang_id=None, country_filter_id=None):
+        """POST article number details using form-encoded payload."""
+        lang_id = lang_id or self.lang_id
+        country_filter_id = country_filter_id or self.country_filter_id
+        endpoint = "/articles/article-number-details"
+        form_payload = {
+            'typeId': type_id,
+            'langId': lang_id,
+            'countryFilterId': country_filter_id,
+            'articleNo': article_no,
+        }
+        return self._make_request(endpoint, method='POST', form_data=form_payload)
 
     def get_article_complete_details(self, article_id, type_id=1, lang_id=None, country_filter_id=None):
         """Get article details & compatibility for article id (complete details)"""
@@ -999,8 +1054,30 @@ class TecDocAPI(models.Model):
     def search_articles_by_article_no(self, article_no, article_type='ArticleNumber', lang_id=None):
         """Search articles by article no (artlookup endpoint)"""
         lang_id = lang_id or self.lang_id
-        endpoint = f"/artlookup/search-articles-by-article-no/lang-id/{lang_id}/article-type/{article_type}/article-no/{article_no}"
-        return self._make_request(endpoint)
+        params = {
+            'langId': lang_id,
+            'articleNo': article_no,
+            'articleType': article_type,
+        }
+        endpoint = "/artlookup/search-articles-by-article-no"
+        try:
+            return self._make_request(endpoint, params=params)
+        except UserError:
+            fallback_endpoints = [
+                (
+                    f"/artlookup/search-articles-by-article-no/lang-id/{lang_id}"
+                    f"/article-type/{self._path(article_type)}/article-no/{self._path(article_no)}"
+                ),
+                f"/articles/search-by-article-no/lang-id/{lang_id}/article-no/{self._path(article_no)}",
+                f"/articles/search/lang-id/{lang_id}/article-search/{self._path(article_no)}",
+            ]
+            last_error = None
+            for fallback in fallback_endpoints:
+                try:
+                    return self._make_request(fallback)
+                except UserError as err:
+                    last_error = err
+            raise last_error or UserError("TecDoc API Error: article search failed.")
 
     def search_articles_by_ean(self, ean, lang_id=None):
         """Best-effort search by EAN/barcode.
@@ -1113,15 +1190,20 @@ class TecDocAPI(models.Model):
         raw_details = None
         if article_no:
             try:
-                raw_details = self.get_article_details_by_number_typed(article_no)
+                raw_details = self.post_article_details_by_number_form(article_no)
             except UserError as e:
                 raw_details = None
                 last_error = e
-                _logger.info("TecDoc: article-number-details failed for %s: %s", article_no, e)
+                _logger.info("TecDoc: article-number-details POST failed for %s: %s", article_no, e)
                 try:
-                    raw_details = self.get_article_details_by_number(article_no)
+                    raw_details = self.get_article_details_by_number_typed(article_no)
                 except UserError:
                     raw_details = None
+                if raw_details is None:
+                    try:
+                        raw_details = self.get_article_details_by_number(article_no)
+                    except UserError:
+                        raw_details = None
                 if raw_details is None:
                     try:
                         alt = self.search_articles_by_article_no(article_no, article_type='ArticleNumber')
@@ -1143,6 +1225,11 @@ class TecDocAPI(models.Model):
 
         if raw_details is None and article_id:
             raw_details = self.get_article_details(article_id)
+
+        if self._is_explicit_empty_article_response(raw_details):
+            raise UserError(
+                "Article not found in TecDoc. Verify the article number/ID and your Language/Country Filter IDs."
+            )
 
         articles = self._extract_articles(raw_details)
         article_data = {}
@@ -1306,7 +1393,41 @@ class TecDocAPI(models.Model):
         else:
             self._sync_vehicle_compatibility(template, resolved_article_id)
 
+        self._sync_fast_variant_data(template, article_data, tecdoc_payload=raw_details)
+
         return variant or template
+
+    def _sync_fast_variant_data(self, template, article_data, tecdoc_payload=None):
+        """Populate normalized TecDoc variant/OEM/spec/EAN/vehicle tables for a single article."""
+        self.ensure_one()
+        template = (template or self.env['product.template'])[:1]
+        article_data = self._normalize_article_record(article_data or {})
+        if not template or not article_data:
+            return False
+
+        article_id = article_data.get('articleId') or article_data.get('article_id')
+        article_no = (article_data.get('articleNo') or template.tecdoc_article_no or template.default_code or '').strip()
+        if not article_id or not article_no:
+            return False
+
+        if not template.tecdoc_article_no_key:
+            template.write({'tecdoc_article_no_key': _normalize_key(article_no)})
+
+        importer = self.env['tecdoc.fast.import.run'].new({
+            'replace_variant_details': True,
+            'mark_products_managed': True,
+            'import_cross_references': True,
+        })
+        importer._upsert_variant(template, article_data, tecdoc_payload if isinstance(tecdoc_payload, dict) else {})
+
+        try:
+            template.write({
+                'tecdoc_fast_managed': True,
+                'tecdoc_fast_last_import_at': fields.Datetime.now(),
+            })
+        except Exception:
+            _logger.info("TecDoc: could not mark template %s as fast-managed during single-article sync", template.id)
+        return True
 
     def _sync_vehicle_compatibility(self, product, article_id):
         """Sync vehicle compatibility data"""
@@ -1346,6 +1467,51 @@ class TecDocSync(models.TransientModel):
         help="Optional TecDoc supplierId filter. Leave empty/0 to search across all suppliers.",
     )
     candidates_info = fields.Text('Matches', readonly=True)
+    invoice_ingest_line_id = fields.Many2one('invoice.ingest.job.line', string='Invoice Ingest Line')
+
+    def _apply_to_invoice_ingest_line(self, product):
+        self.ensure_one()
+        line = self.invoice_ingest_line_id.exists()
+        if not line:
+            return False
+
+        product_variant = product if product._name == 'product.product' else product.product_variant_id
+        if not product_variant:
+            return False
+
+        canonical_brand, canonical_supplier_id = line.job_id._brand_from_matched_product(product_variant)
+        line.with_context(skip_audit_log=True).write({
+            'product_id': product_variant.id,
+            'supplier_brand': canonical_brand or line.supplier_brand,
+            'supplier_brand_id': canonical_supplier_id or line.supplier_brand_id or False,
+            'match_method': 'exact:tecdoc_sync',
+            'match_confidence': 100.0,
+        })
+        line.job_id._audit_log(
+            action='custom',
+            description=f'Invoice ingest line matched through TecDoc: {line.job_id.display_name} / line {line.sequence}',
+            new_values={
+                'line_id': line.id,
+                'sequence': line.sequence,
+                'product_id': product_variant.id,
+                'tecdoc_lookup_type': self.lookup_type,
+                'tecdoc_search_value': self.article_number,
+                'tecdoc_supplier_id': self.supplier_id or False,
+                'match_method': 'exact:tecdoc_sync',
+                'match_confidence': 100.0,
+            },
+        )
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'TecDoc Match',
+                'message': 'Product created from TecDoc and linked to the invoice line.',
+                'type': 'success',
+                'sticky': False,
+                'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
+            },
+        }
 
     def action_preview_candidates(self):
         """Preview potential matches so the user can pick a supplier_id when needed."""
@@ -1497,6 +1663,9 @@ class TecDocSync(models.TransientModel):
                     raise last_error
 
         template = product.product_tmpl_id if product._name == 'product.product' else product
+        line_action = self._apply_to_invoice_ingest_line(product)
+        if line_action:
+            return line_action
         return {
             'type': 'ir.actions.act_window',
             'res_model': 'product.template',

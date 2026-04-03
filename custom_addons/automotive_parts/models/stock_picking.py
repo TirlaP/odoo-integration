@@ -211,6 +211,16 @@ class StockPicking(models.Model):
 
         return pickings
 
+    def unlink(self):
+        message_model = self.env['mail.message'].sudo()
+        messages = message_model.search([
+            ('model', '=', 'stock.picking'),
+            ('res_id', 'in', self.ids),
+        ])
+        if messages:
+            messages.unlink()
+        return super().unlink()
+
     def action_scan_barcode(self):
         """Scan barcode for product identification"""
         self.ensure_one()

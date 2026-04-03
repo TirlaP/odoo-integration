@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import base64
 import glob
+import hashlib
 import json
 import logging
 import mimetypes
@@ -178,10 +179,6 @@ class InvoiceIngestJob(models.Model):
         'Duplicate Warning Message',
         compute='_compute_duplicate_warning',
     )
-    allow_test_duplicate_action = fields.Boolean(
-        'Allow Test Duplicate Action',
-        compute='_compute_allow_test_duplicate_action',
-    )
 
     def _audit_snapshot(self, field_names=None):
         self.ensure_one()
@@ -235,28 +232,6 @@ class InvoiceIngestJob(models.Model):
                 job.duplicate_of_job_id = False
                 job.duplicate_warning_message = False
 
-    @api.model
-    def _allow_test_duplicate_jobs(self):
-        env_name = (
-            os.getenv('ODOO_ENV')
-            or os.getenv('RAILWAY_ENVIRONMENT')
-            or os.getenv('RAILWAY_ENVIRONMENT_NAME')
-            or ''
-        ).strip().lower()
-        base_url = (
-            self.env['ir.config_parameter'].sudo().get_param('web.base.url')
-            or ''
-        ).strip().lower()
-        if env_name in {'dev', 'development', 'local', 'staging', 'test'}:
-            return True
-        return any(token in base_url for token in ('localhost', '127.0.0.1', 'staging'))
-
-    @api.depends_context('uid')
-    def _compute_allow_test_duplicate_action(self):
-        allowed = self._allow_test_duplicate_jobs()
-        for job in self:
-            job.allow_test_duplicate_action = allowed
-
     def _audit_line_summary(self):
         self.ensure_one()
         matched_lines = self.line_ids.filtered(lambda line: bool(line.product_id))
@@ -306,10 +281,10 @@ class InvoiceIngestJob(models.Model):
             },
         )
 
-    def _queue_metadata(self, batch_uid=None, batch_name=None, batch_index=None, batch_total=None):
+    def _queue_metadata(self, batch_uid=None, batch_name=None, batch_index=None, batch_total=None, display_state='pending'):
         self.ensure_one()
         return {
-            'state': 'pending',
+            'state': display_state or 'pending',
             'error': False,
             'queued_at': fields.Datetime.now(),
             'started_at': False,
@@ -320,13 +295,14 @@ class InvoiceIngestJob(models.Model):
             'batch_total': batch_total if batch_total not in (None, False) else (self.batch_total or 0),
         }
 
-    def _queue_processing(self, batch_uid=None, batch_name=None, batch_index=None, batch_total=None):
+    def _queue_processing(self, batch_uid=None, batch_name=None, batch_index=None, batch_total=None, display_state='pending'):
         self.ensure_one()
         values = self._queue_metadata(
             batch_uid=batch_uid,
             batch_name=batch_name,
             batch_index=batch_index,
             batch_total=batch_total,
+            display_state=display_state,
         )
         self.write(values)
         return values['batch_uid']
@@ -337,7 +313,7 @@ class InvoiceIngestJob(models.Model):
             raise UserError('Only OCR imports with an attached document can be reprocessed.')
 
         self.write({
-            'state': 'pending',
+            'state': 'running',
             'queued_at': fields.Datetime.now(),
             'started_at': False,
             'finished_at': False,
@@ -347,6 +323,7 @@ class InvoiceIngestJob(models.Model):
             batch_uid=self.batch_uid or uuid.uuid4().hex,
             batch_name=self.batch_name or self.display_name,
             priority=85,
+            display_state='running',
         )
         self._audit_log(
             action='custom',
@@ -363,58 +340,11 @@ class InvoiceIngestJob(models.Model):
             'tag': 'display_notification',
             'params': {
                 'title': 'Invoice Ingest',
-                'message': 'Existing import requeued for background processing.',
+                'message': 'Existing import restarted in the background.',
                 'type': 'success',
                 'sticky': False,
                 'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
             },
-        }
-
-    def action_create_test_copy(self):
-        self.ensure_one()
-        if not self._allow_test_duplicate_jobs():
-            raise UserError('Creating a duplicate test import is only allowed on local or staging environments.')
-        if self.source != 'ocr' or not self.attachment_id:
-            raise UserError('Only OCR imports with an attached document can be duplicated for testing.')
-
-        now = fields.Datetime.now()
-        new_job = self.create({
-            'name': f'{self.display_name} (test)',
-            'source': 'ocr',
-            'external_id': f'{self.external_id or uuid.uuid4().hex}:test:{uuid.uuid4().hex}',
-            'state': 'pending',
-            'partner_id': self.partner_id.id,
-            'document_type': self.document_type or 'invoice',
-            'attachment_id': self.attachment_id.id,
-            'ai_model': self.ai_model or self._default_ai_model(),
-            'batch_uid': uuid.uuid4().hex,
-            'batch_name': self.batch_name or self.display_name,
-            'batch_index': 1,
-            'batch_total': 1,
-            'queued_at': now,
-        })
-        new_job._enqueue_async_processing(
-            batch_uid=new_job.batch_uid,
-            batch_name=new_job.batch_name,
-            priority=85,
-        )
-        new_job._audit_log(
-            action='custom',
-            description=f'Invoice OCR test copy created: {new_job.display_name}',
-            new_values={
-                'source_job_id': self.id,
-                'source_external_id': self.external_id,
-                'attachment_id': self.attachment_id.id,
-                'state': new_job.state,
-            },
-        )
-        return {
-            'type': 'ir.actions.act_window',
-            'name': 'Importuri facturi',
-            'res_model': 'invoice.ingest.job',
-            'res_id': new_job.id,
-            'view_mode': 'form',
-            'target': 'current',
         }
 
     def _get_async_processing_job(self, states=('queued', 'running')):
@@ -433,16 +363,22 @@ class InvoiceIngestJob(models.Model):
             limit=1,
         )
 
-    def _enqueue_async_processing(self, batch=False, batch_uid=None, batch_name=None, force=False, priority=80):
+    def _enqueue_async_processing(self, batch=False, batch_uid=None, batch_name=None, force=False, priority=80, display_state='pending'):
         self.ensure_one()
         existing_job = self._get_async_processing_job()
         if existing_job and not force:
+            if display_state and self.state != display_state:
+                self.write({'state': display_state})
             if batch and not existing_job.batch_id:
                 existing_job.sudo().write({'batch_id': batch.id})
             return existing_job
 
         effective_batch_name = batch_name or self.batch_name or self.display_name
-        self._queue_processing(batch_uid=batch_uid, batch_name=effective_batch_name)
+        self._queue_processing(
+            batch_uid=batch_uid,
+            batch_name=effective_batch_name,
+            display_state=display_state,
+        )
         return self.env['automotive.async.job'].enqueue_job(
             'invoice_ingest',
             name=_('Process %s') % self.display_name,
@@ -558,6 +494,30 @@ class InvoiceIngestJob(models.Model):
                 job.receipt_sync_state = 'cancelled'
             else:
                 job.receipt_sync_state = 'in_progress'
+
+    def _sync_workflow_state(self, receipt_info=None, move_type=None):
+        for job in self:
+            if job.state == 'running':
+                continue
+
+            effective_move_type = move_type or job._infer_vendor_bill_move_type()
+            next_state = 'needs_review'
+            info = receipt_info or {}
+
+            if effective_move_type == 'in_refund' and job.account_move_id:
+                next_state = 'done'
+            elif info.get('validated') and info.get('reason') not in {'no_matched_products', 'unmatched_lines'}:
+                next_state = 'done'
+            elif job.receipt_sync_state == 'synced':
+                next_state = 'done'
+
+            vals = {}
+            if job.state != next_state:
+                vals['state'] = next_state
+            if next_state in {'done', 'needs_review'} and not job.finished_at:
+                vals['finished_at'] = fields.Datetime.now()
+            if vals:
+                job.write(vals)
 
     @api.model
     def _default_ai_model(self):
@@ -786,44 +746,20 @@ class InvoiceIngestJob(models.Model):
         if not isinstance(line, dict):
             return False
 
-        raw_code = (
-            line.get('product_code_raw')
-            or line.get('product_code')
-            or line.get('description')
-            or line.get('product_description')
-            or ''
-        ).strip()
         description = (line.get('product_description') or line.get('description') or '').strip()
-        parsed_identity = self._parse_invoice_line_identity(
-            raw_code,
+        resolved = self._resolve_line_match_data(
+            raw_code=(
+                line.get('product_code_raw')
+                or line.get('product_code')
+                or line.get('description')
+                or line.get('product_description')
+                or ''
+            ),
+            product_code=line.get('product_code'),
             product_description=description,
-            supplier_hint=(line.get('supplier_brand') or '').strip(),
-        )
-        parsed_code = parsed_identity.get('product_code_primary') or (line.get('product_code') or '').strip()
-        parsed_supplier_brand = parsed_identity.get('supplier_brand') or (line.get('supplier_brand') or '').strip()
-        product, match_meta = self._match_product_with_meta(
-            parsed_code,
             supplier=supplier,
-            product_description=description,
-            supplier_brand=parsed_supplier_brand,
-            extra_codes=parsed_identity.get('code_candidates') or [],
+            supplier_brand=line.get('supplier_brand'),
         )
-        if not product and parsed_code and self._allow_progressive_tail_trim(supplier):
-            progressive_candidates = self._progressive_tail_trim_candidates(parsed_code)
-            if progressive_candidates:
-                parsed_code = progressive_candidates[-1]
-
-        matched_product_id = (
-            product.id
-            if product and match_meta.get('confidence', 0.0) >= AUTO_MATCH_CONFIDENCE_THRESHOLD
-            else False
-        )
-        supplier_brand_id = False
-        if matched_product_id:
-            canonical_brand, canonical_supplier_id = self._brand_from_matched_product(product)
-            if canonical_brand:
-                parsed_supplier_brand = canonical_brand
-            supplier_brand_id = canonical_supplier_id or False
 
         quantity = self._safe_float(
             line.get('quantity') or line.get('invoiced_quantity') or line.get('credited_quantity'),
@@ -841,18 +777,10 @@ class InvoiceIngestJob(models.Model):
 
         return {
             'quantity': quantity,
-            'product_code_raw': raw_code,
-            'product_code': parsed_code or False,
-            'supplier_brand': parsed_supplier_brand,
-            'supplier_brand_id': supplier_brand_id,
             'product_description': description,
             'unit_price': unit_price,
             'vat_rate': self._safe_float(line.get('vat_rate'), default=default_vat_rate or self.vat_rate or 0.0),
-            'matched_product_id': matched_product_id,
-            'matched_product_name': product.display_name if product else False,
-            'match_status': 'matched' if matched_product_id else 'not_found',
-            'match_method': match_meta.get('method'),
-            'match_confidence': match_meta.get('confidence', 0.0),
+            **resolved,
         }
 
     @api.model
@@ -1271,6 +1199,51 @@ class InvoiceIngestJob(models.Model):
         return out
 
     @api.model
+    def _merge_fallback_line_codes(self, ai_lines, fallback_lines):
+        if not ai_lines or not fallback_lines or len(ai_lines) != len(fallback_lines):
+            return ai_lines or [], 0
+
+        merged_lines = []
+        recovered_count = 0
+        for ai_line, fallback_line in zip(ai_lines, fallback_lines):
+            if not isinstance(ai_line, dict) or not isinstance(fallback_line, dict):
+                merged_lines.append(ai_line)
+                continue
+
+            merged_line = dict(ai_line)
+            ai_code = self._compact_code(
+                merged_line.get('product_code_raw')
+                or merged_line.get('product_code')
+            )
+            fallback_code = self._compact_code(
+                fallback_line.get('product_code_raw')
+                or fallback_line.get('product_code')
+            )
+            use_fallback_code = (
+                bool(fallback_code)
+                and (
+                    not ai_code
+                    or (len(fallback_code) > len(ai_code) and fallback_code.startswith(ai_code))
+                )
+            )
+            if use_fallback_code:
+                merged_line['product_code_raw'] = (
+                    fallback_line.get('product_code_raw')
+                    or fallback_line.get('product_code')
+                    or merged_line.get('product_code_raw')
+                )
+                merged_line['product_code'] = (
+                    fallback_line.get('product_code')
+                    or fallback_line.get('product_code_raw')
+                    or merged_line.get('product_code')
+                )
+                if not merged_line.get('supplier_brand') and fallback_line.get('supplier_brand'):
+                    merged_line['supplier_brand'] = fallback_line.get('supplier_brand')
+                recovered_count += 1
+            merged_lines.append(merged_line)
+        return merged_lines, recovered_count
+
+    @api.model
     def _safe_float(self, value, default=0.0):
         if value in (None, False, ''):
             return default
@@ -1476,7 +1449,7 @@ class InvoiceIngestJob(models.Model):
 
     def _process_ingest_job(self, raise_on_error=False):
         for job in self:
-            if job.state not in {'pending', 'failed', 'needs_review'}:
+            if job.state not in {'pending', 'running', 'failed', 'needs_review'}:
                 continue
             try:
                 job.write({
@@ -1680,15 +1653,16 @@ class InvoiceIngestJob(models.Model):
             "quantity, product_code, product_code_raw, supplier_brand, product_description, unit_price. "
             "product_code_raw must preserve the exact printed article code from the document. "
             "For normal suppliers, product_code must also preserve the full printed article code; do not remove trailing letters or suffixes. "
+            "If the printed code looks like C2W029ABE, keep C2W029ABE as the code; do not split it into C2W029 and ABE. "
             "supplier_brand should contain only the supplier brand token (e.g. TRW, BOSCH, SKF). "
             "Exclude NC= and CPV= values from product_code. "
             "Use ISO date format YYYY-MM-DD. If unknown, use null. confidence must be 0..100."
         )
         if self._allow_progressive_tail_trim_name(supplier_name_hint):
             prompt += (
-                " Special case for Auto Total invoices: if the printed code clearly contains supplier suffix letters "
-                "glued to the end of the main article code, keep the exact printed value in product_code_raw and "
-                "you may place the trimmed main article in product_code."
+                " Special case for Auto Total invoices: keep the exact printed value in product_code_raw, "
+                "but product_code may contain the trimmed main article code when supplier suffix letters are glued "
+                "to the end of the printed code."
             )
         return prompt
 
@@ -1848,6 +1822,143 @@ class InvoiceIngestJob(models.Model):
 
         return brand_name, supplier_id or False
 
+    @api.model
+    def _normalize_tecdoc_supplier_key(self, value):
+        return re.sub(r'[^0-9A-Z]+', '', (value or '').strip().upper())
+
+    def _guess_tecdoc_supplier_id(self, supplier_brand=None):
+        self.ensure_one()
+        brand = (supplier_brand or '').strip()
+        if not brand or brand.upper() == 'UNKNOWN':
+            return False
+
+        Supplier = self.env['tecdoc.supplier'].sudo()
+        key = self._normalize_tecdoc_supplier_key(brand)
+        if not key:
+            return False
+
+        supplier = (
+            Supplier.search([('supplier_match_code', '=', key)], limit=1)
+            or Supplier.search([('name', '=ilike', brand)], limit=1)
+            or Supplier.search([('name', '=ilike', key)], limit=1)
+        )
+        return supplier.supplier_id if supplier else False
+
+    def _match_or_create_from_tecdoc(self, codes, supplier_brand=None):
+        self.ensure_one()
+        if self.source != 'ocr':
+            return self.env['product.product'], {}
+
+        api = self.env['tecdoc.api'].sudo().search([], limit=1)
+        if not api:
+            return self.env['product.product'], {}
+
+        supplier_id = self._guess_tecdoc_supplier_id(supplier_brand)
+        attempted = set()
+        for code in codes or []:
+            normalized_code = self._normalize_code_value(code)
+            compact_code = self._compact_code(normalized_code)
+            if not normalized_code or len(compact_code) < 4 or compact_code in attempted:
+                continue
+            attempted.add(compact_code)
+            try:
+                product = api.sync_product_from_tecdoc(
+                    article_no=normalized_code,
+                    supplier_id=supplier_id or None,
+                )
+            except UserError as exc:
+                _logger.info(
+                    "Invoice ingest TecDoc auto-sync miss for code=%s supplier_brand=%s supplier_id=%s: %s",
+                    normalized_code,
+                    supplier_brand or '',
+                    supplier_id or False,
+                    exc,
+                )
+                continue
+            product = product if product._name == 'product.product' else product.product_variant_id
+            if product:
+                return product, {
+                    'method': 'exact:tecdoc_auto_sync',
+                    'matched_code': normalized_code,
+                    'confidence': 94.0,
+                }
+
+        return self.env['product.product'], {}
+
+    def _resolve_line_match_data(
+        self,
+        raw_code='',
+        product_code='',
+        product_description='',
+        supplier=None,
+        supplier_brand='',
+        extra_codes=None,
+    ):
+        self.ensure_one()
+        raw_code = (
+            raw_code
+            or product_code
+            or product_description
+            or ''
+        ).strip()
+        product_code = (product_code or '').strip()
+        product_description = (product_description or '').strip()
+        supplier_brand = (supplier_brand or '').strip()
+
+        parsed_identity = self._parse_invoice_line_identity(
+            raw_code,
+            product_description=product_description,
+            supplier_hint=supplier_brand,
+        )
+        exact_code = self._normalize_code_value(product_code or raw_code)
+        parsed_code = parsed_identity.get('product_code_primary') or exact_code
+        parsed_supplier_brand = parsed_identity.get('supplier_brand') or supplier_brand
+
+        use_trimmed_visible_code = self._allow_progressive_tail_trim(supplier)
+        visible_code = exact_code or parsed_code
+        candidate_codes = list(parsed_identity.get('code_candidates') or [])
+        if exact_code and exact_code not in candidate_codes:
+            candidate_codes.insert(0, exact_code)
+        for code in extra_codes or []:
+            normalized_code = self._normalize_code_value(code)
+            if normalized_code and normalized_code not in candidate_codes:
+                candidate_codes.append(normalized_code)
+
+        product, match_meta = self._match_product_with_meta(
+            parsed_code,
+            supplier=supplier,
+            product_description=product_description,
+            supplier_brand=parsed_supplier_brand,
+            extra_codes=candidate_codes,
+        )
+        if use_trimmed_visible_code:
+            trim_candidates = self._progressive_tail_trim_candidates(exact_code or parsed_code)
+            if trim_candidates:
+                visible_code = trim_candidates[-1]
+        matched_product = (
+            product
+            if product and match_meta.get('confidence', 0.0) >= AUTO_MATCH_CONFIDENCE_THRESHOLD
+            else self.env['product.product']
+        )
+        supplier_brand_id = False
+        if matched_product:
+            canonical_brand, canonical_supplier_id = self._brand_from_matched_product(matched_product)
+            if canonical_brand:
+                parsed_supplier_brand = canonical_brand
+            supplier_brand_id = canonical_supplier_id or False
+
+        return {
+            'product_code_raw': raw_code,
+            'product_code': visible_code or False,
+            'supplier_brand': parsed_supplier_brand,
+            'supplier_brand_id': supplier_brand_id,
+            'matched_product_id': matched_product.id if matched_product else False,
+            'matched_product_name': matched_product.display_name if matched_product else False,
+            'match_status': 'matched' if matched_product else 'not_found',
+            'match_method': match_meta.get('method'),
+            'match_confidence': match_meta.get('confidence', 0.0),
+        }
+
     def _match_product_with_meta(self, product_code, supplier=None, product_description=None, supplier_brand=None, extra_codes=None):
         self.ensure_one()
         Product = self.env['product.product']
@@ -1951,6 +2062,10 @@ class InvoiceIngestJob(models.Model):
                         }
 
         # 4) Description fallback only when no code was parsed at all.
+        tecdoc_product, tecdoc_meta = self._match_or_create_from_tecdoc(codes, supplier_brand=supplier_brand)
+        if tecdoc_product:
+            return tecdoc_product, tecdoc_meta
+
         description = (product_description or '').strip()
         if description and not codes:
             exact_name_domain = [('name', '=ilike', ' '.join(description.split()))]
@@ -1980,68 +2095,27 @@ class InvoiceIngestJob(models.Model):
         for line in normalized_lines or []:
             if not isinstance(line, dict):
                 continue
-            raw_code = (line.get('product_code_raw') or line.get('product_code') or '').strip()
-            parsed = self._parse_invoice_line_identity(
-                raw_code,
-                product_description=(line.get('product_description') or '').strip(),
-                supplier_hint=(line.get('supplier_brand') or '').strip(),
+            description = (line.get('product_description') or '').strip()
+            resolved = self._resolve_line_match_data(
+                raw_code=line.get('product_code_raw') or line.get('product_code'),
+                product_code=line.get('product_code'),
+                product_description=description,
+                supplier=self.partner_id,
+                supplier_brand=line.get('supplier_brand'),
             )
-            parsed_code = parsed.get('product_code_primary') or (line.get('product_code') or '').strip()
-            supplier_brand = parsed.get('supplier_brand') or (line.get('supplier_brand') or '').strip()
-            try:
-                supplier_brand_id = int(line.get('supplier_brand_id') or 0) or False
-            except Exception:
-                supplier_brand_id = False
-            product_id = line.get('matched_product_id')
-            match_method = (line.get('match_method') or '').strip()
-            match_confidence = self._safe_float(line.get('match_confidence'))
-            matched_product = self.env['product.product']
-            if product_id:
-                try:
-                    matched_product = self.env['product.product'].browse(int(product_id)).exists()
-                except Exception:
-                    matched_product = self.env['product.product']
-                    product_id = False
-            if not product_id:
-                product, match_meta = self._match_product_with_meta(
-                    parsed_code,
-                    supplier=self.partner_id,
-                    product_description=(line.get('product_description') or '').strip(),
-                    supplier_brand=supplier_brand,
-                    extra_codes=parsed.get('code_candidates') or [],
-                )
-                if not product and parsed_code and self._allow_progressive_tail_trim(self.partner_id):
-                    # Keep UI code cleaner if no strict match and we can isolate a canonical base.
-                    progressive_candidates = self._progressive_tail_trim_candidates(parsed_code)
-                    if progressive_candidates:
-                        parsed_code = progressive_candidates[-1]
-                if product and match_meta.get('confidence', 0.0) >= AUTO_MATCH_CONFIDENCE_THRESHOLD:
-                    product_id = product.id
-                    matched_product = product
-                else:
-                    product_id = False
-                match_method = match_meta.get('method', '')
-                match_confidence = match_meta.get('confidence', 0.0)
-            if matched_product:
-                canonical_brand, canonical_supplier_id = self._brand_from_matched_product(matched_product)
-                if canonical_brand:
-                    supplier_brand = canonical_brand
-                supplier_brand_id = canonical_supplier_id or supplier_brand_id or False
-            else:
-                supplier_brand_id = False
             commands.append((0, 0, {
                 'sequence': sequence,
                 'quantity': self._safe_float(line.get('quantity'), default=1.0) or 1.0,
-                'product_code_raw': raw_code,
-                'product_code': parsed_code,
-                'supplier_brand': supplier_brand,
-                'supplier_brand_id': supplier_brand_id,
-                'product_description': (line.get('product_description') or '').strip(),
+                'product_code_raw': resolved['product_code_raw'],
+                'product_code': resolved['product_code'],
+                'supplier_brand': resolved['supplier_brand'],
+                'supplier_brand_id': resolved['supplier_brand_id'],
+                'product_description': description,
                 'unit_price': self._safe_float(line.get('unit_price'), default=0.0),
                 'vat_rate': self._safe_float(line.get('vat_rate'), default=self.vat_rate or 0.0),
-                'product_id': product_id or False,
-                'match_method': match_method,
-                'match_confidence': match_confidence,
+                'product_id': resolved['matched_product_id'],
+                'match_method': resolved['match_method'],
+                'match_confidence': resolved['match_confidence'],
             }))
             sequence += 1
         self.write({'line_ids': commands})
@@ -2461,6 +2535,13 @@ class InvoiceIngestJob(models.Model):
                 supplier_code=parsed.get('supplier_code'),
                 supplier_vat=pdf_header.get('supplier_vat'),
             )
+            if ai_lines and fallback_lines and not job._allow_progressive_tail_trim(supplier or supplier_name):
+                merged_lines, recovered_code_count = job._merge_fallback_line_codes(ai_lines, fallback_lines)
+                if recovered_code_count:
+                    lines = merged_lines
+                    warnings.append(
+                        f'PDF parser restored fuller product codes on {recovered_code_count} line(s).'
+                    )
             document_type = (parsed.get('document_type') or '').strip().lower()
             if not document_type and self._looks_like_supplier_credit_note_text(text):
                 document_type = 'credit_note'
@@ -2493,48 +2574,18 @@ class InvoiceIngestJob(models.Model):
                     continue
                 raw_code = (line.get('product_code_raw') or line.get('product_code') or '').strip()
                 description = (line.get('product_description') or '').strip()
-                parsed_identity = job._parse_invoice_line_identity(
-                    raw_code,
+                resolved = job._resolve_line_match_data(
+                    raw_code=raw_code,
+                    product_code=line.get('product_code'),
                     product_description=description,
-                    supplier_hint=(line.get('supplier_brand') or '').strip(),
-                )
-                parsed_code = parsed_identity.get('product_code_primary') or (line.get('product_code') or '').strip()
-                parsed_supplier_brand = parsed_identity.get('supplier_brand') or (line.get('supplier_brand') or '').strip()
-                product, match_meta = job._match_product_with_meta(
-                    parsed_code,
                     supplier=supplier,
-                    product_description=description,
-                    supplier_brand=parsed_supplier_brand,
-                    extra_codes=parsed_identity.get('code_candidates') or [],
+                    supplier_brand=line.get('supplier_brand'),
                 )
-                if not product and parsed_code and job._allow_progressive_tail_trim(supplier):
-                    progressive_candidates = job._progressive_tail_trim_candidates(parsed_code)
-                    if progressive_candidates:
-                        parsed_code = progressive_candidates[-1]
-                matched_product_id = (
-                    product.id
-                    if product and match_meta.get('confidence', 0.0) >= AUTO_MATCH_CONFIDENCE_THRESHOLD
-                    else False
-                )
-                supplier_brand_id = False
-                if matched_product_id:
-                    canonical_brand, canonical_supplier_id = job._brand_from_matched_product(product)
-                    if canonical_brand:
-                        parsed_supplier_brand = canonical_brand
-                    supplier_brand_id = canonical_supplier_id or False
                 normalized_lines.append({
                     'quantity': self._safe_float(line.get('quantity'), default=1.0) or 1.0,
-                    'product_code_raw': raw_code,
-                    'product_code': parsed_code or False,
-                    'supplier_brand': parsed_supplier_brand,
-                    'supplier_brand_id': supplier_brand_id,
                     'product_description': description,
                     'unit_price': self._safe_float(line.get('unit_price'), default=0.0),
-                    'matched_product_id': matched_product_id,
-                    'matched_product_name': product.display_name if product else False,
-                    'match_status': 'matched' if matched_product_id else 'not_found',
-                    'match_method': match_meta.get('method'),
-                    'match_confidence': match_meta.get('confidence'),
+                    **resolved,
                 })
 
             payload = job._get_payload_dict()
@@ -2624,18 +2675,18 @@ class InvoiceIngestJob(models.Model):
 
         for job in eligible_jobs:
             previous_state = job.state
-            job._enqueue_async_processing(batch=batch, batch_name=batch_name)
+            job._enqueue_async_processing(batch=batch, batch_name=batch_name, display_state='running')
             job._audit_log(
                 action='custom',
-                description=f'Invoice ingest queued for background processing: {job.display_name}',
+                description=f'Invoice ingest started in background processing: {job.display_name}',
                 old_values={'state': previous_state},
                 new_values=job._audit_job_summary(),
             )
 
         message = (
-            '1 job queued for background processing.'
+            '1 job started in background processing.'
             if len(eligible_jobs) == 1
-            else f'{len(eligible_jobs)} jobs queued for background processing.'
+            else f'{len(eligible_jobs)} jobs started in background processing.'
         )
         return {
             'type': 'ir.actions.client',
@@ -2760,7 +2811,7 @@ class InvoiceIngestJob(models.Model):
                     })
                     bill_origin = 'created'
 
-            job.write({'account_move_id': move.id, 'state': 'needs_review'})
+            job.write({'account_move_id': move.id})
 
             if move_type == 'in_refund':
                 receipt_info = {
@@ -2808,6 +2859,7 @@ class InvoiceIngestJob(models.Model):
                     **job._audit_line_summary(),
                 },
             )
+            job._sync_workflow_state(receipt_info=receipt_info, move_type=move_type)
 
         if len(self) == 1 and notifications:
             return {
@@ -2881,6 +2933,7 @@ class InvoiceIngestJob(models.Model):
                     **job._audit_line_summary(),
                 },
             )
+            job._sync_workflow_state(receipt_info=receipt_info, move_type=move_type)
 
         if len(self) == 1 and notifications:
             return {
@@ -3198,42 +3251,21 @@ class InvoiceIngestJobLine(models.Model):
         for line in self:
             if not line.job_id:
                 continue
-            parsed = line.job_id._parse_invoice_line_identity(
-                line.product_code_raw or line.product_code,
+            resolved = line.job_id._resolve_line_match_data(
+                raw_code=line.product_code_raw or line.product_code,
+                product_code=line.product_code,
                 product_description=line.product_description,
-                supplier_hint=line.supplier_brand,
-            )
-            parsed_code = parsed.get('product_code_primary') or line.product_code
-            parsed_supplier_brand = parsed.get('supplier_brand') or line.supplier_brand
-            product, meta = line.job_id._match_product_with_meta(
-                parsed_code,
                 supplier=line.job_id.partner_id,
-                product_description=line.product_description,
-                supplier_brand=parsed_supplier_brand,
-                extra_codes=parsed.get('code_candidates') or [],
+                supplier_brand=line.supplier_brand,
             )
-            if not product and parsed_code and line.job_id._allow_progressive_tail_trim(line.job_id.partner_id):
-                progressive_candidates = line.job_id._progressive_tail_trim_candidates(parsed_code)
-                if progressive_candidates:
-                    parsed_code = progressive_candidates[-1]
-            product_id = (
-                product.id
-                if product and meta.get('confidence', 0.0) >= AUTO_MATCH_CONFIDENCE_THRESHOLD
-                else False
-            )
-            canonical_brand = parsed_supplier_brand
-            canonical_supplier_id = False
-            if product_id:
-                canonical_brand, canonical_supplier_id = line.job_id._brand_from_matched_product(product)
-                canonical_brand = canonical_brand or parsed_supplier_brand
             line.with_context(skip_audit_log=True).write({
-                'product_code_raw': line.product_code_raw or parsed.get('product_code_raw') or line.product_code,
-                'product_code': parsed_code,
-                'supplier_brand': canonical_brand,
-                'supplier_brand_id': canonical_supplier_id or False,
-                'product_id': product_id,
-                'match_method': meta.get('method'),
-                'match_confidence': meta.get('confidence', 0.0),
+                'product_code_raw': line.product_code_raw or resolved['product_code_raw'] or line.product_code,
+                'product_code': resolved['product_code'],
+                'supplier_brand': resolved['supplier_brand'],
+                'supplier_brand_id': resolved['supplier_brand_id'] or False,
+                'product_id': resolved['matched_product_id'],
+                'match_method': resolved['match_method'],
+                'match_confidence': resolved['match_confidence'],
             })
             line.job_id._audit_log(
                 action='custom',
@@ -3250,6 +3282,38 @@ class InvoiceIngestJobLine(models.Model):
                 },
             )
         return True
+
+    def action_open_tecdoc_match(self):
+        self.ensure_one()
+        search_value = (
+            (self.product_code or '').strip()
+            or (self.product_code_raw or '').strip()
+            or (self.label_barcode_value or '').strip()
+            or ''
+        )
+        lookup_type = 'article_no'
+        if not ((self.product_code or '').strip() or (self.product_code_raw or '').strip()):
+            barcode_value = (self.label_barcode_value or '').strip()
+            if barcode_value:
+                lookup_type = 'ean'
+                search_value = barcode_value
+        if not search_value:
+            raise UserError('No product code or barcode is available for TecDoc search on this line.')
+
+        wizard = self.env['tecdoc.sync.wizard'].create({
+            'lookup_type': lookup_type,
+            'article_number': search_value or '',
+            'supplier_id': self.supplier_brand_id or 0,
+            'invoice_ingest_line_id': self.id,
+        })
+        return {
+            'type': 'ir.actions.act_window',
+            'name': 'Match TecDoc',
+            'res_model': 'tecdoc.sync.wizard',
+            'res_id': wizard.id,
+            'view_mode': 'form',
+            'target': 'new',
+        }
 
     def action_clear_match(self):
         snapshots = {
@@ -3353,6 +3417,53 @@ class InvoiceIngestUploadWizard(models.TransientModel):
     def action_import_pdf(self):
         return self.action_import_document()
 
+    def _document_checksum(self, document):
+        attachment = document.get('attachment')
+        if attachment and attachment.checksum:
+            return attachment.checksum
+        binary = document.get('binary') or b''
+        return hashlib.sha1(binary).hexdigest() if binary else False
+
+    def _find_existing_job_for_document(self, document):
+        self.ensure_one()
+        checksum = self._document_checksum(document)
+        if not checksum:
+            return self.env['invoice.ingest.job']
+
+        Job = self.env['invoice.ingest.job']
+        domain = [
+            ('source', '=', 'ocr'),
+            ('attachment_id', '!=', False),
+            ('attachment_id.checksum', '=', checksum),
+        ]
+        existing = Job.search(domain + [('external_id', 'not ilike', '%:test:%')], order='id asc', limit=1)
+        if existing:
+            return existing
+        return Job.search(domain, order='id asc', limit=1)
+
+    def _open_existing_duplicate_document_action(self, job):
+        self.ensure_one()
+        job.ensure_one()
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Duplicate Document',
+                'message': _('This document was already imported.'),
+                'type': 'warning',
+                'sticky': True,
+                'next': {
+                    'type': 'ir.actions.act_window',
+                    'name': 'Importuri facturi',
+                    'res_model': 'invoice.ingest.job',
+                    'res_id': job.id,
+                    'views': [(False, 'form')],
+                    'view_mode': 'form',
+                    'target': 'current',
+                },
+            },
+        }
+
     def _collect_uploaded_documents(self):
         self.ensure_one()
         documents = []
@@ -3407,7 +3518,7 @@ class InvoiceIngestUploadWizard(models.TransientModel):
             'name': f'OCR - {filename}',
             'source': 'ocr',
             'external_id': f'upload:{uuid.uuid4().hex}',
-            'state': 'pending',
+            'state': 'running',
             'partner_id': self.supplier_id.id if self.supplier_id else False,
             'ai_model': self.env['invoice.ingest.job']._default_ai_model(),
             'batch_uid': batch_uid,
@@ -3422,7 +3533,7 @@ class InvoiceIngestUploadWizard(models.TransientModel):
 
         job._audit_log(
             action='custom',
-            description=f'Invoice OCR import queued: {job.display_name}',
+            description=f'Invoice OCR import started in background processing: {job.display_name}',
             new_values={
                 'source': job.source,
                 'attachment_id': job.attachment_id.id if job.attachment_id else False,
@@ -3441,6 +3552,11 @@ class InvoiceIngestUploadWizard(models.TransientModel):
         documents = self._collect_uploaded_documents()
         if not documents:
             raise UserError('Please upload at least one PDF or image first.')
+
+        for document in documents:
+            existing_job = self._find_existing_job_for_document(document)
+            if existing_job:
+                return self._open_existing_duplicate_document_action(existing_job)
 
         batch_uid = uuid.uuid4().hex
         batch_name = (self.pdf_filename or documents[0]['filename'] or 'invoice batch').strip()
@@ -3465,6 +3581,7 @@ class InvoiceIngestUploadWizard(models.TransientModel):
                 batch_uid=batch_uid,
                 batch_name=batch_name,
                 priority=85,
+                display_state='running',
             )
             jobs |= job
 
