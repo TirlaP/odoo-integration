@@ -101,9 +101,9 @@
                             <list editable="bottom" class="o_invoice_ingest_lines_table">
                                 <field name="sequence" widget="handle"/>
                                 <field name="label_display_name" string="Denumire" readonly="1"/>
-                                <field name="label_barcode_value" string="Cod de bare" readonly="1"/>
+                                <field name="label_barcode_value" string="Cod de bare"/>
                                 <field name="product_code" string="Cod produs"/>
-                                <field name="matched_internal_code" string="Cod intern" readonly="1"/>
+                                <field name="matched_internal_code" string="Cod intern"/>
                                 <field name="supplier_brand"/>
                                 <field name="supplier_brand_id" optional="hide"/>
                                 <field name="product_description" optional="hide"/>

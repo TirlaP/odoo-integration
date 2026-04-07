@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from odoo import fields
 from odoo.tests.common import TransactionCase, tagged
 from odoo.exceptions import UserError, ValidationError
 from odoo.addons.automotive_parts.controllers.portal import CustomerPortal
@@ -307,7 +308,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertTrue(job, 'The upload wizard should create an OCR ingest job.')
         self.assertEqual(job.batch_total, 1)
         self.assertEqual(job.batch_index, 1)
-        self.assertEqual(job.state, 'running')
+        self.assertEqual(job.state, 'pending')
         self.assertTrue(job.attachment_id, 'The ingest job should keep the uploaded file as an attachment.')
 
         async_job = self.env['automotive.async.job'].search(
@@ -402,6 +403,48 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             'Empty manual jobs should not be sent to the async OCR queue.',
         )
 
+    def test_invoice_ingest_cron_processes_async_queue_as_fallback(self):
+        attachment = self.env['ir.attachment'].create({
+            'name': 'fallback_queue.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% fallback queue\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Fallback Queue',
+            'source': 'ocr',
+            'state': 'pending',
+            'attachment_id': attachment.id,
+            'external_id': 'fallback-queue-checksum',
+        })
+
+        def fake_process(recordset, raise_on_error=False):
+            recordset.write({
+                'state': 'needs_review',
+                'started_at': fields.Datetime.now(),
+                'finished_at': fields.Datetime.now(),
+                'error': False,
+            })
+            return True
+
+        with patch.object(type(job), '_process_ingest_job', fake_process):
+            processed = self.env['invoice.ingest.job'].cron_process_jobs()
+
+        async_job = self.env['automotive.async.job'].search(
+            [
+                ('target_model', '=', 'invoice.ingest.job'),
+                ('target_method', '=', '_process_ingest_job'),
+                ('target_res_id', '=', job.id),
+            ],
+            order='id desc',
+            limit=1,
+        )
+        self.assertGreaterEqual(processed, 1)
+        self.assertTrue(async_job, 'Invoice ingest cron should enqueue an async job for OCR imports.')
+        self.assertEqual(async_job.state, 'done')
+        self.assertEqual(job.state, 'needs_review')
+
     def test_invoice_ingest_shows_message_when_no_lines_extracted(self):
         job = self.env['invoice.ingest.job'].create({
             'name': 'OCR Header Only',
@@ -438,6 +481,38 @@ class TestAutomotiveOperatorFlows(TransactionCase):
 
         self.assertEqual(duplicate.duplicate_of_job_id, original)
         self.assertIn(original.display_name, duplicate.duplicate_warning_message or '')
+
+    def test_invoice_ingest_line_allows_manual_barcode_and_internal_code_overrides(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Override Fields',
+            'source': 'ocr',
+            'state': 'needs_review',
+            'partner_id': self.supplier.id,
+        })
+        line = self.env['invoice.ingest.job.line'].create({
+            'job_id': job.id,
+            'product_id': self.product.id,
+            'product_code': 'AUTO-TEST-001',
+            'product_description': 'Test product',
+            'quantity': 1.0,
+            'unit_price': 10.0,
+            'vat_rate': 19.0,
+        })
+
+        self.assertEqual(line.matched_internal_code, self.product.default_code)
+        self.assertEqual(line.label_barcode_value, self.product.barcode)
+
+        line.write({
+            'matched_internal_code': 'MANUAL-INT-001',
+            'label_barcode_value': '9876543210000',
+        })
+
+        self.assertEqual(line.matched_internal_code, 'MANUAL-INT-001')
+        self.assertEqual(line.label_barcode_value, '9876543210000')
+        self.assertEqual(line.manual_internal_code, 'MANUAL-INT-001')
+        self.assertEqual(line.manual_barcode_value, '9876543210000')
+        self.assertEqual(self.product.default_code, 'AUTO-TEST-001')
+        self.assertEqual(self.product.barcode, '5941234567890')
 
     def test_progressive_trim_is_disabled_for_non_auto_total_supplier(self):
         job = self.env['invoice.ingest.job'].create({
@@ -823,7 +898,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         action = job.action_reprocess()
 
         self.assertEqual(action['type'], 'ir.actions.client')
-        self.assertEqual(job.state, 'running')
+        self.assertEqual(job.state, 'pending')
         async_job = self.env['automotive.async.job'].search(
             [
                 ('target_model', '=', 'invoice.ingest.job'),

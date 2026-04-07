@@ -323,7 +323,7 @@ class InvoiceIngestJob(models.Model):
             raise UserError('Only OCR imports with an attached document can be reprocessed.')
 
         self.write({
-            'state': 'running',
+            'state': 'pending',
             'queued_at': fields.Datetime.now(),
             'started_at': False,
             'finished_at': False,
@@ -333,7 +333,7 @@ class InvoiceIngestJob(models.Model):
             batch_uid=self.batch_uid or uuid.uuid4().hex,
             batch_name=self.batch_name or self.display_name,
             priority=85,
-            display_state='running',
+            display_state='pending',
         )
         self._audit_log(
             action='custom',
@@ -350,7 +350,7 @@ class InvoiceIngestJob(models.Model):
             'tag': 'display_notification',
             'params': {
                 'title': 'Invoice Ingest',
-                'message': 'Existing import restarted in the background.',
+                'message': 'Existing import requeued in the background.',
                 'type': 'success',
                 'sticky': False,
                 'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
@@ -2977,7 +2977,8 @@ class InvoiceIngestJob(models.Model):
                     continue
                 job._enqueue_async_processing(priority=90)
                 queued += 1
-        return queued
+        processed = self.env['automotive.async.job'].cron_process_jobs(limit=10)
+        return queued + processed
 
 
 class InvoiceIngestJobLine(models.Model):
@@ -2989,6 +2990,8 @@ class InvoiceIngestJobLine(models.Model):
         'quantity',
         'product_code',
         'product_code_raw',
+        'manual_internal_code',
+        'manual_barcode_value',
         'supplier_brand',
         'supplier_brand_id',
         'product_description',
@@ -3065,10 +3068,13 @@ class InvoiceIngestJobLine(models.Model):
     )
     product_id = fields.Many2one('product.product', string='Matched Product')
     matched_ean = fields.Char(related='product_id.barcode', string='EAN', readonly=True)
+    manual_internal_code = fields.Char('Manual Cod Intern')
+    manual_barcode_value = fields.Char('Manual Cod de bare')
     matched_internal_code = fields.Char(
-        related='product_id.default_code',
         string='Cod Intern',
-        readonly=True,
+        compute='_compute_label_display_fields',
+        inverse='_inverse_label_display_fields',
+        store=True,
     )
     label_display_name = fields.Char(
         string='Denumire',
@@ -3077,6 +3083,8 @@ class InvoiceIngestJobLine(models.Model):
     label_barcode_value = fields.Char(
         string='Cod de bare',
         compute='_compute_label_display_fields',
+        inverse='_inverse_label_display_fields',
+        store=True,
     )
     match_method = fields.Char('Match Method')
     match_confidence = fields.Float('Match Confidence (%)')
@@ -3193,20 +3201,51 @@ class InvoiceIngestJobLine(models.Model):
         'product_id.display_name',
         'product_id.barcode',
         'product_id.barcode_internal',
+        'product_id.default_code',
         'product_description',
         'product_code',
         'product_code_raw',
+        'manual_internal_code',
+        'manual_barcode_value',
     )
     def _compute_label_display_fields(self):
         for line in self:
             line.label_display_name = line.product_id.display_name or line.product_description or ''
+            line.matched_internal_code = (
+                line.manual_internal_code
+                or line.product_id.default_code
+                or ''
+            )
             line.label_barcode_value = (
+                line.manual_barcode_value
+                or line.product_id.barcode
+                or line.product_id.barcode_internal
+                or line.product_code
+                or line.product_code_raw
+                or line.product_id.default_code
+                or ''
+            )
+
+    def _inverse_label_display_fields(self):
+        for line in self:
+            default_internal_code = line.product_id.default_code or ''
+            default_barcode_value = (
                 line.product_id.barcode
                 or line.product_id.barcode_internal
                 or line.product_code
                 or line.product_code_raw
                 or line.product_id.default_code
                 or ''
+            )
+            line.manual_internal_code = (
+                False
+                if (line.matched_internal_code or '') == default_internal_code
+                else (line.matched_internal_code or False)
+            )
+            line.manual_barcode_value = (
+                False
+                if (line.label_barcode_value or '') == default_barcode_value
+                else (line.label_barcode_value or False)
             )
 
     @api.onchange('product_code')
@@ -3528,7 +3567,7 @@ class InvoiceIngestUploadWizard(models.TransientModel):
             'name': f'OCR - {filename}',
             'source': 'ocr',
             'external_id': f'upload:{uuid.uuid4().hex}',
-            'state': 'running',
+            'state': 'pending',
             'partner_id': self.supplier_id.id if self.supplier_id else False,
             'ai_model': self.env['invoice.ingest.job']._default_ai_model(),
             'batch_uid': batch_uid,
@@ -3543,7 +3582,7 @@ class InvoiceIngestUploadWizard(models.TransientModel):
 
         job._audit_log(
             action='custom',
-            description=f'Invoice OCR import started in background processing: {job.display_name}',
+            description=f'Invoice OCR import queued for background processing: {job.display_name}',
             new_values={
                 'source': job.source,
                 'attachment_id': job.attachment_id.id if job.attachment_id else False,
@@ -3591,7 +3630,7 @@ class InvoiceIngestUploadWizard(models.TransientModel):
                 batch_uid=batch_uid,
                 batch_name=batch_name,
                 priority=85,
-                display_state='running',
+                display_state='pending',
             )
             jobs |= job
 
