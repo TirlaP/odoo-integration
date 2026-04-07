@@ -179,6 +179,12 @@ class InvoiceIngestJob(models.Model):
         'Duplicate Warning Message',
         compute='_compute_duplicate_warning',
     )
+    # Compatibility shim for databases that still hold an older form view arch
+    # referencing this field before the module upgrade refreshes ir.ui.view.
+    allow_test_duplicate_action = fields.Boolean(
+        'Allow Test Duplicate Action',
+        compute='_compute_allow_test_duplicate_action',
+    )
 
     def _audit_snapshot(self, field_names=None):
         self.ensure_one()
@@ -231,6 +237,10 @@ class InvoiceIngestJob(models.Model):
             else:
                 job.duplicate_of_job_id = False
                 job.duplicate_warning_message = False
+
+    def _compute_allow_test_duplicate_action(self):
+        for job in self:
+            job.allow_test_duplicate_action = False
 
     def _audit_line_summary(self):
         self.ensure_one()
