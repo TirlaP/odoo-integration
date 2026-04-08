@@ -1555,3 +1555,30 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertEqual(report_type, 'pdf')
         reader = PdfFileReader(io.BytesIO(pdf_content), strict=False)
         self.assertEqual(reader.getNumPages(), 2)
+
+    def test_incoming_picking_create_skips_duplicate_nir_sequence_value(self):
+        supplier = self.env['res.partner'].create({
+            'name': 'NIR Sequence Supplier',
+            'supplier_rank': 1,
+        })
+        picking_type = self.env.ref('stock.picking_type_in')
+        existing = self.env['stock.picking'].create({
+            'picking_type_id': picking_type.id,
+            'partner_id': supplier.id,
+            'location_id': picking_type.default_location_src_id.id,
+            'location_dest_id': picking_type.default_location_dest_id.id,
+            'supplier_invoice_number': 'SEQ-EXISTING',
+            'nir_number': 'NIR/00009',
+        })
+        self.assertEqual(existing.nir_number, 'NIR/00009')
+
+        with patch.object(type(self.env['ir.sequence']), 'next_by_code', side_effect=['NIR/00009', 'NIR/00010']):
+            created = self.env['stock.picking'].with_context(skip_audit_log=True).create({
+                'picking_type_id': picking_type.id,
+                'partner_id': supplier.id,
+                'location_id': picking_type.default_location_src_id.id,
+                'location_dest_id': picking_type.default_location_dest_id.id,
+                'supplier_invoice_number': 'SEQ-NEW',
+            })
+
+        self.assertEqual(created.nir_number, 'NIR/00010')

@@ -52,9 +52,23 @@ class StockPicking(models.Model):
         cleaned = ' '.join((value or '').split())
         return cleaned or False
 
+    def _is_nir_number_available(self, candidate):
+        self.ensure_one()
+        if not candidate:
+            return False
+        return not self.search_count([
+            ('nir_number', '=', candidate),
+            ('id', '!=', self.id),
+        ])
+
     def _next_nir_number(self):
         self.ensure_one()
-        return self.env['ir.sequence'].next_by_code('stock.picking.nir') or f'NIR/{self.id}'
+        Sequence = self.env['ir.sequence']
+        for _attempt in range(20):
+            candidate = Sequence.next_by_code('stock.picking.nir') or f'NIR/{self.id}'
+            if self._is_nir_number_available(candidate):
+                return candidate
+        raise UserError('Could not generate a unique NIR number. Check the stock.picking.nir sequence configuration.')
 
     def _get_linked_supplier_invoice_reference(self):
         self.ensure_one()

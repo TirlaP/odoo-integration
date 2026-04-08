@@ -6,46 +6,22 @@
               sequence="10"
               web_icon="automotive_parts,static/description/icon.png"/>
 
-    <!-- TecDoc Menu -->
-    <menuitem id="menu_tecdoc"
-              name="TecDoc"
+    <menuitem id="menu_invoice_ingest_upload_wizard"
+              name="Import AI"
               parent="menu_automotive_root"
+              action="action_invoice_ingest_upload_wizard"
               sequence="10"/>
 
-    <menuitem id="menu_tecdoc_config"
-              name="Configurare TecDoc"
-              parent="menu_tecdoc"
-              action="action_tecdoc_api"
-              sequence="10"/>
-
-    <menuitem id="menu_tecdoc_sync"
-              name="Sincronizare produse"
-              parent="menu_tecdoc"
-              action="action_tecdoc_sync_wizard"
-              sequence="20"/>
-
-    <menuitem id="menu_tecdoc_products"
-              name="Produse"
-              parent="menu_tecdoc"
-              action="action_tecdoc_fast_products"
-              sequence="25"/>
-
-    <menuitem id="menu_tecdoc_fast_import"
-              name="Import rapid"
-              parent="menu_tecdoc"
-              action="action_tecdoc_fast_import_runs"
-              sequence="30"/>
-
-    <!-- ANAF Menu -->
-    <menuitem id="menu_anaf"
-              name="ANAF e-Factura"
+    <menuitem id="menu_invoice_ingest_jobs"
+              name="Importuri facturi"
               parent="menu_automotive_root"
+              action="action_invoice_ingest_jobs"
               sequence="20"/>
 
     <menuitem id="menu_stock_workspace"
               name="Stocuri"
               parent="menu_automotive_root"
-              sequence="25"/>
+              sequence="30"/>
 
     <menuitem id="menu_stock_workspace_overview"
               name="Panou stoc"
@@ -86,7 +62,7 @@
     <menuitem id="menu_commercial_documents"
               name="Documente comerciale"
               parent="menu_automotive_root"
-              sequence="30"/>
+              sequence="40"/>
 
     <menuitem id="menu_commercial_documents_vendor_bills"
               name="Facturi furnizor"
@@ -100,23 +76,34 @@
               action="account.action_move_out_invoice_type"
               sequence="20"/>
 
-    <menuitem id="menu_anaf_config"
-              name="Configurare ANAF"
-              parent="menu_anaf"
-              action="action_anaf_efactura"
+    <menuitem id="menu_configurare"
+              name="Configurare"
+              parent="menu_automotive_root"
+              sequence="100"/>
+
+    <menuitem id="menu_tecdoc_config"
+              name="Configurare TecDoc"
+              parent="menu_configurare"
+              action="action_tecdoc_api"
               sequence="10"/>
 
-    <menuitem id="menu_invoice_ingest_jobs"
-              name="Importuri facturi"
-              parent="menu_anaf"
-              action="action_invoice_ingest_jobs"
+    <menuitem id="menu_tecdoc_sync"
+              name="Sincronizare produse"
+              parent="menu_configurare"
+              action="action_tecdoc_sync_wizard"
               sequence="20"/>
 
-    <menuitem id="menu_invoice_ingest_upload_wizard"
-              name="Import AI facturi"
-              parent="menu_anaf"
-              action="action_invoice_ingest_upload_wizard"
-              sequence="15"/>
+    <menuitem id="menu_tecdoc_products"
+              name="Produse"
+              parent="menu_configurare"
+              action="action_tecdoc_fast_products"
+              sequence="30"/>
+
+    <menuitem id="menu_anaf_config"
+              name="Configurare ANAF"
+              parent="menu_configurare"
+              action="action_anaf_efactura"
+              sequence="40"/>
 
     <!-- Audit Log Menu -->
     <menuitem id="menu_audit_log"
@@ -130,5 +117,17 @@
               parent="menu_automotive_root"
               action="action_runtime_log"
               sequence="95"/>
+
+    <record id="menu_tecdoc" model="ir.ui.menu">
+        <field name="active" eval="False"/>
+    </record>
+
+    <record id="menu_anaf" model="ir.ui.menu">
+        <field name="active" eval="False"/>
+    </record>
+
+    <record id="menu_tecdoc_fast_import" model="ir.ui.menu">
+        <field name="active" eval="False"/>
+    </record>
 
 </odoo>
