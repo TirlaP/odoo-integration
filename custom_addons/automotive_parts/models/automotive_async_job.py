@@ -494,6 +494,15 @@ class AutomotiveAsyncJob(models.Model):
                 hook(job)
 
     @api.model
+    def is_cancel_requested(self, job_id):
+        if not job_id:
+            return False
+        with self.pool.cursor() as status_cr:
+            status_env = api.Environment(status_cr, self.env.uid, dict(self.env.context or {}))
+            async_job = status_env[self._name].browse(job_id).exists()
+            return bool(async_job and async_job.state == 'cancelled')
+
+    @api.model
     def report_progress(self, job_id, progress=None, progress_message=None, state=None):
         if not job_id:
             return False
@@ -503,6 +512,8 @@ class AutomotiveAsyncJob(models.Model):
             progress_env = api.Environment(progress_cr, self.env.uid, dict(self.env.context or {}))
             async_job = progress_env[self._name].browse(job_id).exists()
             if not async_job:
+                return False
+            if async_job.state == 'cancelled':
                 return False
 
             values = {}
@@ -608,6 +619,18 @@ class AutomotiveAsyncJob(models.Model):
         except Exception as exc:
             # SQL errors leave the transaction aborted; clear it before persisting failure state.
             self.env.cr.rollback()
+            latest = self.browse(self.id).exists()
+            if latest and latest.state == 'cancelled':
+                latest.write({
+                    'finished_at': latest.finished_at or fields.Datetime.now(),
+                    'progress_message': _('Cancelled'),
+                    'last_error': False,
+                    'last_error_type': False,
+                    'next_retry_at': False,
+                })
+                if latest.batch_id:
+                    latest.batch_id._sync_state_from_jobs()
+                return False
             retryable = attempt_count < self.max_attempts
             vals = {
                 'last_error': str(exc),

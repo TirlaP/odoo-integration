@@ -7,15 +7,29 @@ import re
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime
 from io import BytesIO
-from xml.etree import ElementTree
 
 import requests
 from PyPDF2 import PdfReader
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 
+from .invoice_ingest_document_utils import (
+    detect_attachment_kind,
+    infer_document_move_type_from_xml,
+    looks_like_supplier_credit_note_text,
+    ocr_image_path,
+    prepare_ocr_image_path,
+)
+from .invoice_ingest_parse_utils import (
+    extract_invoice_header_from_text,
+    extract_invoice_number_from_filename,
+    extract_invoice_totals_from_text,
+    normalize_cui_digits,
+    safe_date,
+    safe_float,
+    safe_money,
+)
 from .invoice_ingest import _logger
 
 
@@ -65,35 +79,11 @@ class InvoiceIngestJobExtract(models.Model):
 
     @api.model
     def _infer_document_move_type_from_xml(self, xml_payload):
-        if not xml_payload:
-            return False
-        try:
-            root = ElementTree.fromstring(xml_payload.encode('utf-8') if isinstance(xml_payload, str) else xml_payload)
-        except Exception:
-            return False
-        local_name = root.tag.rsplit('}', 1)[-1]
-        if local_name == 'CreditNote':
-            return 'in_refund'
-        if local_name == 'Invoice':
-            return 'in_invoice'
-        return False
+        return infer_document_move_type_from_xml(xml_payload)
 
     @api.model
     def _looks_like_supplier_credit_note_text(self, text):
-        haystack = self._normalize_code_value(text or '').upper()
-        if not haystack:
-            return False
-        tokens = (
-            'CREDIT NOTE',
-            'CREDITNOTE',
-            'NOTA DE CREDITARE',
-            'NOTA CREDITARE',
-            'FACTURA STORNO',
-            'STORNO',
-            'REFUND',
-            'RETUR',
-        )
-        return any(token in haystack for token in tokens)
+        return looks_like_supplier_credit_note_text(text)
 
     def _infer_vendor_bill_move_type(self, payload=None, text_hint=None):
         self.ensure_one()
@@ -150,65 +140,15 @@ class InvoiceIngestJobExtract(models.Model):
 
     @api.model
     def _detect_attachment_kind(self, binary, filename=None, mimetype=None):
-        name = (filename or '').strip().lower()
-        mime = (mimetype or '').strip().lower()
-        if not binary:
-            return ''
-        if 'pdf' in mime or name.endswith('.pdf') or binary[:4] == b'%PDF':
-            return 'pdf'
-        if mime.startswith('image/') or name.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff')):
-            return 'image'
-        try:
-            from PIL import Image
-            with Image.open(BytesIO(binary)) as image:
-                image.verify()
-            return 'image'
-        except Exception:
-            return ''
+        return detect_attachment_kind(binary, filename=filename, mimetype=mimetype)
 
     @api.model
     def _prepare_ocr_image_path(self, image):
-        try:
-            from PIL import Image, ImageOps
-        except Exception:
-            return ''
-        try:
-            if image.mode == 'P':
-                image = image.convert('RGBA')
-            if image.mode in {'RGBA', 'LA'}:
-                background = Image.new('RGBA', image.size, 'white')
-                background.paste(image, mask=image.getchannel('A'))
-                image = background.convert('RGB')
-            else:
-                image = image.convert('RGB')
-            if max(image.size or (0, 0)) < 2400:
-                image = image.resize((max(image.width * 2, 1), max(image.height * 2, 1)), Image.LANCZOS)
-            image = ImageOps.grayscale(image)
-            image = ImageOps.autocontrast(image)
-            tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-            tmp.close()
-            image.save(tmp.name, format='PNG')
-            return tmp.name
-        except Exception:
-            return ''
+        return prepare_ocr_image_path(image)
 
     @api.model
     def _ocr_image_path(self, image_path):
-        if not image_path or not shutil.which('tesseract'):
-            return ''
-        try:
-            result = subprocess.run(
-                ['tesseract', image_path, 'stdout', '--psm', '6', '--dpi', '300'],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-            )
-        except Exception:
-            return ''
-        if result.returncode != 0:
-            return ''
-        return (result.stdout or '').strip()
+        return ocr_image_path(image_path)
 
     @api.model
     def _extract_image_text_with_ocr(self, binary):
@@ -370,62 +310,11 @@ class InvoiceIngestJobExtract(models.Model):
 
     @api.model
     def _safe_money(self, value, default=0.0):
-        if value in (None, False, ''):
-            return default
-        raw = str(value).strip().replace(' ', '')
-        if not raw:
-            return default
-        try:
-            if ',' in raw and '.' in raw:
-                if raw.rfind(',') > raw.rfind('.'):
-                    raw = raw.replace('.', '').replace(',', '.')
-                else:
-                    raw = raw.replace(',', '')
-            elif ',' in raw:
-                right = raw.split(',')[-1]
-                if right.isdigit() and len(right) == 2:
-                    raw = raw.replace(',', '.')
-                else:
-                    raw = raw.replace(',', '')
-            return float(raw)
-        except Exception:
-            return default
+        return safe_money(value, default=default)
 
     @api.model
     def _extract_invoice_totals_from_text(self, text):
-        if not text:
-            return {}
-
-        out = {}
-        vat_match = re.search(r'Cota\s*T\.V\.A\.\s*:?\s*([0-9]+(?:[.,][0-9]+)?)\s*%', text, re.IGNORECASE)
-        if vat_match:
-            out['vat_rate'] = self._safe_money(vat_match.group(1), default=0.0)
-
-        semn_matches = list(
-            re.finditer(
-                r'Semnaturile\s+([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2})\s+([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2})',
-                text,
-                re.IGNORECASE,
-            )
-        )
-        if semn_matches:
-            last = semn_matches[-1]
-            out['total_excl_vat'] = self._safe_money(last.group(1), default=0.0)
-            out['vat_amount'] = self._safe_money(last.group(2), default=0.0)
-
-        plata_matches = list(
-            re.finditer(
-                r'Total\s+de\s+plata[\s\S]{0,80}?([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2})',
-                text,
-                re.IGNORECASE,
-            )
-        )
-        if plata_matches:
-            out['amount_total'] = self._safe_money(plata_matches[-1].group(1), default=0.0)
-        elif out.get('total_excl_vat') or out.get('vat_amount'):
-            out['amount_total'] = (out.get('total_excl_vat') or 0.0) + (out.get('vat_amount') or 0.0)
-
-        return out
+        return extract_invoice_totals_from_text(text)
 
     @api.model
     def _extract_invoice_lines_from_text(self, text, default_vat_rate=0.0):
@@ -557,29 +446,11 @@ class InvoiceIngestJobExtract(models.Model):
 
     @api.model
     def _safe_float(self, value, default=0.0):
-        if value in (None, False, ''):
-            return default
-        try:
-            return float(str(value).replace(',', '.'))
-        except Exception:
-            return default
+        return safe_float(value, default=default)
 
     @api.model
     def _safe_date(self, value):
-        if not value:
-            return False
-        if isinstance(value, datetime):
-            return value.date()
-        raw = str(value).strip()
-        for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d/%m/%y', '%d.%m.%Y', '%d.%m.%y'):
-            try:
-                return datetime.strptime(raw, fmt).date()
-            except Exception:
-                continue
-        try:
-            return fields.Date.to_date(raw)
-        except Exception:
-            return False
+        return safe_date(value)
 
     def _find_supplier_partner(self, supplier_name=None, supplier_code=None, supplier_vat=None):
         self.ensure_one()
@@ -660,63 +531,15 @@ class InvoiceIngestJobExtract(models.Model):
 
     @api.model
     def _extract_invoice_number_from_filename(self, filename):
-        stem = os.path.splitext(os.path.basename(filename or ''))[0]
-        compact = re.sub(r'[^A-Z0-9]', '', stem.upper())
-        if compact and sum(ch.isdigit() for ch in compact) >= 4:
-            return compact
-        return ''
+        return extract_invoice_number_from_filename(filename)
 
     @api.model
     def _extract_invoice_header_from_text(self, text, filename=None):
-        if not text and not filename:
-            return {}
-
-        out = {}
-        raw_lines = [line.rstrip() for line in (text or '').splitlines()]
-        non_empty_lines = [line.strip() for line in raw_lines if line and line.strip()]
-
-        for idx, line in enumerate(non_empty_lines):
-            if re.search(r'\bFurnizor\b', line, re.IGNORECASE):
-                for candidate in non_empty_lines[idx + 1:idx + 5]:
-                    parts = [part.strip() for part in re.split(r'\s{2,}', candidate) if part.strip()]
-                    if parts:
-                        out['supplier_name'] = parts[0]
-                        break
-                if out.get('supplier_name'):
-                    break
-
-        for line in non_empty_lines:
-            if 'C.I.F.' not in line.upper():
-                continue
-            parts = [part.strip() for part in re.split(r'\s{2,}', line) if part.strip()]
-            vat = next((part for part in parts if re.fullmatch(r'RO?\d{2,}', part, re.IGNORECASE)), '')
-            if vat:
-                out['supplier_vat'] = vat
-                break
-
-        dates = re.findall(r'\b\d{2}[./-]\d{2}[./-]\d{2,4}\b', text or '')
-        if dates:
-            out['invoice_date'] = dates[0]
-            if len(dates) > 1:
-                out['invoice_due_date'] = dates[-1]
-
-        invoice_number = self._extract_invoice_number_from_filename(filename)
-        if not invoice_number:
-            scan_area = ''.join(non_empty_lines[:4]).upper()
-            scan_area = re.sub(r'[^A-Z0-9]', '', scan_area)
-            match = re.search(r'(RO\d{6,}|[A-Z]{1,4}\d{6,})', scan_area)
-            if match:
-                invoice_number = match.group(1)
-        if invoice_number:
-            out['invoice_number'] = invoice_number
-
-        return out
+        return extract_invoice_header_from_text(text, filename=filename)
 
     @api.model
     def _normalize_cui_digits(self, value):
-        if not value:
-            return ''
-        return ''.join(ch for ch in str(value) if ch.isdigit())
+        return normalize_cui_digits(value)
 
     def _resolve_supplier_for_billing(self):
         """Best-effort supplier resolution for bill creation."""
@@ -764,6 +587,7 @@ class InvoiceIngestJobExtract(models.Model):
             if job.state not in {'pending', 'running', 'failed', 'needs_review'}:
                 continue
             try:
+                job._ensure_async_not_cancelled()
                 raise_on_error = raise_on_error or bool(self.env.context.get('skip_automotive_async_queue'))
                 start_values = {'finished_at': False}
                 if job.state != 'running':
@@ -774,6 +598,7 @@ class InvoiceIngestJobExtract(models.Model):
                     start_values['started_at'] = fields.Datetime.now()
                 if start_values:
                     job.write(start_values)
+                job._ensure_async_not_cancelled()
                 if job.source == 'ocr' and job.attachment_id:
                     job.action_extract_with_openai()
                 elif job.account_move_id:
@@ -783,6 +608,14 @@ class InvoiceIngestJobExtract(models.Model):
                 if job.state in {'done', 'needs_review'} and not job.finished_at:
                     job.write({'finished_at': fields.Datetime.now()})
             except Exception as exc:  # noqa: BLE001
+                async_job = job._get_context_async_job()
+                if async_job and self.env['automotive.async.job'].is_cancel_requested(async_job.id):
+                    if job.exists():
+                        job.write({
+                            'error': False,
+                            'finished_at': fields.Datetime.now(),
+                        })
+                    continue
                 job.write({
                     'state': 'failed',
                     'error': str(exc) or repr(exc),
@@ -800,11 +633,13 @@ class InvoiceIngestJobExtract(models.Model):
             )
 
         for job in self:
+            job._ensure_async_not_cancelled()
             text = job._extract_pdf_text()
             if not text or len(text) < 20:
                 raise UserError(
                     'Document text extraction returned no usable text. Use ANAF XML import or install Tesseract OCR for scanned documents.'
                 )
+            job._ensure_async_not_cancelled()
             pdf_totals = job._extract_invoice_totals_from_text(text)
             pdf_header = job._extract_invoice_header_from_text(
                 text,
@@ -839,6 +674,7 @@ class InvoiceIngestJobExtract(models.Model):
                 json=body,
                 timeout=120,
             )
+            job._ensure_async_not_cancelled()
             if response.status_code >= 400:
                 raise UserError(f'OpenAI extraction failed: {response.text}')
             result = response.json()
@@ -894,6 +730,7 @@ class InvoiceIngestJobExtract(models.Model):
             if document_type in {'refund', 'credit_note', 'creditnote'}:
                 warnings.append('Supplier credit note / refund detected.')
 
+            job._ensure_async_not_cancelled()
             duplicate = job._find_duplicate_job(
                 source=job.source,
                 partner_id=supplier.id if supplier else False,
@@ -917,6 +754,7 @@ class InvoiceIngestJobExtract(models.Model):
             job._report_async_progress(80.0, _('Matching products and normalizing lines'))
             normalized_lines = []
             for line in lines:
+                job._ensure_async_not_cancelled()
                 if not isinstance(line, dict):
                     continue
                 raw_code = (line.get('product_code_raw') or line.get('product_code') or '').strip()
@@ -977,6 +815,7 @@ class InvoiceIngestJobExtract(models.Model):
                 'ai_confidence': self._safe_float(parsed.get('confidence')),
                 'error': duplicate_warning or False,
             }
+            job._ensure_async_not_cancelled()
             job._report_async_progress(95.0, _('Saving extracted invoice lines'))
             job.write(vals)
             job._set_payload_dict(payload)

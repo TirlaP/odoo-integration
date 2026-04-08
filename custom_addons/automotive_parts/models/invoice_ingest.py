@@ -453,17 +453,27 @@ class InvoiceIngestJob(models.Model):
                 return async_job
         return self._get_async_processing_job(states=('running', 'queued', 'done', 'failed', 'cancelled'))
 
-    def _report_async_progress(self, progress, message):
+    def _ensure_async_not_cancelled(self):
         self.ensure_one()
         async_job = self._get_context_async_job()
+        if async_job and self.env['automotive.async.job'].is_cancel_requested(async_job.id):
+            raise UserError(_('Invoice import was cancelled.'))
+        return async_job
+
+    def _report_async_progress(self, progress, message):
+        self.ensure_one()
+        async_job = self._ensure_async_not_cancelled()
         if not async_job:
             return False
-        return self.env['automotive.async.job'].report_progress(
+        result = self.env['automotive.async.job'].report_progress(
             async_job.id,
             progress=progress,
             progress_message=message,
             state='running',
         )
+        if not result and self.env['automotive.async.job'].is_cancel_requested(async_job.id):
+            raise UserError(_('Invoice import was cancelled.'))
+        return result
 
     def _automotive_async_on_claim(self, async_job):
         for job in self:
@@ -549,6 +559,36 @@ class InvoiceIngestJob(models.Model):
         })
         self._trigger_async_job_processor()
         return async_job
+
+    def _get_linked_async_jobs(self, states=None):
+        domain = [
+            ('job_type', '=', 'invoice_ingest'),
+            ('target_model', '=', self._name),
+            ('target_res_id', 'in', self.ids),
+            ('target_method', '=', '_process_ingest_job'),
+        ]
+        if states:
+            domain.append(('state', 'in', list(states)))
+        return self.env['automotive.async.job'].search(domain)
+
+    def _cancel_linked_async_jobs(self, reason=None):
+        async_jobs = self._get_linked_async_jobs(states=('queued', 'running', 'failed'))
+        if not async_jobs:
+            return async_jobs
+        async_jobs.write({
+            'state': 'cancelled',
+            'finished_at': fields.Datetime.now(),
+            'progress_message': reason or _('Cancelled'),
+            'last_error': False,
+            'last_error_type': False,
+            'next_retry_at': False,
+        })
+        async_jobs.filtered('batch_id').mapped('batch_id')._sync_state_from_jobs()
+        return async_jobs
+
+    def unlink(self):
+        self._cancel_linked_async_jobs(reason=_('Cancelled because the invoice ingest record was deleted.'))
+        return super().unlink()
 
     @api.model_create_multi
     def create(self, vals_list):
