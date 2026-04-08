@@ -3014,13 +3014,25 @@ class InvoiceIngestJob(models.Model):
             limit=10,
         )
         queued = 0
+        processed = 0
+        candidate_async_jobs = self.env['automotive.async.job']
+        now = fields.Datetime.now()
         for job in jobs:
             with self.env.cr.savepoint():
-                if job._get_async_processing_job():
+                async_job = job._get_async_processing_job()
+                if async_job:
+                    if async_job.next_retry_at and fields.Datetime.to_datetime(async_job.next_retry_at) > now:
+                        continue
+                    candidate_async_jobs |= async_job
                     continue
-                job._enqueue_async_processing(priority=90)
+                async_job = job._enqueue_async_processing(priority=90)
+                candidate_async_jobs |= async_job
                 queued += 1
-        processed = self.env['automotive.async.job'].cron_process_jobs(limit=10)
+
+        for async_job in candidate_async_jobs.sorted(key=lambda item: (item.priority, item.scheduled_at or now, item.id)):
+            with self.env.cr.savepoint():
+                if async_job._process_one(force=False):
+                    processed += 1
         return queued + processed
 
 

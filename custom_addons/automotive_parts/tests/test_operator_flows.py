@@ -447,6 +447,50 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertEqual(async_job.state, 'done')
         self.assertEqual(job.state, 'needs_review')
 
+    def test_invoice_ingest_cron_processes_existing_queued_async_job(self):
+        attachment = self.env['ir.attachment'].create({
+            'name': 'existing_queue.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% existing queue\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Existing Queue',
+            'source': 'ocr',
+            'state': 'pending',
+            'attachment_id': attachment.id,
+            'external_id': 'existing-queue-checksum',
+        })
+        async_job = self.env['automotive.async.job'].enqueue_job(
+            'invoice_ingest',
+            name='Process OCR Existing Queue',
+            payload={'invoice_ingest_job_id': job.id},
+            source=job,
+            target_model='invoice.ingest.job',
+            target_method='_process_ingest_job',
+            target_res_id=job.id,
+            priority=90,
+        )
+
+        def fake_process(recordset, raise_on_error=False):
+            recordset.write({
+                'state': 'needs_review',
+                'started_at': fields.Datetime.now(),
+                'finished_at': fields.Datetime.now(),
+                'error': False,
+            })
+            return True
+
+        with patch.object(type(job), '_process_ingest_job', fake_process):
+            processed = self.env['invoice.ingest.job'].cron_process_jobs()
+
+        async_job.invalidate_recordset()
+        job.invalidate_recordset()
+        self.assertGreaterEqual(processed, 1)
+        self.assertEqual(async_job.state, 'done')
+        self.assertEqual(job.state, 'needs_review')
+
     def test_invoice_ingest_reads_db_backed_upload_bytes_when_attachment_is_missing(self):
         payload = b'%PDF-1.4\n% db-backed upload\n'
         job = self.env['invoice.ingest.job'].create({
