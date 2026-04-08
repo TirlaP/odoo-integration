@@ -79,7 +79,7 @@ class InvoiceIngestJobNormalization(models.Model):
         return self._build_normalized_invoice_line(
             quantity=line.quantity or 1.0,
             product_description=line.product_description or '',
-            unit_price=line.discounted_unit_price or line.unit_price or 0.0,
+            unit_price=line.discounted_unit_price,
             vat_rate=line.vat_rate or self.vat_rate or 0.0,
             resolved={
                 'product_code_raw': line.product_code_raw or line.product_code,

@@ -128,6 +128,9 @@ class InvoiceIngestJobAsync(models.Model):
         self.ensure_one()
         if self.source != 'ocr' or not self.attachment_id:
             raise UserError('Only OCR imports with an attached document can be reprocessed.')
+        active_job = self._get_async_processing_job(states=('queued', 'running'))
+        if active_job:
+            raise UserError('This invoice is already queued or processing in the background.')
 
         if not self.attachment_data:
             stored_binary = self._get_attachment_binary(raise_if_missing=False)
@@ -243,6 +246,16 @@ class InvoiceIngestJobAsync(models.Model):
     def _automotive_async_on_requeue(self, async_job):
         for job in self:
             values = job._build_requeue_state_values()
+            if values:
+                job.with_context(skip_audit_log=True).write(values)
+
+    def _automotive_async_on_cancelled(self, async_job):
+        for job in self:
+            values = {
+                'state': 'needs_review',
+                'finished_at': fields.Datetime.now(),
+                'error': _('Invoice import was cancelled.'),
+            }
             if values:
                 job.with_context(skip_audit_log=True).write(values)
 
@@ -412,4 +425,3 @@ class InvoiceIngestJobAsync(models.Model):
             os.getenv('OPENAI_API_KEY')
             or self.env['ir.config_parameter'].sudo().get_param('automotive.openai_api_key')
         )
-

@@ -264,7 +264,7 @@ class InvoiceIngestJobLine(models.Model):
     def _prepare_match_write_values(self, resolved):
         self.ensure_one()
         return {
-            'product_code_raw': self.product_code_raw or resolved.get('product_code_raw') or self.product_code,
+            'product_code_raw': resolved.get('product_code_raw') or self.product_code_raw or self.product_code,
             'product_code': resolved.get('product_code') or False,
             'supplier_brand': resolved.get('supplier_brand') or '',
             'supplier_brand_id': resolved.get('supplier_brand_id') or False,
@@ -290,11 +290,12 @@ class InvoiceIngestJobLine(models.Model):
             if line.product_id or not line.product_code or not line.job_id:
                 continue
             resolved = line.job_id._resolve_line_match_data(
-                raw_code=line.product_code_raw or line.product_code,
+                raw_code=line.product_code or line.product_code_raw,
                 product_code=line.product_code,
                 product_description=line.product_description,
                 supplier=line.job_id.partner_id,
                 supplier_brand=line.supplier_brand,
+                prefer_parsed_code=True,
             )
             line._apply_resolved_match(resolved, write=False)
 
@@ -319,11 +320,12 @@ class InvoiceIngestJobLine(models.Model):
             if not line.job_id:
                 continue
             resolved = line.job_id._resolve_line_match_data(
-                raw_code=line.product_code_raw or line.product_code,
+                raw_code=line.product_code or line.product_code_raw,
                 product_code=line.product_code,
                 product_description=line.product_description,
                 supplier=line.job_id.partner_id,
                 supplier_brand=line.supplier_brand,
+                prefer_parsed_code=True,
             )
             line._apply_resolved_match(resolved, write=True)
             line.job_id._audit_log(

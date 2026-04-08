@@ -6,6 +6,11 @@ from datetime import timedelta
 from odoo import api, fields, models, _
 from odoo.exceptions import UserError
 
+from .invoice_ingest_shared import (
+    INVOICE_INGEST_ASYNC_JOB_TYPE,
+    INVOICE_INGEST_ASYNC_TARGET_METHOD,
+    INVOICE_INGEST_ASYNC_TARGET_MODEL,
+)
 from ..runtime_logging import emit_runtime_event
 
 
@@ -230,7 +235,7 @@ class AutomotiveAsyncJob(models.Model):
         ('automotive_async_job_target_required', "CHECK(target_model <> '' AND target_method <> '')", 'Target model and method are required.'),
     ]
     _ALLOWED_TARGETS = {
-        ('invoice.ingest.job', '_process_ingest_job'),
+        (INVOICE_INGEST_ASYNC_TARGET_MODEL, INVOICE_INGEST_ASYNC_TARGET_METHOD),
         ('ir.actions.report', '_run_automotive_async_label_job'),
     }
 
@@ -368,9 +373,9 @@ class AutomotiveAsyncJob(models.Model):
     def enqueue_job(self, job_type, name=False, payload=None, args=None, kwargs=None, execution_context=None, source=False, batch=False, batch_name=False, priority=10, scheduled_at=False, company=False, requested_by=False, run_as_user=False, max_attempts=3, target_model=False, target_method=False, target_res_id=False):
         payload = dict(payload or {})
         source_record = source.exists() if isinstance(source, models.BaseModel) else False
-        if job_type == 'invoice_ingest':
-            target_model = target_model or 'invoice.ingest.job'
-            target_method = target_method or '_process_ingest_job'
+        if job_type == INVOICE_INGEST_ASYNC_JOB_TYPE:
+            target_model = target_model or INVOICE_INGEST_ASYNC_TARGET_MODEL
+            target_method = target_method or INVOICE_INGEST_ASYNC_TARGET_METHOD
             target_res_id = target_res_id or payload.get('invoice_ingest_job_id')
             if source_record and not name:
                 name = _('Process %s') % source_record.display_name
@@ -474,6 +479,10 @@ class AutomotiveAsyncJob(models.Model):
         if isinstance(result, (list, tuple, set)):
             return [str(item) for item in result]
         return str(result)
+
+    @api.model
+    def _is_missing_target_error(self, exc):
+        return isinstance(exc, UserError) and str(exc) == str(_('The target record no longer exists.'))
 
     @api.model
     def _normalize_progress_value(self, value):
@@ -584,12 +593,14 @@ class AutomotiveAsyncJob(models.Model):
             'last_error': False,
             'last_error_type': False,
         })
+        self._call_target_progress_hook('_automotive_async_on_requeue')
         if self.batch_id:
             self.batch_id._sync_state_from_jobs()
         return True
 
     def action_cancel(self):
         self.write({'state': 'cancelled', 'finished_at': fields.Datetime.now()})
+        self._call_target_progress_hook('_automotive_async_on_cancelled')
         if self.batch_id:
             self.batch_id._sync_state_from_jobs()
         return True
@@ -630,6 +641,18 @@ class AutomotiveAsyncJob(models.Model):
                 })
                 if latest.batch_id:
                     latest.batch_id._sync_state_from_jobs()
+                return False
+            if self._is_missing_target_error(exc):
+                self.write({
+                    'state': 'cancelled',
+                    'finished_at': fields.Datetime.now(),
+                    'progress_message': _('Cancelled because the target record was deleted.'),
+                    'last_error': False,
+                    'last_error_type': False,
+                    'next_retry_at': False,
+                })
+                if self.batch_id:
+                    self.batch_id._sync_state_from_jobs()
                 return False
             retryable = attempt_count < self.max_attempts
             vals = {

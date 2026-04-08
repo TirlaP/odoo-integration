@@ -611,12 +611,13 @@ class ANAFEFactura(models.Model):
         if not normalized:
             return self.env['res.partner']
 
-        partner = self.env['res.partner'].search([('cui', '=', normalized)], limit=1)
-        if partner:
-            return partner
-
-        # Fallback when CUI is stored in VAT as "RO{cui}".
-        return self.env['res.partner'].search([('vat', 'ilike', normalized)], limit=1)
+        Partner = self.env['res.partner']
+        return (
+            Partner.search([('cui', '=', normalized)], limit=1)
+            or Partner.search([('cui', '=ilike', f'RO{normalized}')], limit=1)
+            or Partner.search([('vat', '=', normalized)], limit=1)
+            or Partner.search([('vat', '=ilike', f'RO{normalized}')], limit=1)
+        )
 
     @api.model
     def _extract_invoice_payload(self, invoice_data):

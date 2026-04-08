@@ -54,6 +54,8 @@ class InvoiceIngestJobMatch(models.Model):
         extra=None,
     ):
         self.ensure_one()
+        if getattr(self.env, 'in_onchange', False):
+            return
         async_job = self._get_context_async_job()
         supplier_id = False
         if isinstance(supplier, models.BaseModel):
@@ -102,7 +104,11 @@ class InvoiceIngestJobMatch(models.Model):
             payload['elapsed_ms'] = round(float(elapsed_ms), 2)
         if extra:
             payload.update(extra)
-        emit_runtime_event(payload, persist_db=True)
+        persist_db = bool(
+            self.env.context.get('automotive_async_processing')
+            or self.env.context.get('automotive_async_job_id')
+        )
+        emit_runtime_event(payload, persist_db=persist_db)
 
     @api.model
     def _normalize_code_value(self, value):
@@ -390,6 +396,7 @@ class InvoiceIngestJobMatch(models.Model):
         extra_codes=None,
         line_index=None,
         line_total=None,
+        prefer_parsed_code=False,
     ):
         self.ensure_one()
         if line_index is None:
@@ -417,7 +424,7 @@ class InvoiceIngestJobMatch(models.Model):
         parsed_supplier_brand = parsed_identity.get('supplier_brand') or supplier_brand
 
         use_trimmed_visible_code = self._allow_progressive_tail_trim(supplier)
-        visible_code = exact_code or parsed_code
+        visible_code = parsed_code if prefer_parsed_code and parsed_code else (exact_code or parsed_code)
         candidate_codes = list(parsed_identity.get('code_candidates') or [])
         if exact_code and exact_code not in candidate_codes:
             candidate_codes.insert(0, exact_code)

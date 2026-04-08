@@ -53,11 +53,7 @@ class InvoiceIngestJobIdentity(models.Model):
         clean_name = (supplier_name or '').strip()
         if not clean_name:
             return self.env['res.partner']
-        Partner = self.env['res.partner']
-        return (
-            Partner.search([('name', '=ilike', clean_name)], limit=1)
-            or Partner.search([('name', 'ilike', clean_name)], limit=1)
-        )
+        return self.env['res.partner'].search([('name', '=ilike', clean_name)], limit=1)
 
     def _find_supplier_partner(self, supplier_name=None, supplier_code=None, supplier_vat=None):
         self.ensure_one()
@@ -135,6 +131,46 @@ class InvoiceIngestJobIdentity(models.Model):
         return self.env['res.partner']
 
     @api.model
+    def _invoice_number_matches_candidate(self, candidate, normalized_invoice, normalized_key):
+        candidate_number = candidate.invoice_number or ''
+        if normalized_key and self._normalize_invoice_number_key(candidate_number) == normalized_key:
+            return True
+        return self._normalize_invoice_number(candidate_number).upper() == normalized_invoice.upper()
+
+    @api.model
+    def _amount_total_matches_candidate(self, candidate, amount_total):
+        if amount_total in (None, False):
+            return True
+        return abs((candidate.amount_total or 0.0) - amount_total) < 0.01
+
+    @api.model
+    def _select_duplicate_candidate(self, candidates, invoice_date=None, amount_total=None):
+        if not candidates:
+            return self.browse()
+
+        if invoice_date or amount_total not in (None, False):
+            exact_matches = candidates.filtered(
+                lambda job: (
+                    (not invoice_date or job.invoice_date == invoice_date)
+                    and self._amount_total_matches_candidate(job, amount_total)
+                )
+            )
+            if exact_matches:
+                return exact_matches[:1]
+
+            dated_matches = candidates.filtered(lambda job: invoice_date and job.invoice_date == invoice_date)
+            if dated_matches:
+                return dated_matches[:1]
+
+            amount_matches = candidates.filtered(lambda job: self._amount_total_matches_candidate(job, amount_total))
+            if amount_matches:
+                return amount_matches[:1]
+
+            return self.browse()
+
+        return candidates[:1]
+
+    @api.model
     def _find_duplicate_job(
         self,
         source,
@@ -153,34 +189,27 @@ class InvoiceIngestJobIdentity(models.Model):
         normalized_invoice = self._normalize_invoice_number(invoice_number)
         normalized_key = self._normalize_invoice_number_key(invoice_number)
         if partner_id and normalized_invoice:
-            base_domain = [
+            domain = [
                 ('partner_id', '=', partner_id),
-                '|',
-                ('invoice_number', '=', normalized_invoice),
-                ('invoice_number', '=ilike', normalized_invoice),
+                ('invoice_number', '!=', False),
             ]
-            if normalized_key:
-                base_domain = [
-                    ('partner_id', '=', partner_id),
-                    '|',
-                    '|',
-                    ('invoice_number', '=', normalized_invoice),
-                    ('invoice_number', '=ilike', normalized_invoice),
-                    ('invoice_number', '=ilike', normalized_key),
-                ]
-            candidate_domains = [base_domain]
-            if invoice_date:
-                candidate_domains.append(base_domain + [('invoice_date', '=', invoice_date)])
-            if amount_total not in (None, False):
-                candidate_domains.append(base_domain + [('amount_total', '=', amount_total)])
-            if invoice_date and amount_total not in (None, False):
-                candidate_domains.append(base_domain + [('invoice_date', '=', invoice_date), ('amount_total', '=', amount_total)])
             if document_type:
-                candidate_domains = [domain + [('document_type', '=', document_type)] for domain in candidate_domains]
-            for domain in candidate_domains:
-                existing = self.search(domain, order='id desc', limit=1)
-                if existing:
-                    return existing
+                domain.append(('document_type', '=', document_type))
+            candidates = self.search(domain, order='id desc')
+            candidates = candidates.filtered(
+                lambda job: self._invoice_number_matches_candidate(
+                    job,
+                    normalized_invoice=normalized_invoice,
+                    normalized_key=normalized_key,
+                )
+            )
+            selected = self._select_duplicate_candidate(
+                candidates,
+                invoice_date=invoice_date,
+                amount_total=amount_total,
+            )
+            if selected:
+                return selected
 
         return self.browse()
 
