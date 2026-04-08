@@ -1268,7 +1268,7 @@ Data sc:        06/05/2026
         self.assertEqual(template.tecdoc_variant_ids[:1].ean_ids[:1].ean, '5900427194311')
         self.assertTrue(template.tecdoc_variant_ids[:1].vehicle_ids)
 
-    def test_invoice_ingest_does_not_auto_sync_tecdoc_when_local_match_misses(self):
+    def test_invoice_ingest_auto_tecdoc_match_creates_product_when_local_match_misses(self):
         api = self.env['tecdoc.api'].create({
             'name': 'TecDoc Test API Auto Match',
             'api_key': 'test-key',
@@ -1285,7 +1285,17 @@ Data sc:        06/05/2026
         original_sync = api_model.sync_product_from_tecdoc
 
         def fake_sync_product_from_tecdoc(self, article_id=None, article_no=None, supplier_id=None):
-            raise AssertionError('invoice ingest should not auto-sync TecDoc during OCR matching')
+            if article_no != 'C2W029ABE':
+                raise UserError('Article not found in TecDoc.')
+            template = self.env['product.template'].create({
+                'name': 'TecDoc Auto Product',
+                'default_code': 'C2W029ABE',
+                'tecdoc_article_no': 'C2W029ABE',
+                'tecdoc_supplier_name': 'ABE',
+                'type': 'consu',
+                'is_storable': True,
+            })
+            return template.product_variant_id
 
         api_model.sync_product_from_tecdoc = fake_sync_product_from_tecdoc
         try:
@@ -1298,8 +1308,8 @@ Data sc:        06/05/2026
         finally:
             api_model.sync_product_from_tecdoc = original_sync
 
-        self.assertFalse(normalized['matched_product_id'])
-        self.assertFalse(normalized['match_method'])
+        self.assertTrue(normalized['matched_product_id'])
+        self.assertEqual(normalized['match_method'], 'exact:tecdoc_auto_sync')
         self.assertEqual(normalized['supplier_brand'], 'ABE')
 
     def test_tecdoc_sync_does_not_create_product_for_explicit_empty_article_response(self):
