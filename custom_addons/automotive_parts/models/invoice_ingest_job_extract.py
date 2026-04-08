@@ -439,15 +439,30 @@ class InvoiceIngestJobExtract(models.Model):
                 if job.state in {'done', 'needs_review'} and not job.finished_at:
                     job.write({'finished_at': fields.Datetime.now()})
             except Exception as exc:  # noqa: BLE001
-                async_job = job._get_context_async_job()
+                error_message = str(exc) or repr(exc)
+                # SQL/ORM failures leave the cursor unusable until rollback. If we
+                # write failure state first, PostgreSQL masks the original error
+                # with "current transaction is aborted".
+                self.env.cr.rollback()
+                latest = self.browse(job.id).exists()
+                async_job = latest._get_context_async_job() if latest else self.env['automotive.async.job']
                 if async_job and self.env['automotive.async.job'].is_cancel_requested(async_job.id):
-                    if job.exists():
-                        job.write({
+                    if latest:
+                        latest.with_context(skip_audit_log=True).write({
                             'error': False,
                             'finished_at': fields.Datetime.now(),
                         })
                     continue
-                job.write(job._build_failed_state_values(str(exc) or repr(exc)))
+                if latest:
+                    try:
+                        latest.with_context(skip_audit_log=True).write(
+                            latest._build_failed_state_values(error_message)
+                        )
+                    except Exception:
+                        _logger.exception(
+                            'Failed to persist invoice ingest failure state for job %s',
+                            latest.id,
+                        )
                 if raise_on_error:
                     raise
         return True
