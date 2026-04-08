@@ -526,21 +526,27 @@ class AutomotiveAsyncJob(models.Model):
                 return False
 
             values = {}
+            transitioned_to_running = False
             if normalized_progress is not None:
                 values['progress'] = normalized_progress
             if progress_message is not None:
                 values['progress_message'] = progress_message
             if state:
-                values['state'] = state
+                if async_job.state != state:
+                    values['state'] = state
                 if state == 'running' and not async_job.started_at:
                     values['started_at'] = fields.Datetime.now()
+                transitioned_to_running = bool(
+                    state == 'running'
+                    and (async_job.state != 'running' or 'started_at' in values)
+                )
                 if state in {'done', 'failed', 'cancelled'} and not async_job.finished_at:
                     values['finished_at'] = fields.Datetime.now()
             if not values:
                 return False
 
             async_job.write(values)
-            if values.get('state') == 'running':
+            if transitioned_to_running:
                 async_job._call_target_progress_hook('_automotive_async_on_claim')
             if async_job.batch_id:
                 async_job.batch_id._sync_state_from_jobs()

@@ -69,9 +69,11 @@ class InvoiceIngestJobAsync(models.Model):
 
     def _build_running_state_values(self):
         self.ensure_one()
-        values = {'finished_at': False}
+        values = {}
         if self.state != 'running':
             values['state'] = 'running'
+        if self.finished_at:
+            values['finished_at'] = False
         if self.error:
             values['error'] = False
         if not self.started_at:
