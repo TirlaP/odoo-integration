@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import io
 import os
 import shutil
 import subprocess
@@ -7,6 +8,7 @@ from pathlib import Path
 
 from odoo import _, models
 from odoo.exceptions import UserError
+from odoo.tools.pdf import PdfFileReader, PdfFileWriter
 
 
 class IrActionsReport(models.Model):
@@ -33,13 +35,15 @@ class IrActionsReport(models.Model):
                 'report_xmlid': self._LABEL_REPORT_XMLID,
                 'active_model': self.env.context.get('active_model') or False,
                 'docids': docids or [],
-                'label_count': len(labels) or len(docids or []),
+                'label_count': self._count_label_pages(labels, repeat_count=self._get_label_repeat_count(data))
+                or len(docids or []),
                 'dispatch_mode': dispatch_mode,
                 'direct_print_enabled': settings['enabled'],
                 'queue_requested': settings['queue_requested'],
                 'printer_name': settings['printer_name'],
                 'job_name': settings['job_name'],
                 'copies': settings['copies'],
+                'repeat_count': self._get_label_repeat_count(data),
             },
         )
 
@@ -80,6 +84,43 @@ class IrActionsReport(models.Model):
         except Exception:
             return []
         return list(report_values.get('docs') or [])
+
+    @staticmethod
+    def _get_label_repeat_count(data=None):
+        try:
+            return max(int((data or {}).get('repeat_count') or 1), 1)
+        except (TypeError, ValueError):
+            return 1
+
+    @staticmethod
+    def _count_label_pages(labels, repeat_count=1):
+        page_count = 0
+        for label in labels or []:
+            try:
+                qty = int(label.get('qty') or 1)
+            except (TypeError, ValueError, AttributeError):
+                qty = 1
+            page_count += max(qty, 1)
+        return page_count * max(int(repeat_count or 1), 1)
+
+    def _duplicate_pdf_pages(self, pdf_content, repeat_count):
+        self.ensure_one()
+        repeat_count = max(int(repeat_count or 1), 1)
+        if repeat_count <= 1 or not pdf_content:
+            return pdf_content
+
+        reader = PdfFileReader(io.BytesIO(pdf_content), strict=False)
+        if reader.getNumPages() <= 0:
+            return pdf_content
+
+        writer = PdfFileWriter()
+        for _idx in range(repeat_count):
+            for page_index in range(reader.getNumPages()):
+                writer.addPage(reader.getPage(page_index))
+
+        output = io.BytesIO()
+        writer.write(output)
+        return output.getvalue()
 
     def _get_label_print_command(self, settings):
         command = settings['command']
@@ -200,6 +241,7 @@ class IrActionsReport(models.Model):
 
         payload = {
             'labels': labels,
+            'repeat_count': self._get_label_repeat_count(data),
             'printer_name': settings['printer_name'],
             'print_command': settings['command'],
             'copies': settings['copies'],
@@ -241,7 +283,12 @@ class IrActionsReport(models.Model):
         }
         report = self.with_context(**async_context)
         settings = report._get_label_print_settings()
-        pdf_content = report._render_label_report_pdf(data={'labels': labels})
+        pdf_content = report._render_label_report_pdf(
+            data={
+                'labels': labels,
+                'repeat_count': self._get_label_repeat_count(payload),
+            }
+        )
         return report._dispatch_label_pdf_to_printer(pdf_content, settings)
 
     def _render_label_report_pdf(self, data=None):
@@ -255,6 +302,24 @@ class IrActionsReport(models.Model):
             raise UserError(_('The label PDF could not be rendered for direct printing.'))
         return pdf_content
 
+    def _render_qweb_pdf(self, report_ref, res_ids=None, data=None):
+        report = self if len(self) == 1 else self._get_report(report_ref)
+        if (
+            report.report_name != self._LABEL_REPORT_NAME
+            or self.env.context.get('automotive_label_skip_pdf_duplication')
+        ):
+            return super()._render_qweb_pdf(report_ref, res_ids=res_ids, data=data)
+
+        repeat_count = report._get_label_repeat_count(data)
+        base_data = dict(data or {})
+        base_data['repeat_count'] = 1
+        pdf_content, report_type = report.with_context(
+            automotive_label_skip_pdf_duplication=True
+        )._render_qweb_pdf(report_ref, res_ids=res_ids, data=base_data)
+        if report_type != 'pdf' or repeat_count <= 1:
+            return pdf_content, report_type
+        return report._duplicate_pdf_pages(pdf_content, repeat_count), report_type
+
     def report_action(self, docids, data=None, config=True):
         self.ensure_one()
         if not self._is_automotive_label_report():
@@ -264,6 +329,8 @@ class IrActionsReport(models.Model):
         labels = self._get_label_payloads(docids, data=data)
         if not labels:
             raise UserError(_('No labels were prepared for printing.'))
+        effective_data = dict(data or {})
+        effective_data['labels'] = labels
 
         if (settings['enabled'] or settings['queue_requested']) and not settings['printer_name']:
             raise UserError(
@@ -271,8 +338,8 @@ class IrActionsReport(models.Model):
             )
 
         if (settings['enabled'] or settings['queue_requested']) and not self.env.context.get('skip_automotive_async_queue'):
-            job = self._enqueue_label_print_job(docids, {'labels': labels}, settings)
-            self._audit_label_request(docids, {'labels': labels}, settings, f'queued as {job.display_name}')
+            job = self._enqueue_label_print_job(docids, effective_data, settings)
+            self._audit_label_request(docids, effective_data, settings, f'queued as {job.display_name}')
             return {
                 'type': 'ir.actions.client',
                 'tag': 'display_notification',
@@ -290,10 +357,10 @@ class IrActionsReport(models.Model):
             }
 
         if self.env.context.get('automotive_label_print_preview_only') is True or not settings['enabled']:
-            self._audit_label_request(docids, {'labels': labels}, settings, 'requested (pdf)')
+            self._audit_label_request(docids, effective_data, settings, 'requested (pdf)')
             return super().report_action(docids, data=data, config=config)
 
-        pdf_content = self._render_label_report_pdf(data={'labels': labels})
+        pdf_content = self._render_label_report_pdf(data=effective_data)
         result = self._dispatch_label_pdf_to_printer(pdf_content, settings)
-        self._audit_label_request(docids, {'labels': labels}, settings, 'dispatched to printer')
+        self._audit_label_request(docids, effective_data, settings, 'dispatched to printer')
         return result

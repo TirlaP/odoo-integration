@@ -114,7 +114,10 @@ class AutomotiveLabelPrintWizard(models.TransientModel):
         )
         return report.report_action(
             None,
-            data={'labels': self._get_base_labels() * max(int(self.label_count or 1), 1)},
+            data={
+                'labels': self._get_base_labels(),
+                'repeat_count': max(int(self.label_count or 1), 1),
+            },
             config=False,
         )
 
@@ -134,6 +137,9 @@ class AutomotiveLabelPrintWizard(models.TransientModel):
         )
         return report.report_action(
             None,
-            data={'labels': self._get_base_labels() * max(int(self.label_count or 1), 1)},
+            data={
+                'labels': self._get_base_labels(),
+                'repeat_count': max(int(self.label_count or 1), 1),
+            },
             config=False,
         )

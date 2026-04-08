@@ -65,7 +65,7 @@
                 </header>
                 <sheet>
                     <div class="oe_button_box" name="button_box">
-                        <button type="action" name="%(action_invoice_ingest_upload_wizard)d" class="oe_stat_button" icon="fa-upload">
+                        <button name="action_open_upload_wizard" type="object" class="oe_stat_button" icon="fa-upload">
                             <div class="o_stat_info">
                                 <span class="o_stat_text">Import</span>
                                 <span class="o_stat_text">Document nou</span>
@@ -80,10 +80,13 @@
                             <field name="finished_at" invisible="1"/>
                             <field name="duplicate_of_job_id" invisible="1"/>
                             <field name="duplicate_warning_message" invisible="1"/>
+                            <field name="active_async_job_id" invisible="1"/>
                             <field name="document_type"/>
                             <field name="picking_id" string="Stock Receipt (Optional)"/>
                             <field name="receipt_sync_state" readonly="1"/>
                             <field name="attachment_id"/>
+                            <field name="async_progress_message" readonly="1" invisible="not active_async_job_id"/>
+                            <field name="async_progress_percent" widget="progressbar" readonly="1" invisible="not active_async_job_id"/>
                             <field name="ai_confidence" readonly="1"/>
                         </group>
                         <group>

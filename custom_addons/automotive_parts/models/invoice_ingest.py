@@ -191,6 +191,23 @@ class InvoiceIngestJob(models.Model):
         'Allow Test Duplicate Action',
         compute='_compute_allow_test_duplicate_action',
     )
+    active_async_job_id = fields.Many2one(
+        'automotive.async.job',
+        string='Background Job',
+        compute='_compute_async_progress_status',
+    )
+    async_progress = fields.Float(
+        'Background Progress',
+        compute='_compute_async_progress_status',
+    )
+    async_progress_percent = fields.Float(
+        'Background Progress (%)',
+        compute='_compute_async_progress_status',
+    )
+    async_progress_message = fields.Char(
+        'Background Stage',
+        compute='_compute_async_progress_status',
+    )
 
     def _audit_snapshot(self, field_names=None):
         self.ensure_one()
@@ -206,17 +223,25 @@ class InvoiceIngestJob(models.Model):
                 snapshot[field_name] = value
         return snapshot
 
-    @api.depends('line_ids', 'state', 'source', 'attachment_id')
+    @api.depends('line_ids', 'state', 'source', 'attachment_id', 'active_async_job_id', 'async_progress_message', 'async_progress_percent')
     def _compute_line_extraction_message(self):
         for job in self:
             if job.line_ids:
                 job.line_extraction_message = False
             elif job.state == 'running':
-                job.line_extraction_message = _(
-                    'Invoice extraction is running in the background.'
-                )
+                if job.async_progress_message:
+                    job.line_extraction_message = _(
+                        'Invoice extraction is running: %(stage)s (%(progress)s%%).'
+                    ) % {
+                        'stage': job.async_progress_message,
+                        'progress': int(round(job.async_progress_percent or 0.0)),
+                    }
+                else:
+                    job.line_extraction_message = _(
+                        'Invoice extraction is running in the background.'
+                    )
             elif job.state == 'pending':
-                job.line_extraction_message = _(
+                job.line_extraction_message = job.async_progress_message or _(
                     'Invoice extraction is queued and will start automatically.'
                 )
             elif job.source == 'ocr' and job.attachment_id and job.state in {'needs_review', 'done'}:
@@ -247,6 +272,16 @@ class InvoiceIngestJob(models.Model):
     def _compute_allow_test_duplicate_action(self):
         for job in self:
             job.allow_test_duplicate_action = False
+
+    @api.depends('state', 'queued_at', 'started_at', 'finished_at')
+    def _compute_async_progress_status(self):
+        jobs = self._get_display_async_jobs()
+        for job in self:
+            async_job = jobs.get(job.id, self.env['automotive.async.job'])
+            job.active_async_job_id = async_job
+            job.async_progress = async_job.progress if async_job else 0.0
+            job.async_progress_percent = async_job.progress_percent if async_job else 0.0
+            job.async_progress_message = async_job.progress_message if async_job else False
 
     def _audit_line_summary(self):
         self.ensure_one()
@@ -387,6 +422,96 @@ class InvoiceIngestJob(models.Model):
             limit=1,
         )
 
+    def _get_display_async_jobs(self):
+        job_map = {}
+        if not self.ids:
+            return job_map
+
+        priority_by_state = {
+            'running': 4,
+            'queued': 3,
+            'failed': 2,
+            'done': 1,
+            'cancelled': 1,
+        }
+        async_jobs = self.env['automotive.async.job'].search(
+            [
+                ('job_type', '=', 'invoice_ingest'),
+                ('target_model', '=', self._name),
+                ('target_res_id', 'in', self.ids),
+                ('target_method', '=', '_process_ingest_job'),
+            ],
+            order='id desc',
+        )
+        for async_job in async_jobs:
+            current = job_map.get(async_job.target_res_id)
+            current_priority = priority_by_state.get(current.state, 0) if current else 0
+            candidate_priority = priority_by_state.get(async_job.state, 0)
+            if not current or candidate_priority > current_priority:
+                job_map[async_job.target_res_id] = async_job
+        return job_map
+
+    def _get_context_async_job(self):
+        self.ensure_one()
+        async_job_id = self.env.context.get('automotive_async_job_id')
+        if async_job_id:
+            async_job = self.env['automotive.async.job'].browse(async_job_id).exists()
+            if async_job:
+                return async_job
+        return self._get_async_processing_job(states=('running', 'queued', 'done', 'failed', 'cancelled'))
+
+    def _report_async_progress(self, progress, message):
+        self.ensure_one()
+        async_job = self._get_context_async_job()
+        if not async_job:
+            return False
+        return self.env['automotive.async.job'].report_progress(
+            async_job.id,
+            progress=progress,
+            progress_message=message,
+            state='running',
+        )
+
+    def _automotive_async_on_claim(self, async_job):
+        for job in self:
+            values = {}
+            if job.state != 'running':
+                values['state'] = 'running'
+            if not job.started_at:
+                values['started_at'] = fields.Datetime.now()
+            if job.finished_at:
+                values['finished_at'] = False
+            if job.error:
+                values['error'] = False
+            if values:
+                job.with_context(skip_audit_log=True).write(values)
+
+    def _automotive_async_on_requeue(self, async_job):
+        for job in self:
+            values = {}
+            if job.state != 'pending':
+                values['state'] = 'pending'
+            if job.started_at:
+                values['started_at'] = False
+            if job.finished_at:
+                values['finished_at'] = False
+            if job.error:
+                values['error'] = False
+            if values:
+                job.with_context(skip_audit_log=True).write(values)
+
+    def _automotive_async_on_failed(self, async_job):
+        for job in self:
+            values = {}
+            if job.state != 'failed':
+                values['state'] = 'failed'
+            if async_job.last_error and job.error != async_job.last_error:
+                values['error'] = async_job.last_error
+            if not job.finished_at:
+                values['finished_at'] = fields.Datetime.now()
+            if values:
+                job.with_context(skip_audit_log=True).write(values)
+
     def _enqueue_async_processing(self, batch=False, batch_uid=None, batch_name=None, force=False, priority=80, display_state='pending'):
         self.ensure_one()
         existing_job = self._get_async_processing_job()
@@ -395,6 +520,11 @@ class InvoiceIngestJob(models.Model):
                 self.write({'state': display_state})
             if batch and not existing_job.batch_id:
                 existing_job.sudo().write({'batch_id': batch.id})
+            if display_state == 'pending' and existing_job.state == 'queued':
+                existing_job.sudo().write({
+                    'progress': 0.0,
+                    'progress_message': _('Queued, waiting for worker'),
+                })
             return existing_job
 
         effective_batch_name = batch_name or self.batch_name or self.display_name
@@ -403,7 +533,7 @@ class InvoiceIngestJob(models.Model):
             batch_name=effective_batch_name,
             display_state=display_state,
         )
-        return self.env['automotive.async.job'].enqueue_job(
+        async_job = self.env['automotive.async.job'].enqueue_job(
             'invoice_ingest',
             name=_('Process %s') % self.display_name,
             payload={
@@ -419,6 +549,11 @@ class InvoiceIngestJob(models.Model):
             target_method='_process_ingest_job',
             target_res_id=self.id,
         )
+        async_job.sudo().write({
+            'progress': 0.0,
+            'progress_message': _('Queued, waiting for worker'),
+        })
+        return async_job
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -1050,6 +1185,7 @@ class InvoiceIngestJob(models.Model):
         if not self.attachment_id and not self.attachment_data:
             raise UserError('Attach a PDF or image first.')
 
+        self._report_async_progress(10.0, _('Reading attachment'))
         binary = self._get_attachment_binary()
         kind = self._detect_attachment_kind(
             binary,
@@ -1057,10 +1193,13 @@ class InvoiceIngestJob(models.Model):
             mimetype=self.attachment_id.mimetype if self.attachment_id else None,
         )
         if kind == 'image':
+            self._report_async_progress(25.0, _('Preparing image OCR'))
+            self._report_async_progress(40.0, _('Running OCR on image'))
             return self._extract_image_text_with_ocr(binary)
         if kind != 'pdf':
             raise UserError('Unsupported attachment type. Upload a PDF or image first.')
 
+        self._report_async_progress(25.0, _('Extracting PDF text'))
         layout_text = self._extract_pdf_text_with_pdftotext(binary)
         if layout_text and len(layout_text) >= 20:
             return layout_text
@@ -1080,6 +1219,7 @@ class InvoiceIngestJob(models.Model):
         if text and len(text) >= 20:
             return text
 
+        self._report_async_progress(40.0, _('Running OCR fallback'))
         ocr_text = self._extract_pdf_text_with_ocr(binary)
         if ocr_text:
             return ocr_text
@@ -1505,12 +1645,15 @@ class InvoiceIngestJob(models.Model):
                 continue
             try:
                 raise_on_error = raise_on_error or bool(self.env.context.get('skip_automotive_async_queue'))
-                job.write({
-                    'state': 'running',
-                    'error': False,
-                    'started_at': fields.Datetime.now(),
-                    'finished_at': False,
-                })
+                start_values = {'finished_at': False}
+                if job.state != 'running':
+                    start_values['state'] = 'running'
+                if job.error:
+                    start_values['error'] = False
+                if not job.started_at:
+                    start_values['started_at'] = fields.Datetime.now()
+                if start_values:
+                    job.write(start_values)
                 if job.source == 'ocr' and job.attachment_id:
                     job.action_extract_with_openai()
                 elif job.account_move_id:
@@ -2149,13 +2292,33 @@ class InvoiceIngestJob(models.Model):
             if not isinstance(line, dict):
                 continue
             description = (line.get('product_description') or '').strip()
-            resolved = self._resolve_line_match_data(
-                raw_code=line.get('product_code_raw') or line.get('product_code'),
-                product_code=line.get('product_code'),
-                product_description=description,
-                supplier=self.partner_id,
-                supplier_brand=line.get('supplier_brand'),
+            has_precomputed_match = any(
+                key in line
+                for key in (
+                    'matched_product_id',
+                    'match_method',
+                    'match_confidence',
+                    'supplier_brand_id',
+                )
             )
+            if has_precomputed_match:
+                resolved = {
+                    'product_code_raw': line.get('product_code_raw') or line.get('product_code') or False,
+                    'product_code': line.get('product_code') or False,
+                    'supplier_brand': line.get('supplier_brand') or '',
+                    'supplier_brand_id': line.get('supplier_brand_id') or False,
+                    'matched_product_id': line.get('matched_product_id') or False,
+                    'match_method': line.get('match_method') or False,
+                    'match_confidence': self._safe_float(line.get('match_confidence'), default=0.0),
+                }
+            else:
+                resolved = self._resolve_line_match_data(
+                    raw_code=line.get('product_code_raw') or line.get('product_code'),
+                    product_code=line.get('product_code'),
+                    product_description=description,
+                    supplier=self.partner_id,
+                    supplier_brand=line.get('supplier_brand'),
+                )
             commands.append((0, 0, {
                 'sequence': sequence,
                 'quantity': self._safe_float(line.get('quantity'), default=1.0) or 1.0,
@@ -2522,6 +2685,7 @@ class InvoiceIngestJob(models.Model):
             prompt = job._build_openai_extraction_prompt(
                 supplier_name_hint=pdf_header.get('supplier_name') or '',
             )
+            job._report_async_progress(60.0, _('Calling OpenAI extraction'))
             body = {
                 'model': job.ai_model or job._default_ai_model(),
                 'response_format': {'type': 'json_object'},
@@ -2621,6 +2785,7 @@ class InvoiceIngestJob(models.Model):
                     f'AI extracted {len(ai_lines)} lines; PDF parser found {len(fallback_lines)} lines. Using PDF parser lines.'
                 )
 
+            job._report_async_progress(80.0, _('Matching products and normalizing lines'))
             normalized_lines = []
             for line in lines:
                 if not isinstance(line, dict):
@@ -2683,6 +2848,7 @@ class InvoiceIngestJob(models.Model):
                 'ai_confidence': self._safe_float(parsed.get('confidence')),
                 'error': duplicate_warning or False,
             }
+            job._report_async_progress(95.0, _('Saving extracted invoice lines'))
             job.write(vals)
             job._set_payload_dict(payload)
             job._replace_lines_from_normalized(normalized_lines)
@@ -2728,18 +2894,18 @@ class InvoiceIngestJob(models.Model):
 
         for job in eligible_jobs:
             previous_state = job.state
-            job._enqueue_async_processing(batch=batch, batch_name=batch_name, display_state='running')
+            job._enqueue_async_processing(batch=batch, batch_name=batch_name, display_state='pending')
             job._audit_log(
                 action='custom',
-                description=f'Invoice ingest started in background processing: {job.display_name}',
+                description=f'Invoice ingest queued for background processing: {job.display_name}',
                 old_values={'state': previous_state},
                 new_values=job._audit_job_summary(),
             )
 
         message = (
-            '1 job started in background processing.'
+            '1 job queued for background processing.'
             if len(eligible_jobs) == 1
-            else f'{len(eligible_jobs)} jobs started in background processing.'
+            else f'{len(eligible_jobs)} jobs queued for background processing.'
         )
         return {
             'type': 'ir.actions.client',
@@ -3648,13 +3814,20 @@ class InvoiceIngestUploadWizard(models.TransientModel):
         if not documents:
             raise UserError('Please upload at least one PDF or image first.')
 
+        queued_documents = []
+        duplicate_jobs = self.env['invoice.ingest.job']
         for document in documents:
             existing_job = self._find_existing_job_for_document(document)
             if existing_job:
-                return self._open_existing_duplicate_document_action(existing_job)
+                duplicate_jobs |= existing_job
+                continue
+            queued_documents.append(document)
+
+        if not queued_documents:
+            return self._open_existing_duplicate_document_action(duplicate_jobs[:1])
 
         batch_uid = uuid.uuid4().hex
-        batch_name = (self.pdf_filename or documents[0]['filename'] or 'invoice batch').strip()
+        batch_name = (self.pdf_filename or queued_documents[0]['filename'] or 'invoice batch').strip()
         async_batch = self.env['automotive.async.batch'].sudo().create({
             'name': batch_name,
             'job_type': 'invoice_ingest',
@@ -3662,8 +3835,8 @@ class InvoiceIngestUploadWizard(models.TransientModel):
             'requested_by_id': self.env.user.id,
         })
         jobs = self.env['invoice.ingest.job']
-        total = len(documents)
-        for index, document in enumerate(documents, start=1):
+        total = len(queued_documents)
+        for index, document in enumerate(queued_documents, start=1):
             job = self._queue_document_job(
                 document,
                 batch_uid=batch_uid,
@@ -3682,7 +3855,7 @@ class InvoiceIngestUploadWizard(models.TransientModel):
 
         if len(jobs) == 1:
             job = jobs[:1]
-            return {
+            action = {
                 'type': 'ir.actions.act_window',
                 'name': 'Importuri facturi',
                 'res_model': 'invoice.ingest.job',
@@ -3691,12 +3864,37 @@ class InvoiceIngestUploadWizard(models.TransientModel):
                 'view_mode': 'form',
                 'target': 'current',
             }
+        else:
+            action = self.env.ref('automotive_parts.action_invoice_ingest_jobs').read()[0]
+            action.update({
+                'domain': [('batch_uid', '=', batch_uid)],
+                'views': [(False, 'list'), (False, 'form')],
+                'view_mode': 'list,form',
+                'target': 'current',
+            })
+        if not duplicate_jobs:
+            return action
 
-        action = self.env.ref('automotive_parts.action_invoice_ingest_jobs').read()[0]
-        action.update({
-            'domain': [('batch_uid', '=', batch_uid)],
-            'views': [(False, 'list'), (False, 'form')],
-            'view_mode': 'list,form',
-            'target': 'current',
-        })
-        return action
+        skipped_count = len(duplicate_jobs)
+        queued_count = len(jobs)
+        duplicate_label = 'document' if skipped_count == 1 else 'documents'
+        queued_label = 'document' if queued_count == 1 else 'documents'
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Duplicate Documents Skipped',
+                'message': _(
+                    'Skipped %(skipped)s duplicate %(duplicate_label)s already imported. '
+                    'Queued %(queued)s new %(queued_label)s for AI processing.'
+                ) % {
+                    'skipped': skipped_count,
+                    'duplicate_label': duplicate_label,
+                    'queued': queued_count,
+                    'queued_label': queued_label,
+                },
+                'type': 'warning',
+                'sticky': True,
+                'next': action,
+            },
+        }

@@ -451,6 +451,10 @@ class AutomotiveAsyncJob(models.Model):
         if not target:
             raise UserError(_('The target record no longer exists.'))
         execution_context = self._load_json(self.execution_context_json, {})
+        execution_context.update({
+            'automotive_async_processing': True,
+            'automotive_async_job_id': self.id,
+        })
         method = getattr(target.with_context(**execution_context).with_user(self._get_execution_user()), self.target_method, None)
         if not method:
             raise UserError(_('%(model)s does not provide method %(method)s.') % {
@@ -470,6 +474,58 @@ class AutomotiveAsyncJob(models.Model):
         if isinstance(result, (list, tuple, set)):
             return [str(item) for item in result]
         return str(result)
+
+    @api.model
+    def _normalize_progress_value(self, value):
+        if value in (None, False, ''):
+            return None
+        try:
+            return max(min(float(value), 100.0), 0.0)
+        except Exception:
+            return None
+
+    def _call_target_progress_hook(self, hook_name):
+        for job in self:
+            target = job._get_target_recordset()
+            if not target:
+                continue
+            hook = getattr(target, hook_name, None)
+            if hook:
+                hook(job)
+
+    @api.model
+    def report_progress(self, job_id, progress=None, progress_message=None, state=None):
+        if not job_id:
+            return False
+
+        normalized_progress = self._normalize_progress_value(progress)
+        with self.pool.cursor() as progress_cr:
+            progress_env = api.Environment(progress_cr, self.env.uid, dict(self.env.context or {}))
+            async_job = progress_env[self._name].browse(job_id).exists()
+            if not async_job:
+                return False
+
+            values = {}
+            if normalized_progress is not None:
+                values['progress'] = normalized_progress
+            if progress_message is not None:
+                values['progress_message'] = progress_message
+            if state:
+                values['state'] = state
+                if state == 'running' and not async_job.started_at:
+                    values['started_at'] = fields.Datetime.now()
+                if state in {'done', 'failed', 'cancelled'} and not async_job.finished_at:
+                    values['finished_at'] = fields.Datetime.now()
+            if not values:
+                return False
+
+            async_job.write(values)
+            if values.get('state') == 'running':
+                async_job._call_target_progress_hook('_automotive_async_on_claim')
+            if async_job.batch_id:
+                async_job.batch_id._sync_state_from_jobs()
+            progress_cr.commit()
+        return True
 
     def action_open_target(self):
         self.ensure_one()
@@ -541,10 +597,11 @@ class AutomotiveAsyncJob(models.Model):
             'finished_at': False,
             'attempt_count': attempt_count + (0 if force else 1),
             'progress': max(self.progress, 1.0),
-            'progress_message': _('Processing'),
+            'progress_message': self.progress_message or _('Processing'),
         })
         if self.batch_id:
             self.batch_id._sync_state_from_jobs()
+        self.env.cr.commit()
 
         try:
             result = self.with_context(skip_automotive_async_queue=True)._execute_target_call()
@@ -594,34 +651,113 @@ class AutomotiveAsyncJob(models.Model):
                 self.batch_id._sync_state_from_jobs()
             return False
 
+        result_json = self._dump_json(self._format_result(result))
+        # Target methods report progress through a separate cursor so the UI can
+        # see live milestones. Commit the target transaction before touching the
+        # async-job row again, otherwise PostgreSQL can raise a serialization
+        # error when this transaction tries to update the same row after those
+        # progress commits.
+        self.env.cr.commit()
         self.write({
             'state': 'done',
             'finished_at': fields.Datetime.now(),
             'progress': 100.0,
             'progress_message': _('Done'),
-            'result_json': self._dump_json(self._format_result(result)),
+            'result_json': result_json,
             'last_error': False,
             'last_error_type': False,
             'next_retry_at': False,
         })
         if self.batch_id:
-            self.batch_id.message_post(body=_('Job completed: %s') % self.display_name)
+            try:
+                self.batch_id.message_post(body=_('Job completed: %s') % self.display_name)
+            except Exception:
+                _logger.exception("Failed to post async job completion message for job %s", self.id)
             self.batch_id._sync_state_from_jobs()
         return True
+
+    @api.model
+    def _recover_unexpected_job_crash(self, job_id, exc):
+        error_message = str(exc) or repr(exc)
+        _logger.exception('Unexpected async job crash for job %s: %s', job_id, error_message)
+
+        with self.pool.cursor() as recovery_cr:
+            recovery_env = api.Environment(recovery_cr, self.env.uid, dict(self.env.context))
+            job = recovery_env[self._name].browse(job_id).exists()
+            if not job or job.state in {'done', 'cancelled'}:
+                return False
+
+            retryable = job.attempt_count < job.max_attempts
+            values = {
+                'last_error': error_message,
+                'last_error_type': exc.__class__.__name__,
+            }
+            if retryable:
+                values.update({
+                    'state': 'queued',
+                    'progress': 0.0,
+                    'progress_message': _('Queued, waiting for worker'),
+                    'started_at': False,
+                    'finished_at': False,
+                    'next_retry_at': fields.Datetime.now(),
+                })
+            else:
+                values.update({
+                    'state': 'failed',
+                    'progress_message': _('Failed'),
+                    'finished_at': fields.Datetime.now(),
+                })
+
+            job.write(values)
+            if retryable:
+                job._call_target_progress_hook('_automotive_async_on_requeue')
+            else:
+                job._call_target_progress_hook('_automotive_async_on_failed')
+            emit_runtime_event(
+                {
+                    'event': 'automotive_async_job_failed',
+                    'category': 'async_job',
+                    'source': 'automotive.async.job',
+                    'level': 'error',
+                    'outcome': 'failed',
+                    'db': recovery_env.cr.dbname,
+                    'uid': recovery_env.user.id,
+                    'message': error_message,
+                    'error_type': exc.__class__.__name__,
+                    'error_message': error_message,
+                    'job_id': job.id,
+                    'job_type': job.job_type,
+                    'batch_id': job.batch_id.id if job.batch_id else False,
+                    'related_model': job.target_model or job.source_model,
+                    'related_res_id': job.target_res_id or job.source_res_id,
+                },
+                persist_db=True,
+            )
+            if job.batch_id:
+                job.batch_id._sync_state_from_jobs()
+            recovery_cr.commit()
+        return False
 
     @api.model
     def _requeue_stale_running_jobs(self, timeout_minutes=30):
         cutoff = fields.Datetime.now() - timedelta(minutes=max(int(timeout_minutes or 30), 1))
         stale_jobs = self.search([
             ('state', '=', 'running'),
-            ('started_at', '<', cutoff),
+            ('write_date', '<', cutoff),
         ])
         if stale_jobs:
             stale_jobs.write({
                 'state': 'queued',
-                'progress_message': _('Requeued after stale worker timeout'),
+                'progress': 0.0,
+                'progress_message': _('Queued, waiting for worker'),
+                'started_at': False,
+                'finished_at': False,
+                'last_error': False,
+                'last_error_type': False,
                 'next_retry_at': fields.Datetime.now(),
             })
+            stale_jobs._call_target_progress_hook('_automotive_async_on_requeue')
+            stale_jobs.filtered('batch_id').mapped('batch_id')._sync_state_from_jobs()
         return stale_jobs
 
     @api.model
@@ -644,14 +780,20 @@ class AutomotiveAsyncJob(models.Model):
                SET state = 'running',
                    started_at = COALESCE(job.started_at, NOW()),
                    attempt_count = job.attempt_count + 1,
-                   progress_message = 'Running'
+                   progress = CASE WHEN COALESCE(job.progress, 0) > 0 THEN job.progress ELSE 1 END,
+                   progress_message = COALESCE(NULLIF(job.progress_message, ''), 'Worker claimed, starting import')
               FROM next_jobs
              WHERE job.id = next_jobs.id
             RETURNING job.id
             """,
             [limit],
         )
-        return [row[0] for row in self.env.cr.fetchall()]
+        claim_ids = [row[0] for row in self.env.cr.fetchall()]
+        claimed_jobs = self.browse(claim_ids).exists()
+        if claimed_jobs:
+            claimed_jobs._call_target_progress_hook('_automotive_async_on_claim')
+            claimed_jobs.filtered('batch_id').mapped('batch_id')._sync_state_from_jobs()
+        return claim_ids
 
     @api.model
     def cron_process_jobs(self, limit=None):
@@ -668,14 +810,17 @@ class AutomotiveAsyncJob(models.Model):
                 break
             self.env.cr.commit()
             for job_id in claim_ids:
-                with self.pool.cursor() as job_cr:
-                    job_env = api.Environment(job_cr, self.env.uid, dict(self.env.context))
-                    job = job_env[self._name].browse(job_id).exists()
-                    if not job:
-                        continue
-                    if job._process_one(force=True):
-                        processed += 1
-                    job_cr.commit()
+                try:
+                    with self.pool.cursor() as job_cr:
+                        job_env = api.Environment(job_cr, self.env.uid, dict(self.env.context))
+                        job = job_env[self._name].browse(job_id).exists()
+                        if not job:
+                            continue
+                        if job._process_one(force=True):
+                            processed += 1
+                        job_cr.commit()
+                except Exception as exc:  # noqa: BLE001
+                    self._recover_unexpected_job_crash(job_id, exc)
                 if processed >= limit:
                     break
         return processed

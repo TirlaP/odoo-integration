@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 import base64
+import io
 import json
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from odoo import fields
+from odoo import api, fields
 from odoo.tests.common import TransactionCase, tagged
 from odoo.exceptions import UserError, ValidationError
+from odoo.tools.pdf import PdfFileReader, PdfFileWriter
 from odoo.addons.automotive_parts.controllers.portal import CustomerPortal
 from werkzeug.utils import redirect as werkzeug_redirect
 
@@ -324,6 +327,11 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         )
         self.assertTrue(async_job, 'Queueing an invoice import should enqueue a background job.')
         self.assertEqual(async_job.state, 'queued')
+        self.assertEqual(async_job.progress, 0.0)
+        self.assertEqual(async_job.progress_message, 'Queued, waiting for worker')
+        self.assertEqual(job.active_async_job_id, async_job)
+        self.assertEqual(job.async_progress_percent, 0.0)
+        self.assertEqual(job.async_progress_message, 'Queued, waiting for worker')
         self.assertEqual(action['res_id'], job.id)
 
     def test_invoice_upload_wizard_multiple_documents_opens_batch_list(self):
@@ -385,6 +393,74 @@ class TestAutomotiveOperatorFlows(TransactionCase):
                 ('attachment_id', '!=', False),
             ]),
             job_count_before,
+        )
+
+    def test_multi_upload_skips_duplicate_and_queues_other_documents(self):
+        duplicate_attachment = self.env['ir.attachment'].create({
+            'name': 'duplicate.pdf',
+            'type': 'binary',
+            'datas': base64.b64encode(b'%PDF-1.4\n% duplicate content\n'),
+            'mimetype': 'application/pdf',
+        })
+        original_job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR - duplicate.pdf',
+            'source': 'ocr',
+            'external_id': 'upload:test:duplicate',
+            'state': 'pending',
+            'attachment_filename': 'duplicate.pdf',
+            'attachment_id': duplicate_attachment.id,
+        })
+        duplicate_attachment.write({
+            'res_model': 'invoice.ingest.job',
+            'res_id': original_job.id,
+        })
+        unique_attachment_one = self.env['ir.attachment'].create({
+            'name': 'unique_1.pdf',
+            'type': 'binary',
+            'datas': base64.b64encode(b'%PDF-1.4\n% unique content one\n'),
+            'mimetype': 'application/pdf',
+        })
+        unique_attachment_two = self.env['ir.attachment'].create({
+            'name': 'unique_2.pdf',
+            'type': 'binary',
+            'datas': base64.b64encode(b'%PDF-1.4\n% unique content two\n'),
+            'mimetype': 'application/pdf',
+        })
+        wizard = self.env['invoice.ingest.upload.wizard'].create({
+            'supplier_id': self.supplier.id,
+            'upload_attachment_ids': [(6, 0, [
+                duplicate_attachment.id,
+                unique_attachment_one.id,
+                unique_attachment_two.id,
+            ])],
+        })
+        job_count_before = self.env['invoice.ingest.job'].search_count([
+            ('source', '=', 'ocr'),
+            ('attachment_id', '!=', False),
+        ])
+
+        action = wizard.action_import_document()
+
+        self.assertEqual(action['type'], 'ir.actions.client')
+        self.assertEqual(action['tag'], 'display_notification')
+        self.assertEqual(action['params']['title'], 'Duplicate Documents Skipped')
+        self.assertIn('Skipped 1 duplicate document', action['params']['message'])
+        self.assertIn('Queued 2 new documents', action['params']['message'])
+        self.assertEqual(action['params']['next']['res_model'], 'invoice.ingest.job')
+        self.assertEqual(action['params']['next']['target'], 'current')
+        self.assertEqual(action['params']['next']['views'], [(False, 'list'), (False, 'form')])
+
+        batch_uid = action['params']['next']['domain'][0][2]
+        queued_jobs = self.env['invoice.ingest.job'].search([('batch_uid', '=', batch_uid)], order='id asc')
+        self.assertEqual(len(queued_jobs), 2)
+        self.assertEqual(set(queued_jobs.mapped('attachment_filename')), {'unique_1.pdf', 'unique_2.pdf'})
+        self.assertFalse(queued_jobs.filtered(lambda job: job.attachment_id == duplicate_attachment))
+        self.assertEqual(
+            self.env['invoice.ingest.job'].search_count([
+                ('source', '=', 'ocr'),
+                ('attachment_id', '!=', False),
+            ]),
+            job_count_before + 2,
         )
 
     def test_invoice_ingest_cron_skips_empty_manual_jobs(self):
@@ -535,6 +611,346 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertTrue(runtime_log)
         self.assertEqual(runtime_log.category, 'async_job')
         self.assertIn('Re-upload the document', runtime_log.message or '')
+
+    def test_async_ocr_processing_commits_running_state_before_extraction(self):
+        attachment = self.env['ir.attachment'].create({
+            'name': 'running_state.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% running state\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Running Visibility',
+            'source': 'ocr',
+            'state': 'pending',
+            'attachment_id': attachment.id,
+            'external_id': 'running-state-checksum',
+        })
+        async_job = job._enqueue_async_processing()
+        observed = {}
+
+        def fake_extract(recordset):
+            with self.registry.cursor() as other_cr:
+                other_env = api.Environment(other_cr, self.env.uid, {})
+                other_job = other_env['invoice.ingest.job'].browse(job.id)
+                observed['state'] = other_job.state
+                observed['started_at'] = bool(other_job.started_at)
+                observed['stage'] = other_job.async_progress_message
+                observed['progress'] = other_job.async_progress_percent
+            recordset.write({
+                'state': 'needs_review',
+                'finished_at': fields.Datetime.now(),
+                'error': False,
+            })
+            return True
+
+        with patch.object(type(job), 'action_extract_with_openai', fake_extract):
+            processed = async_job._process_one(force=True)
+
+        self.assertTrue(processed)
+        self.assertEqual(observed.get('state'), 'running')
+        self.assertTrue(observed.get('started_at'))
+        self.assertEqual(observed.get('stage'), 'Worker claimed, starting import')
+        self.assertGreaterEqual(observed.get('progress') or 0.0, 1.0)
+
+    def test_async_job_claim_switches_invoice_ingest_to_running(self):
+        attachment = self.env['ir.attachment'].create({
+            'name': 'claim_running.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% claim running\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Claim Visibility',
+            'source': 'ocr',
+            'state': 'pending',
+            'attachment_id': attachment.id,
+            'external_id': 'claim-running-checksum',
+        })
+        async_job = job._enqueue_async_processing()
+
+        claim_ids = self.env['automotive.async.job']._claim_job_ids(1)
+
+        self.assertIn(async_job.id, claim_ids)
+        async_job.invalidate_recordset()
+        job.invalidate_recordset()
+        self.assertEqual(async_job.state, 'running')
+        self.assertEqual(job.state, 'running')
+        self.assertEqual(async_job.progress_message, 'Worker claimed, starting import')
+        self.assertEqual(job.active_async_job_id, async_job)
+        self.assertEqual(job.async_progress_message, 'Worker claimed, starting import')
+        self.assertGreaterEqual(job.async_progress_percent, 1.0)
+
+    def test_async_job_completes_after_live_progress_updates_same_row(self):
+        attachment = self.env['ir.attachment'].create({
+            'name': 'progress_commit.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% progress commit\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Progress Finalization',
+            'source': 'ocr',
+            'state': 'pending',
+            'attachment_id': attachment.id,
+            'external_id': 'progress-finalization-checksum',
+        })
+        async_job = job._enqueue_async_processing()
+        events = []
+        original_write = type(async_job).write
+
+        def fake_extract(recordset):
+            events.append('extract')
+            recordset._report_async_progress(95.0, 'Saving extracted invoice lines')
+            recordset.write({
+                'state': 'needs_review',
+                'finished_at': fields.Datetime.now(),
+                'error': False,
+            })
+            return True
+
+        def fake_commit():
+            events.append('commit')
+            return True
+
+        def traced_write(recordset, vals):
+            if getattr(recordset, '_name', None) == 'automotive.async.job' and async_job.id in recordset.ids:
+                if vals.get('state') == 'done':
+                    events.append('done_write')
+            return original_write(recordset, vals)
+
+        with patch.object(type(job), 'action_extract_with_openai', fake_extract), \
+             patch.object(async_job.env.cr, 'commit', side_effect=fake_commit), \
+             patch.object(type(async_job), 'write', autospec=True, side_effect=traced_write):
+            processed = async_job._process_one(force=True)
+
+        self.assertTrue(processed)
+        async_job.invalidate_recordset()
+        job.invalidate_recordset()
+        self.assertEqual(async_job.state, 'done')
+        self.assertEqual(async_job.progress, 100.0)
+        self.assertEqual(async_job.progress_message, 'Done')
+        self.assertEqual(job.state, 'needs_review')
+        self.assertIn('extract', events)
+        self.assertIn('done_write', events)
+        self.assertLess(events.index('extract'), events.index('done_write'))
+        self.assertLess(events.index('commit', events.index('extract')), events.index('done_write'))
+
+    def test_stale_running_async_job_requeues_back_to_pending(self):
+        attachment = self.env['ir.attachment'].create({
+            'name': 'stale_running.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% stale running\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Stale Requeue',
+            'source': 'ocr',
+            'state': 'pending',
+            'attachment_id': attachment.id,
+            'external_id': 'stale-requeue-checksum',
+        })
+        async_job = job._enqueue_async_processing()
+        self.env['automotive.async.job']._claim_job_ids(1)
+        async_job.invalidate_recordset()
+        job.invalidate_recordset()
+        self.assertEqual(async_job.state, 'running')
+        self.assertEqual(job.state, 'running')
+
+        stale_write_date = fields.Datetime.to_string(fields.Datetime.now() - timedelta(minutes=61))
+        self.env.cr.execute(
+            """
+            UPDATE automotive_async_job
+               SET progress = 95,
+                   progress_message = %s,
+                   write_date = %s
+             WHERE id = %s
+            """,
+            ['Saving extracted invoice lines', stale_write_date, async_job.id],
+        )
+
+        stale_jobs = self.env['automotive.async.job']._requeue_stale_running_jobs(timeout_minutes=30)
+
+        self.assertIn(async_job, stale_jobs)
+        async_job.invalidate_recordset()
+        job.invalidate_recordset()
+        self.assertEqual(async_job.state, 'queued')
+        self.assertEqual(async_job.progress, 0.0)
+        self.assertEqual(async_job.progress_message, 'Queued, waiting for worker')
+        self.assertEqual(job.state, 'pending')
+        self.assertEqual(job.async_progress_message, 'Queued, waiting for worker')
+
+    def test_async_job_recovery_requeues_unexpected_crash_instead_of_sticking_running(self):
+        attachment = self.env['ir.attachment'].create({
+            'name': 'crash_requeue.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% crash requeue\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Unexpected Crash',
+            'source': 'ocr',
+            'state': 'pending',
+            'attachment_id': attachment.id,
+            'external_id': 'unexpected-crash-checksum',
+        })
+        async_job = job._enqueue_async_processing()
+        self.env['automotive.async.job']._claim_job_ids(1)
+        async_job.invalidate_recordset()
+        job.invalidate_recordset()
+        self.assertEqual(async_job.state, 'running')
+        self.assertEqual(job.state, 'running')
+
+        self.env['automotive.async.job']._recover_unexpected_job_crash(
+            async_job.id,
+            RuntimeError('post-process crash'),
+        )
+
+        async_job.invalidate_recordset()
+        job.invalidate_recordset()
+        self.assertEqual(async_job.state, 'queued')
+        self.assertEqual(async_job.progress, 0.0)
+        self.assertEqual(async_job.progress_message, 'Queued, waiting for worker')
+        self.assertEqual(async_job.last_error_type, 'RuntimeError')
+        self.assertIn('post-process crash', async_job.last_error or '')
+        self.assertEqual(job.state, 'pending')
+        runtime_log = self.env['automotive.runtime.log'].search(
+            [('event', '=', 'automotive_async_job_failed'), ('related_res_id', '=', job.id)],
+            order='id desc',
+            limit=1,
+        )
+        self.assertTrue(runtime_log)
+        self.assertIn('post-process crash', runtime_log.message or '')
+
+    def test_invoice_extract_reports_real_async_progress_milestones(self):
+        attachment = self.env['ir.attachment'].create({
+            'name': 'milestones.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% milestones\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Milestone Progress',
+            'source': 'ocr',
+            'state': 'running',
+            'attachment_id': attachment.id,
+            'external_id': 'milestone-progress-checksum',
+        })
+        milestones = []
+
+        class FakePdfReader:
+            def __init__(self, *_args, **_kwargs):
+                self.pages = []
+
+        class FakeResponse:
+            status_code = 200
+            text = ''
+
+            def json(self):
+                return {
+                    'choices': [{
+                        'message': {
+                            'content': json.dumps({
+                                'supplier_name': self_supplier.name,
+                                'invoice_number': 'INV-2026-001',
+                                'invoice_date': '2026-04-08',
+                                'invoice_currency': self_env.company.currency_id.name,
+                                'vat_rate': 19,
+                                'amount_total': 119.0,
+                                'confidence': 93,
+                                'invoice_lines': [{
+                                    'quantity': 1,
+                                    'product_code': 'AUTO-TEST-001',
+                                    'product_code_raw': 'AUTO-TEST-001',
+                                    'product_description': 'Test Automotive Product',
+                                    'supplier_brand': 'TEST',
+                                    'unit_price': 100.0,
+                                }],
+                            }),
+                        },
+                    }],
+                }
+
+        self_env = self.env
+        self_supplier = self.supplier
+
+        def capture_progress(_recordset, progress, message):
+            milestones.append((progress, message))
+            return True
+
+        def fake_resolve(_recordset, raw_code='', product_code='', product_description='', supplier=None, supplier_brand='', extra_codes=None):
+            return {
+                'product_code_raw': raw_code or product_code or 'AUTO-TEST-001',
+                'product_code': product_code or 'AUTO-TEST-001',
+                'supplier_brand': supplier_brand or 'TEST',
+                'supplier_brand_id': False,
+                'matched_product_id': self.product.id,
+                'matched_product_name': self.product.display_name,
+                'match_status': 'matched',
+                'match_method': 'exact:default_code',
+                'match_confidence': 100.0,
+            }
+
+        with patch.object(type(job), '_report_async_progress', autospec=True, side_effect=capture_progress), \
+             patch.object(type(job), '_get_openai_api_key', return_value='test-key'), \
+             patch.object(type(job), '_detect_attachment_kind', return_value='pdf'), \
+             patch.object(type(job), '_get_attachment_binary', return_value=b'%PDF-1.4\n% milestone progress\n'), \
+             patch.object(type(job), '_extract_pdf_text_with_pdftotext', return_value=''), \
+             patch('odoo.addons.automotive_parts.models.invoice_ingest.PdfReader', FakePdfReader), \
+             patch.object(type(job), '_extract_pdf_text_with_ocr', return_value='Furnizor  Test Supplier\nFactura INV-2026-001\nTotal de plata 119.00'), \
+             patch.object(type(job), '_extract_invoice_totals_from_text', return_value={'amount_total': 119.0, 'vat_rate': 19.0}), \
+             patch.object(type(job), '_extract_invoice_header_from_text', return_value={'supplier_name': self.supplier.name, 'invoice_number': 'INV-2026-001', 'invoice_date': '2026-04-08'}), \
+             patch.object(type(job), '_extract_invoice_lines_from_text', return_value=[]), \
+             patch.object(type(job), '_get_or_create_supplier_partner', return_value=self.supplier), \
+             patch.object(type(job), '_resolve_line_match_data', autospec=True, side_effect=fake_resolve), \
+             patch('odoo.addons.automotive_parts.models.invoice_ingest.requests.post', return_value=FakeResponse()):
+            job.action_extract_with_openai()
+
+        self.assertEqual(
+            milestones,
+            [
+                (10.0, 'Reading attachment'),
+                (25.0, 'Extracting PDF text'),
+                (40.0, 'Running OCR fallback'),
+                (60.0, 'Calling OpenAI extraction'),
+                (80.0, 'Matching products and normalizing lines'),
+                (95.0, 'Saving extracted invoice lines'),
+            ],
+        )
+
+    def test_replace_lines_from_normalized_reuses_precomputed_match_data(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Reuse Normalized Matches',
+            'source': 'ocr',
+            'state': 'needs_review',
+            'partner_id': self.supplier.id,
+        })
+        normalized_lines = [{
+            'quantity': 1,
+            'product_code_raw': 'AUTO-TEST-001',
+            'product_code': 'AUTO-TEST-001',
+            'supplier_brand': 'TEST',
+            'supplier_brand_id': False,
+            'product_description': 'Test Automotive Product',
+            'unit_price': 100.0,
+            'vat_rate': 19.0,
+            'matched_product_id': self.product.id,
+            'match_method': 'exact:default_code',
+            'match_confidence': 100.0,
+        }]
+
+        with patch.object(type(job), '_resolve_line_match_data', side_effect=AssertionError('save step should not re-match')):
+            job._replace_lines_from_normalized(normalized_lines)
+
+        self.assertEqual(len(job.line_ids), 1)
+        self.assertEqual(job.line_ids.product_id, self.product)
+        self.assertEqual(job.line_ids.match_method, 'exact:default_code')
 
     def test_invoice_ingest_shows_message_when_no_lines_extracted(self):
         job = self.env['invoice.ingest.job'].create({
@@ -1104,4 +1520,38 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertEqual(async_job.state, 'queued')
         payload = json.loads(async_job.payload_json or '{}')
         self.assertEqual(payload.get('printer_name'), 'Test Label Printer')
-        self.assertEqual(len(payload.get('labels') or []), 2)
+        self.assertEqual(len(payload.get('labels') or []), 1)
+        self.assertEqual(payload.get('repeat_count'), 2)
+
+    def test_label_pdf_duplication_repeats_single_rendered_page(self):
+        report = self.env.ref('automotive_parts.action_report_automotive_label')
+        writer = PdfFileWriter()
+        writer.addBlankPage(width=72, height=72)
+        base_stream = io.BytesIO()
+        writer.write(base_stream)
+
+        duplicated = report._duplicate_pdf_pages(base_stream.getvalue(), 3)
+
+        reader = PdfFileReader(io.BytesIO(duplicated), strict=False)
+        self.assertEqual(reader.getNumPages(), 3)
+
+    def test_label_pdf_render_supports_empty_report_recordset(self):
+        report = self.env.ref('automotive_parts.action_report_automotive_label')
+        writer = PdfFileWriter()
+        writer.addBlankPage(width=72, height=72)
+        base_stream = io.BytesIO()
+        writer.write(base_stream)
+
+        with patch(
+            'odoo.addons.base.models.ir_actions_report.IrActionsReport._render_qweb_pdf',
+            return_value=(base_stream.getvalue(), 'pdf'),
+        ):
+            pdf_content, report_type = self.env['ir.actions.report']._render_qweb_pdf(
+                report.report_name,
+                [],
+                data={'repeat_count': 2},
+            )
+
+        self.assertEqual(report_type, 'pdf')
+        reader = PdfFileReader(io.BytesIO(pdf_content), strict=False)
+        self.assertEqual(reader.getNumPages(), 2)
