@@ -952,6 +952,32 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertEqual(job.line_ids.product_id, self.product)
         self.assertEqual(job.line_ids.match_method, 'exact:default_code')
 
+    def test_extract_invoice_lines_from_text_parses_crystal_reports_layout(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Crystal Reports Parser',
+            'source': 'ocr',
+        })
+        sample_text = """
+     1        NF-00375555DREIS SET STERGATOR FLAT                                  SET              2                         6.21                         12.42                       2.61
+               BLADE 550/550MM - DREISSNER
+     2        C 32 191 FILTRU AER - MANN-FILTER                                    BUC              1                       38.59                          38.59                       8.10
+               NC=84213100 CPV=42913000-9
+     3        VO-LS-1870 VO-LS-1870 BRAT/BIELETA                                   BUC              10                      29.94                         299.40                      62.87
+               SUSPENSIE STABILIZATOR MOOG
+               NC=87088099
+Data sc:        06/05/2026
+"""
+
+        lines = job._extract_invoice_lines_from_text(sample_text, default_vat_rate=21.0)
+
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[0]['quantity'], 2.0)
+        self.assertEqual(lines[0]['unit_price'], 6.21)
+        self.assertIn('BLADE 550/550MM - DREISSNER', lines[0]['product_description'])
+        self.assertEqual(lines[1]['product_code'], 'C32191')
+        self.assertEqual(lines[2]['quantity'], 10.0)
+        self.assertIn('SUSPENSIE STABILIZATOR MOOG', lines[2]['product_description'])
+
     def test_invoice_ingest_shows_message_when_no_lines_extracted(self):
         job = self.env['invoice.ingest.job'].create({
             'name': 'OCR Header Only',

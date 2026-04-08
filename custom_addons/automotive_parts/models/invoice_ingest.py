@@ -1312,12 +1312,11 @@ class InvoiceIngestJob(models.Model):
             return []
 
         row_re = re.compile(
-            r'^\s*(\d{1,3})\s+([A-Z]{2,6})\s+'
+            r'^\s*(\d{1,3})\s+(.+?)\s+([A-Z]{2,6})\s+'
             r'([0-9]+(?:[.,][0-9]+)?)\s+'
             r'([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2})\s+'
             r'([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2})\s+'
-            r'([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2})\s+'
-            r'(.+?)\s*$'
+            r'([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2})\s*$'
         )
         footer_re = re.compile(
             r'^(Aceasta factura|Data sc:|In cazul in care plata|Orice litigiu|Semnaturile|Total\b|din care:|Expedierea s-a efectuat)',
@@ -1337,11 +1336,11 @@ class InvoiceIngestJob(models.Model):
                     rows.append(current)
                 current = {
                     'sequence': int(row_match.group(1)),
-                    'quantity': self._safe_money(row_match.group(3), default=1.0) or 1.0,
-                    'unit_price': self._safe_money(row_match.group(4), default=0.0),
-                    'line_total_excl_vat': self._safe_money(row_match.group(5), default=0.0),
-                    'line_vat_amount': self._safe_money(row_match.group(6), default=0.0),
-                    'desc_parts': [row_match.group(7).strip()],
+                    'quantity': self._safe_money(row_match.group(4), default=1.0) or 1.0,
+                    'unit_price': self._safe_money(row_match.group(5), default=0.0),
+                    'line_total_excl_vat': self._safe_money(row_match.group(6), default=0.0),
+                    'line_vat_amount': self._safe_money(row_match.group(7), default=0.0),
+                    'desc_parts': [row_match.group(2).strip()],
                 }
                 continue
 
