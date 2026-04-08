@@ -15,6 +15,11 @@ from . import tecdoc_fast_import
 from . import tecdoc_fast_purge
 from . import anaf_efactura
 from . import invoice_ingest
+from . import invoice_ingest_job_extract
+from . import invoice_ingest_job_match
+from . import invoice_ingest_job_receipt
+from . import invoice_ingest_line
+from . import invoice_ingest_upload_wizard
 from . import automotive_payment_allocation
 from . import mechanic_portal_request
 from . import commercial_document_archive

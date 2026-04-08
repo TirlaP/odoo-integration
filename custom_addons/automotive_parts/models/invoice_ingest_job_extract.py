@@ -1,0 +1,998 @@
+# -*- coding: utf-8 -*-
+import base64
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+from datetime import datetime
+from io import BytesIO
+from xml.etree import ElementTree
+
+import requests
+from PyPDF2 import PdfReader
+from odoo import _, api, fields, models
+from odoo.exceptions import UserError
+
+from .invoice_ingest import _logger
+
+
+class InvoiceIngestJobExtract(models.Model):
+    _inherit = 'invoice.ingest.job'
+    def _normalize_payload_line(self, line, supplier=None, default_vat_rate=0.0):
+        self.ensure_one()
+        if not isinstance(line, dict):
+            return False
+
+        description = (line.get('product_description') or line.get('description') or '').strip()
+        resolved = self._resolve_line_match_data(
+            raw_code=(
+                line.get('product_code_raw')
+                or line.get('product_code')
+                or line.get('description')
+                or line.get('product_description')
+                or ''
+            ),
+            product_code=line.get('product_code'),
+            product_description=description,
+            supplier=supplier,
+            supplier_brand=line.get('supplier_brand'),
+        )
+
+        quantity = self._safe_float(
+            line.get('quantity') or line.get('invoiced_quantity') or line.get('credited_quantity'),
+            default=1.0,
+        ) or 1.0
+        unit_price = self._safe_float(
+            line.get('unit_price')
+            or line.get('price_unit')
+            or line.get('price'),
+            default=0.0,
+        )
+        line_total = self._safe_float(line.get('line_total'), default=0.0)
+        if not unit_price and line_total and quantity:
+            unit_price = line_total / quantity
+
+        return {
+            'quantity': quantity,
+            'product_description': description,
+            'unit_price': unit_price,
+            'vat_rate': self._safe_float(line.get('vat_rate'), default=default_vat_rate or self.vat_rate or 0.0),
+            **resolved,
+        }
+
+    @api.model
+    def _infer_document_move_type_from_xml(self, xml_payload):
+        if not xml_payload:
+            return False
+        try:
+            root = ElementTree.fromstring(xml_payload.encode('utf-8') if isinstance(xml_payload, str) else xml_payload)
+        except Exception:
+            return False
+        local_name = root.tag.rsplit('}', 1)[-1]
+        if local_name == 'CreditNote':
+            return 'in_refund'
+        if local_name == 'Invoice':
+            return 'in_invoice'
+        return False
+
+    @api.model
+    def _looks_like_supplier_credit_note_text(self, text):
+        haystack = self._normalize_code_value(text or '').upper()
+        if not haystack:
+            return False
+        tokens = (
+            'CREDIT NOTE',
+            'CREDITNOTE',
+            'NOTA DE CREDITARE',
+            'NOTA CREDITARE',
+            'FACTURA STORNO',
+            'STORNO',
+            'REFUND',
+            'RETUR',
+        )
+        return any(token in haystack for token in tokens)
+
+    def _infer_vendor_bill_move_type(self, payload=None, text_hint=None):
+        self.ensure_one()
+        payload = payload if isinstance(payload, dict) else self._get_payload_dict()
+
+        normalized = (payload.get('openai') or {}).get('normalized') or {}
+        document_type = (normalized.get('document_type') or normalized.get('invoice_type') or '').strip().lower()
+        if document_type in {'creditnote', 'credit_note', 'refund', 'supplier_credit_note', 'supplier_refund'}:
+            return 'in_refund'
+        if document_type in {'invoice', 'bill', 'supplier_invoice'}:
+            return 'in_invoice'
+
+        if self.document_type == 'credit_note':
+            return 'in_refund'
+        if self.document_type == 'invoice':
+            return 'in_invoice'
+
+        raw_openai = (payload.get('openai') or {}).get('raw') or {}
+        if isinstance(raw_openai, dict):
+            document_type = (
+                raw_openai.get('document_type')
+                or raw_openai.get('invoice_type')
+                or raw_openai.get('invoiceTypeCode')
+                or ''
+            )
+            if isinstance(document_type, str):
+                normalized_type = document_type.strip().lower()
+                if normalized_type in {'creditnote', 'credit_note', 'refund'}:
+                    return 'in_refund'
+                if normalized_type in {'invoice', 'bill'}:
+                    return 'in_invoice'
+
+        raw_payload = payload.get('raw')
+        if isinstance(raw_payload, dict):
+            xml_payload = (
+                raw_payload.get('xml')
+                or raw_payload.get('ubl_xml')
+                or raw_payload.get('document_xml')
+                or raw_payload.get('parsed', {}).get('xml_payload')
+                or raw_payload.get('parsed', {}).get('xml')
+            )
+            inferred = self._infer_document_move_type_from_xml(xml_payload)
+            if inferred:
+                return inferred
+
+        if text_hint and self._looks_like_supplier_credit_note_text(text_hint):
+            return 'in_refund'
+
+        # OCR fallback: inspect the extracted text cached in the payload if available.
+        if self._looks_like_supplier_credit_note_text(json.dumps(payload, ensure_ascii=False, default=str)):
+            return 'in_refund'
+
+        return 'in_invoice'
+
+    @api.model
+    def _detect_attachment_kind(self, binary, filename=None, mimetype=None):
+        name = (filename or '').strip().lower()
+        mime = (mimetype or '').strip().lower()
+        if not binary:
+            return ''
+        if 'pdf' in mime or name.endswith('.pdf') or binary[:4] == b'%PDF':
+            return 'pdf'
+        if mime.startswith('image/') or name.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff')):
+            return 'image'
+        try:
+            from PIL import Image
+            with Image.open(BytesIO(binary)) as image:
+                image.verify()
+            return 'image'
+        except Exception:
+            return ''
+
+    @api.model
+    def _prepare_ocr_image_path(self, image):
+        try:
+            from PIL import Image, ImageOps
+        except Exception:
+            return ''
+        try:
+            if image.mode == 'P':
+                image = image.convert('RGBA')
+            if image.mode in {'RGBA', 'LA'}:
+                background = Image.new('RGBA', image.size, 'white')
+                background.paste(image, mask=image.getchannel('A'))
+                image = background.convert('RGB')
+            else:
+                image = image.convert('RGB')
+            if max(image.size or (0, 0)) < 2400:
+                image = image.resize((max(image.width * 2, 1), max(image.height * 2, 1)), Image.LANCZOS)
+            image = ImageOps.grayscale(image)
+            image = ImageOps.autocontrast(image)
+            tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            tmp.close()
+            image.save(tmp.name, format='PNG')
+            return tmp.name
+        except Exception:
+            return ''
+
+    @api.model
+    def _ocr_image_path(self, image_path):
+        if not image_path or not shutil.which('tesseract'):
+            return ''
+        try:
+            result = subprocess.run(
+                ['tesseract', image_path, 'stdout', '--psm', '6', '--dpi', '300'],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except Exception:
+            return ''
+        if result.returncode != 0:
+            return ''
+        return (result.stdout or '').strip()
+
+    @api.model
+    def _extract_image_text_with_ocr(self, binary):
+        if not binary:
+            return ''
+        try:
+            from PIL import Image, ImageSequence
+        except Exception:
+            return ''
+        if not shutil.which('tesseract'):
+            return ''
+
+        temp_paths = []
+        texts = []
+        try:
+            with Image.open(BytesIO(binary)) as image:
+                frame_count = getattr(image, 'n_frames', 1) or 1
+                frames = ImageSequence.Iterator(image) if frame_count > 1 else [image]
+                for frame in frames:
+                    processed_path = self._prepare_ocr_image_path(frame.copy())
+                    if not processed_path:
+                        continue
+                    temp_paths.append(processed_path)
+                    ocr_text = self._ocr_image_path(processed_path)
+                    if ocr_text:
+                        texts.append(ocr_text)
+        except Exception:
+            return ''
+        finally:
+            for path in temp_paths:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+        return '\n'.join(texts).strip()
+
+    @api.model
+    def _extract_pdf_text_with_ocr(self, binary):
+        if not binary or not shutil.which('pdftoppm') or not shutil.which('tesseract'):
+            return ''
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                pdf_path = os.path.join(temp_dir, 'invoice.pdf')
+                prefix = os.path.join(temp_dir, 'page')
+                with open(pdf_path, 'wb') as handle:
+                    handle.write(binary)
+                result = subprocess.run(
+                    ['pdftoppm', '-png', '-r', '300', pdf_path, prefix],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    return ''
+                texts = []
+                for image_path in sorted(glob.glob(f'{prefix}-*.png')):
+                    ocr_text = self._ocr_image_path(image_path)
+                    if ocr_text:
+                        texts.append(ocr_text)
+                return '\n'.join(texts).strip()
+        except Exception:
+            return ''
+
+    def _get_attachment_binary(self, raise_if_missing=True):
+        self.ensure_one()
+        if self.attachment_data:
+            return base64.b64decode(self.attachment_data)
+
+        attachment = self.attachment_id.sudo()
+        if not attachment:
+            if raise_if_missing:
+                raise UserError('Attach a PDF or image first.')
+            return b''
+
+        try:
+            raw = attachment.raw
+        except Exception:
+            raw = b''
+        if raw:
+            return raw
+
+        datas = attachment.datas
+        if datas:
+            return base64.b64decode(datas)
+
+        if raise_if_missing:
+            raise UserError(
+                'The attached PDF/image file is no longer available on the server. Re-upload the document and try again.'
+            )
+        return b''
+
+    def _extract_pdf_text(self):
+        self.ensure_one()
+        if not self.attachment_id and not self.attachment_data:
+            raise UserError('Attach a PDF or image first.')
+
+        self._report_async_progress(10.0, _('Reading attachment'))
+        binary = self._get_attachment_binary()
+        kind = self._detect_attachment_kind(
+            binary,
+            filename=self.attachment_filename or self.attachment_id.name,
+            mimetype=self.attachment_id.mimetype if self.attachment_id else None,
+        )
+        if kind == 'image':
+            self._report_async_progress(25.0, _('Preparing image OCR'))
+            self._report_async_progress(40.0, _('Running OCR on image'))
+            return self._extract_image_text_with_ocr(binary)
+        if kind != 'pdf':
+            raise UserError('Unsupported attachment type. Upload a PDF or image first.')
+
+        self._report_async_progress(25.0, _('Extracting PDF text'))
+        layout_text = self._extract_pdf_text_with_pdftotext(binary)
+        if layout_text and len(layout_text) >= 20:
+            return layout_text
+
+        text = ''
+        try:
+            reader = PdfReader(BytesIO(binary))
+            pages = []
+            for page in reader.pages:
+                try:
+                    pages.append(page.extract_text() or '')
+                except Exception:
+                    continue
+            text = '\n'.join(pages).strip()
+        except Exception:
+            text = ''
+        if text and len(text) >= 20:
+            return text
+
+        self._report_async_progress(40.0, _('Running OCR fallback'))
+        ocr_text = self._extract_pdf_text_with_ocr(binary)
+        if ocr_text:
+            return ocr_text
+
+        return text
+
+    @api.model
+    def _extract_pdf_text_with_pdftotext(self, binary):
+        if not binary or not shutil.which('pdftotext'):
+            return ''
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.pdf') as tmp:
+                tmp.write(binary)
+                tmp.flush()
+                result = subprocess.run(
+                    ['pdftotext', '-layout', tmp.name, '-'],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+        except Exception:
+            return ''
+        if result.returncode != 0:
+            return ''
+        return (result.stdout or '').strip()
+
+    @api.model
+    def _safe_money(self, value, default=0.0):
+        if value in (None, False, ''):
+            return default
+        raw = str(value).strip().replace(' ', '')
+        if not raw:
+            return default
+        try:
+            if ',' in raw and '.' in raw:
+                if raw.rfind(',') > raw.rfind('.'):
+                    raw = raw.replace('.', '').replace(',', '.')
+                else:
+                    raw = raw.replace(',', '')
+            elif ',' in raw:
+                right = raw.split(',')[-1]
+                if right.isdigit() and len(right) == 2:
+                    raw = raw.replace(',', '.')
+                else:
+                    raw = raw.replace(',', '')
+            return float(raw)
+        except Exception:
+            return default
+
+    @api.model
+    def _extract_invoice_totals_from_text(self, text):
+        if not text:
+            return {}
+
+        out = {}
+        vat_match = re.search(r'Cota\s*T\.V\.A\.\s*:?\s*([0-9]+(?:[.,][0-9]+)?)\s*%', text, re.IGNORECASE)
+        if vat_match:
+            out['vat_rate'] = self._safe_money(vat_match.group(1), default=0.0)
+
+        semn_matches = list(
+            re.finditer(
+                r'Semnaturile\s+([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2})\s+([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2})',
+                text,
+                re.IGNORECASE,
+            )
+        )
+        if semn_matches:
+            last = semn_matches[-1]
+            out['total_excl_vat'] = self._safe_money(last.group(1), default=0.0)
+            out['vat_amount'] = self._safe_money(last.group(2), default=0.0)
+
+        plata_matches = list(
+            re.finditer(
+                r'Total\s+de\s+plata[\s\S]{0,80}?([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2})',
+                text,
+                re.IGNORECASE,
+            )
+        )
+        if plata_matches:
+            out['amount_total'] = self._safe_money(plata_matches[-1].group(1), default=0.0)
+        elif out.get('total_excl_vat') or out.get('vat_amount'):
+            out['amount_total'] = (out.get('total_excl_vat') or 0.0) + (out.get('vat_amount') or 0.0)
+
+        return out
+
+    @api.model
+    def _extract_invoice_lines_from_text(self, text, default_vat_rate=0.0):
+        if not text:
+            return []
+
+        row_re = re.compile(
+            r'^\s*(\d{1,3})\s+(.+?)\s+([A-Z]{2,6})\s+'
+            r'([0-9]+(?:[.,][0-9]+)?)\s+'
+            r'([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2})\s+'
+            r'([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2})\s+'
+            r'([0-9]{1,3}(?:[.,][0-9]{3})*[.,][0-9]{2})\s*$'
+        )
+        footer_re = re.compile(
+            r'^(Aceasta factura|Data sc:|In cazul in care plata|Orice litigiu|Semnaturile|Total\b|din care:|Expedierea s-a efectuat)',
+            re.IGNORECASE,
+        )
+
+        rows = []
+        current = None
+        for raw_line in text.splitlines():
+            line = (raw_line or '').strip()
+            if not line:
+                continue
+
+            row_match = row_re.match(line)
+            if row_match:
+                if current:
+                    rows.append(current)
+                current = {
+                    'sequence': int(row_match.group(1)),
+                    'quantity': self._safe_money(row_match.group(4), default=1.0) or 1.0,
+                    'unit_price': self._safe_money(row_match.group(5), default=0.0),
+                    'line_total_excl_vat': self._safe_money(row_match.group(6), default=0.0),
+                    'line_vat_amount': self._safe_money(row_match.group(7), default=0.0),
+                    'desc_parts': [row_match.group(2).strip()],
+                }
+                continue
+
+            if not current:
+                continue
+            if footer_re.match(line):
+                rows.append(current)
+                current = None
+                continue
+            if line.startswith('NC=') or line.startswith('CPV='):
+                continue
+            current['desc_parts'].append(line)
+
+        if current:
+            rows.append(current)
+
+        by_sequence = {}
+        for row in rows:
+            seq = row.get('sequence') or 0
+            if seq <= 0:
+                continue
+            by_sequence[seq] = row
+
+        out = []
+        for seq in sorted(by_sequence.keys()):
+            row = by_sequence[seq]
+            description = ' '.join(p for p in (row.get('desc_parts') or []) if p).strip()
+            if not description:
+                continue
+            parsed = self._parse_invoice_line_identity(description)
+            line_total = row.get('line_total_excl_vat') or 0.0
+            vat_amount = row.get('line_vat_amount') or 0.0
+            vat_rate = default_vat_rate or 0.0
+            if line_total > 0 and vat_amount >= 0:
+                inferred = round((vat_amount / line_total) * 100.0, 2)
+                if inferred > 0:
+                    vat_rate = inferred
+            out.append({
+                'quantity': row.get('quantity') or 1.0,
+                'product_code_raw': parsed.get('product_code_raw') or description,
+                'product_code': parsed.get('product_code_primary') or False,
+                'supplier_brand': parsed.get('supplier_brand') or '',
+                'product_description': description,
+                'unit_price': row.get('unit_price') or 0.0,
+                'vat_rate': vat_rate,
+            })
+        return out
+
+    @api.model
+    def _merge_fallback_line_codes(self, ai_lines, fallback_lines):
+        if not ai_lines or not fallback_lines or len(ai_lines) != len(fallback_lines):
+            return ai_lines or [], 0
+
+        merged_lines = []
+        recovered_count = 0
+        for ai_line, fallback_line in zip(ai_lines, fallback_lines):
+            if not isinstance(ai_line, dict) or not isinstance(fallback_line, dict):
+                merged_lines.append(ai_line)
+                continue
+
+            merged_line = dict(ai_line)
+            ai_code = self._compact_code(
+                merged_line.get('product_code_raw')
+                or merged_line.get('product_code')
+            )
+            fallback_code = self._compact_code(
+                fallback_line.get('product_code_raw')
+                or fallback_line.get('product_code')
+            )
+            use_fallback_code = (
+                bool(fallback_code)
+                and (
+                    not ai_code
+                    or (len(fallback_code) > len(ai_code) and fallback_code.startswith(ai_code))
+                )
+            )
+            if use_fallback_code:
+                merged_line['product_code_raw'] = (
+                    fallback_line.get('product_code_raw')
+                    or fallback_line.get('product_code')
+                    or merged_line.get('product_code_raw')
+                )
+                merged_line['product_code'] = (
+                    fallback_line.get('product_code')
+                    or fallback_line.get('product_code_raw')
+                    or merged_line.get('product_code')
+                )
+                if not merged_line.get('supplier_brand') and fallback_line.get('supplier_brand'):
+                    merged_line['supplier_brand'] = fallback_line.get('supplier_brand')
+                recovered_count += 1
+            merged_lines.append(merged_line)
+        return merged_lines, recovered_count
+
+    @api.model
+    def _safe_float(self, value, default=0.0):
+        if value in (None, False, ''):
+            return default
+        try:
+            return float(str(value).replace(',', '.'))
+        except Exception:
+            return default
+
+    @api.model
+    def _safe_date(self, value):
+        if not value:
+            return False
+        if isinstance(value, datetime):
+            return value.date()
+        raw = str(value).strip()
+        for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d/%m/%y', '%d.%m.%Y', '%d.%m.%y'):
+            try:
+                return datetime.strptime(raw, fmt).date()
+            except Exception:
+                continue
+        try:
+            return fields.Date.to_date(raw)
+        except Exception:
+            return False
+
+    def _find_supplier_partner(self, supplier_name=None, supplier_code=None, supplier_vat=None):
+        self.ensure_one()
+        Partner = self.env['res.partner']
+        if self.partner_id:
+            return self.partner_id
+
+        if supplier_vat:
+            clean_vat = self._normalize_cui_digits(supplier_vat)
+            if clean_vat:
+                partner = (
+                    Partner.search([('vat', '=', clean_vat)], limit=1)
+                    or Partner.search([('vat', '=ilike', f'RO{clean_vat}')], limit=1)
+                    or Partner.search([('cui', '=', clean_vat)], limit=1)
+                    or Partner.search([('cui', '=ilike', f'RO{clean_vat}')], limit=1)
+                )
+                if partner:
+                    return partner
+
+        # Try exact code first (legacy app seems to use short codes like AD/MT/CX).
+        if supplier_code:
+            clean_code = supplier_code.strip()
+            partner = Partner.search([('name', '=ilike', clean_code)], limit=1)
+            if partner:
+                return partner
+            partner = Partner.search([('ref', '=ilike', clean_code)], limit=1)
+            if partner:
+                return partner
+
+        if supplier_name:
+            partner = Partner.search([('name', '=ilike', supplier_name.strip())], limit=1)
+            if partner:
+                return partner
+            partner = Partner.search([('name', 'ilike', supplier_name.strip())], limit=1)
+            if partner:
+                return partner
+        return Partner
+
+    def _get_or_create_supplier_partner(self, supplier_name=None, supplier_code=None, supplier_vat=None):
+        self.ensure_one()
+        partner = self._find_supplier_partner(
+            supplier_name=supplier_name,
+            supplier_code=supplier_code,
+            supplier_vat=supplier_vat,
+        )
+        if partner:
+            return partner
+
+        clean_name = (supplier_name or '').strip()
+        clean_vat = self._normalize_cui_digits(supplier_vat)
+        if not clean_name and not clean_vat:
+            return self.env['res.partner']
+
+        if not clean_name:
+            clean_name = f'Supplier {clean_vat}'
+
+        vals = {
+            'name': clean_name,
+            'company_type': 'company',
+            'supplier_rank': 1,
+        }
+        if 'client_type' in self.env['res.partner']._fields:
+            vals['client_type'] = 'company'
+        if clean_vat:
+            vals['vat'] = f'RO{clean_vat}'
+            if 'cui' in self.env['res.partner']._fields:
+                vals['cui'] = clean_vat
+
+        partner = self.env['res.partner'].sudo().create(vals)
+        _logger.info(
+            "Auto-created supplier partner id=%s name=%s vat=%s for invoice ingest job id=%s",
+            partner.id,
+            partner.name,
+            vals.get('vat'),
+            self.id,
+        )
+        return partner
+
+    @api.model
+    def _extract_invoice_number_from_filename(self, filename):
+        stem = os.path.splitext(os.path.basename(filename or ''))[0]
+        compact = re.sub(r'[^A-Z0-9]', '', stem.upper())
+        if compact and sum(ch.isdigit() for ch in compact) >= 4:
+            return compact
+        return ''
+
+    @api.model
+    def _extract_invoice_header_from_text(self, text, filename=None):
+        if not text and not filename:
+            return {}
+
+        out = {}
+        raw_lines = [line.rstrip() for line in (text or '').splitlines()]
+        non_empty_lines = [line.strip() for line in raw_lines if line and line.strip()]
+
+        for idx, line in enumerate(non_empty_lines):
+            if re.search(r'\bFurnizor\b', line, re.IGNORECASE):
+                for candidate in non_empty_lines[idx + 1:idx + 5]:
+                    parts = [part.strip() for part in re.split(r'\s{2,}', candidate) if part.strip()]
+                    if parts:
+                        out['supplier_name'] = parts[0]
+                        break
+                if out.get('supplier_name'):
+                    break
+
+        for line in non_empty_lines:
+            if 'C.I.F.' not in line.upper():
+                continue
+            parts = [part.strip() for part in re.split(r'\s{2,}', line) if part.strip()]
+            vat = next((part for part in parts if re.fullmatch(r'RO?\d{2,}', part, re.IGNORECASE)), '')
+            if vat:
+                out['supplier_vat'] = vat
+                break
+
+        dates = re.findall(r'\b\d{2}[./-]\d{2}[./-]\d{2,4}\b', text or '')
+        if dates:
+            out['invoice_date'] = dates[0]
+            if len(dates) > 1:
+                out['invoice_due_date'] = dates[-1]
+
+        invoice_number = self._extract_invoice_number_from_filename(filename)
+        if not invoice_number:
+            scan_area = ''.join(non_empty_lines[:4]).upper()
+            scan_area = re.sub(r'[^A-Z0-9]', '', scan_area)
+            match = re.search(r'(RO\d{6,}|[A-Z]{1,4}\d{6,})', scan_area)
+            if match:
+                invoice_number = match.group(1)
+        if invoice_number:
+            out['invoice_number'] = invoice_number
+
+        return out
+
+    @api.model
+    def _normalize_cui_digits(self, value):
+        if not value:
+            return ''
+        return ''.join(ch for ch in str(value) if ch.isdigit())
+
+    def _resolve_supplier_for_billing(self):
+        """Best-effort supplier resolution for bill creation."""
+        self.ensure_one()
+        if self.partner_id:
+            return self.partner_id
+
+        # 1) If job is linked to a reception, use its supplier.
+        if self.picking_id and self.picking_id.partner_id:
+            self.partner_id = self.picking_id.partner_id.id
+            return self.partner_id
+
+        payload = self._get_payload_dict()
+
+        # 2) OpenAI normalized supplier hints.
+        normalized = self._get_normalized_invoice_payload()
+        supplier = self._get_or_create_supplier_partner(
+            supplier_name=(normalized.get('supplier_name') or '').strip(),
+            supplier_code=(normalized.get('supplier_code') or '').strip(),
+            supplier_vat=(normalized.get('supplier_vat') or '').strip(),
+        )
+        if supplier:
+            self.partner_id = supplier.id
+            return self.partner_id
+
+        # 3) ANAF parsed CUI fallback.
+        parsed_payload = payload.get('parsed') or {}
+        supplier_cui = self._normalize_cui_digits(parsed_payload.get('supplier_cui'))
+        if supplier_cui:
+            Partner = self.env['res.partner']
+            supplier = (
+                Partner.search([('vat', '=', supplier_cui)], limit=1)
+                or Partner.search([('vat', '=ilike', f'RO{supplier_cui}')], limit=1)
+                or Partner.search([('cui', '=', supplier_cui)], limit=1)
+                or Partner.search([('cui', '=ilike', f'RO{supplier_cui}')], limit=1)
+            )
+            if supplier:
+                self.partner_id = supplier.id
+                return self.partner_id
+
+        return self.env['res.partner']
+
+    def _process_ingest_job(self, raise_on_error=False):
+        for job in self:
+            if job.state not in {'pending', 'running', 'failed', 'needs_review'}:
+                continue
+            try:
+                raise_on_error = raise_on_error or bool(self.env.context.get('skip_automotive_async_queue'))
+                start_values = {'finished_at': False}
+                if job.state != 'running':
+                    start_values['state'] = 'running'
+                if job.error:
+                    start_values['error'] = False
+                if not job.started_at:
+                    start_values['started_at'] = fields.Datetime.now()
+                if start_values:
+                    job.write(start_values)
+                if job.source == 'ocr' and job.attachment_id:
+                    job.action_extract_with_openai()
+                elif job.account_move_id:
+                    job.write({'state': 'done', 'finished_at': fields.Datetime.now()})
+                else:
+                    job.write({'state': 'needs_review', 'finished_at': fields.Datetime.now()})
+                if job.state in {'done', 'needs_review'} and not job.finished_at:
+                    job.write({'finished_at': fields.Datetime.now()})
+            except Exception as exc:  # noqa: BLE001
+                job.write({
+                    'state': 'failed',
+                    'error': str(exc) or repr(exc),
+                    'finished_at': fields.Datetime.now(),
+                })
+                if raise_on_error:
+                    raise
+        return True
+
+    def action_extract_with_openai(self):
+        api_key = self._get_openai_api_key()
+        if not api_key:
+            raise UserError(
+                'Missing OPENAI_API_KEY. Set env var OPENAI_API_KEY or config parameter automotive.openai_api_key.'
+            )
+
+        for job in self:
+            text = job._extract_pdf_text()
+            if not text or len(text) < 20:
+                raise UserError(
+                    'Document text extraction returned no usable text. Use ANAF XML import or install Tesseract OCR for scanned documents.'
+                )
+            pdf_totals = job._extract_invoice_totals_from_text(text)
+            pdf_header = job._extract_invoice_header_from_text(
+                text,
+                filename=job.attachment_id.name if job.attachment_id else job.name,
+            )
+
+            prompt = job._build_openai_extraction_prompt(
+                supplier_name_hint=pdf_header.get('supplier_name') or '',
+            )
+            job._report_async_progress(60.0, _('Calling OpenAI extraction'))
+            body = {
+                'model': job.ai_model or job._default_ai_model(),
+                'response_format': {'type': 'json_object'},
+                'messages': [
+                    {'role': 'system', 'content': 'You are a strict invoice extraction engine. Output valid JSON only.'},
+                    {
+                        'role': 'user',
+                        'content': (
+                            f'{prompt}\n\n'
+                            f'FILENAME: {(job.attachment_id.name if job.attachment_id else job.name) or ""}\n\n'
+                            f'INVOICE_TEXT:\n{text[:120000]}'
+                        ),
+                    },
+                ],
+            }
+            response = requests.post(
+                'https://api.openai.com/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {api_key}',
+                    'Content-Type': 'application/json',
+                },
+                json=body,
+                timeout=120,
+            )
+            if response.status_code >= 400:
+                raise UserError(f'OpenAI extraction failed: {response.text}')
+            result = response.json()
+            content = (
+                result.get('choices', [{}])[0]
+                .get('message', {})
+                .get('content')
+            )
+            if not content:
+                raise UserError('OpenAI returned empty content.')
+            parsed = json.loads(content)
+            if not isinstance(parsed, dict):
+                raise UserError('OpenAI response is not a JSON object.')
+
+            ai_lines = parsed.get('invoice_lines') or []
+            fallback_lines = job._extract_invoice_lines_from_text(
+                text,
+                default_vat_rate=pdf_totals.get('vat_rate') or self._safe_float(parsed.get('vat_rate')),
+            )
+            lines = ai_lines
+            warnings = parsed.get('warnings') if isinstance(parsed.get('warnings'), list) else []
+            supplier_name = (parsed.get('supplier_name') or pdf_header.get('supplier_name') or '').strip()
+            invoice_number = self._normalize_invoice_number(
+                parsed.get('invoice_number') or pdf_header.get('invoice_number')
+            )
+            invoice_date_value = parsed.get('invoice_date') or pdf_header.get('invoice_date')
+            invoice_due_date_value = parsed.get('invoice_due_date') or pdf_header.get('invoice_due_date')
+            currency = self.env.company.currency_id
+            currency_name = (parsed.get('invoice_currency') or '').strip().upper()
+            if currency_name:
+                currency = self.env['res.currency'].search([('name', '=', currency_name)], limit=1) or currency
+            if not parsed.get('supplier_name') and supplier_name:
+                warnings.append('Supplier name recovered from the PDF header.')
+            if not parsed.get('invoice_number') and invoice_number:
+                warnings.append(f'Invoice number recovered from the file/header: {invoice_number}.')
+            if not parsed.get('invoice_date') and invoice_date_value:
+                warnings.append('Invoice date recovered from the PDF header.')
+            supplier = job._get_or_create_supplier_partner(
+                supplier_name=supplier_name,
+                supplier_code=parsed.get('supplier_code'),
+                supplier_vat=pdf_header.get('supplier_vat'),
+            )
+            if ai_lines and fallback_lines and not job._allow_progressive_tail_trim(supplier or supplier_name):
+                merged_lines, recovered_code_count = job._merge_fallback_line_codes(ai_lines, fallback_lines)
+                if recovered_code_count:
+                    lines = merged_lines
+                    warnings.append(
+                        f'PDF parser restored fuller product codes on {recovered_code_count} line(s).'
+                    )
+            document_type = (parsed.get('document_type') or '').strip().lower()
+            if not document_type and self._looks_like_supplier_credit_note_text(text):
+                document_type = 'credit_note'
+            if document_type in {'refund', 'credit_note', 'creditnote'}:
+                warnings.append('Supplier credit note / refund detected.')
+
+            duplicate = job._find_duplicate_job(
+                source=job.source,
+                partner_id=supplier.id if supplier else False,
+                invoice_number=invoice_number,
+                invoice_date=self._safe_date(invoice_date_value),
+                amount_total=pdf_totals.get('amount_total') or self._safe_float(parsed.get('amount_total')),
+                document_type=document_type or 'invoice',
+            )
+            duplicate_of_id = False
+            duplicate_warning = False
+            if duplicate and duplicate.id != job.id:
+                duplicate_of_id = duplicate.id
+                duplicate_warning = f'Duplicate supplier invoice already exists: {duplicate.display_name}'
+                warnings.append(duplicate_warning)
+            if len(fallback_lines) > len(ai_lines):
+                lines = fallback_lines
+                warnings.append(
+                    f'AI extracted {len(ai_lines)} lines; PDF parser found {len(fallback_lines)} lines. Using PDF parser lines.'
+                )
+
+            job._report_async_progress(80.0, _('Matching products and normalizing lines'))
+            normalized_lines = []
+            for line in lines:
+                if not isinstance(line, dict):
+                    continue
+                raw_code = (line.get('product_code_raw') or line.get('product_code') or '').strip()
+                description = (line.get('product_description') or '').strip()
+                resolved = job._resolve_line_match_data(
+                    raw_code=raw_code,
+                    product_code=line.get('product_code'),
+                    product_description=description,
+                    supplier=supplier,
+                    supplier_brand=line.get('supplier_brand'),
+                )
+                normalized_lines.append({
+                    'quantity': self._safe_float(line.get('quantity'), default=1.0) or 1.0,
+                    'product_description': description,
+                    'unit_price': self._safe_float(line.get('unit_price'), default=0.0),
+                    **resolved,
+                })
+
+            payload = job._get_payload_dict()
+            payload['openai'] = {
+                'model': job.ai_model or job._default_ai_model(),
+                'raw': parsed,
+                'normalized': {
+                    'supplier_name': supplier_name,
+                    'supplier_code': parsed.get('supplier_code'),
+                    'supplier_vat': pdf_header.get('supplier_vat'),
+                    'invoice_number': invoice_number,
+                    'invoice_date': invoice_date_value,
+                    'invoice_due_date': invoice_due_date_value,
+                    'invoice_currency': currency_name or currency.name,
+                    'vat_rate': pdf_totals.get('vat_rate') or self._safe_float(parsed.get('vat_rate')),
+                    'amount_total': pdf_totals.get('amount_total') or self._safe_float(parsed.get('amount_total')),
+                    'confidence': self._safe_float(parsed.get('confidence')),
+                    'warnings': warnings,
+                    'document_type': document_type or 'invoice',
+                    'invoice_lines': normalized_lines,
+                },
+                'pdf_header': pdf_header,
+                'pdf_reconciliation': {
+                    'total_excl_vat': pdf_totals.get('total_excl_vat'),
+                    'vat_amount': pdf_totals.get('vat_amount'),
+                    'amount_total': pdf_totals.get('amount_total'),
+                    'fallback_line_count': len(fallback_lines),
+                    'ai_line_count': len(ai_lines),
+                },
+            }
+            if duplicate_of_id:
+                payload['openai']['duplicate_of'] = duplicate_of_id
+            vals = {
+                'state': 'needs_review',
+                'partner_id': supplier.id if supplier else False,
+                'invoice_number': invoice_number,
+                'invoice_date': self._safe_date(invoice_date_value),
+                'amount_total': pdf_totals.get('amount_total') or self._safe_float(parsed.get('amount_total')),
+                'vat_rate': pdf_totals.get('vat_rate') or self._safe_float(parsed.get('vat_rate')),
+                'currency_id': currency.id,
+                'document_type': document_type or 'invoice',
+                'ai_confidence': self._safe_float(parsed.get('confidence')),
+                'error': duplicate_warning or False,
+            }
+            job._report_async_progress(95.0, _('Saving extracted invoice lines'))
+            job.write(vals)
+            job._set_payload_dict(payload)
+            job._replace_lines_from_normalized(normalized_lines)
+            job._audit_log(
+                action='custom',
+                description=f'Invoice OCR extraction completed: {job.display_name}',
+                new_values={
+                    'ai_model': job.ai_model or job._default_ai_model(),
+                    'ai_confidence': job.ai_confidence,
+                    'partner_id': supplier.id if supplier else False,
+                    'document_type': job.document_type,
+                    'used_pdf_fallback_lines': len(fallback_lines) > len(ai_lines),
+                    'warning_count': len(warnings),
+                    'warnings': warnings,
+                    'duplicate_of_job_id': duplicate_of_id or False,
+                    **job._audit_line_summary(),
+                },
+            )
