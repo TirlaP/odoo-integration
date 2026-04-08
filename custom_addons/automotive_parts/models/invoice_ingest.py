@@ -2040,47 +2040,6 @@ class InvoiceIngestJob(models.Model):
         )
         return supplier.supplier_id if supplier else False
 
-    def _match_or_create_from_tecdoc(self, codes, supplier_brand=None):
-        self.ensure_one()
-        if self.source != 'ocr':
-            return self.env['product.product'], {}
-
-        api = self.env['tecdoc.api'].sudo().search([], limit=1)
-        if not api:
-            return self.env['product.product'], {}
-
-        supplier_id = self._guess_tecdoc_supplier_id(supplier_brand)
-        attempted = set()
-        for code in codes or []:
-            normalized_code = self._normalize_code_value(code)
-            compact_code = self._compact_code(normalized_code)
-            if not normalized_code or len(compact_code) < 4 or compact_code in attempted:
-                continue
-            attempted.add(compact_code)
-            try:
-                product = api.sync_product_from_tecdoc(
-                    article_no=normalized_code,
-                    supplier_id=supplier_id or None,
-                )
-            except UserError as exc:
-                _logger.info(
-                    "Invoice ingest TecDoc auto-sync miss for code=%s supplier_brand=%s supplier_id=%s: %s",
-                    normalized_code,
-                    supplier_brand or '',
-                    supplier_id or False,
-                    exc,
-                )
-                continue
-            product = product if product._name == 'product.product' else product.product_variant_id
-            if product:
-                return product, {
-                    'method': 'exact:tecdoc_auto_sync',
-                    'matched_code': normalized_code,
-                    'confidence': 94.0,
-                }
-
-        return self.env['product.product'], {}
-
     def _resolve_line_match_data(
         self,
         raw_code='',
@@ -2258,10 +2217,6 @@ class InvoiceIngestJob(models.Model):
                         }
 
         # 4) Description fallback only when no code was parsed at all.
-        tecdoc_product, tecdoc_meta = self._match_or_create_from_tecdoc(codes, supplier_brand=supplier_brand)
-        if tecdoc_product:
-            return tecdoc_product, tecdoc_meta
-
         description = (product_description or '').strip()
         if description and not codes:
             exact_name_domain = [('name', '=ilike', ' '.join(description.split()))]

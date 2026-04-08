@@ -19,6 +19,7 @@ except ImportError:
 _logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 20
 
 
 class TecDocAPI(models.Model):
@@ -126,14 +127,31 @@ class TecDocAPI(models.Model):
             url = f"{base_url}{endpoint}"
             headers = self._get_headers()
             if method == 'GET':
-                response = requests.get(url, headers=headers, params=params or {})
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=params or {},
+                    timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                )
             else:
                 if form_data is not None:
                     headers = dict(headers, **{'Content-Type': 'application/x-www-form-urlencoded'})
                 if json_data is not None:
-                    response = requests.post(url, headers=headers, params=params or {}, json=json_data)
+                    response = requests.post(
+                        url,
+                        headers=headers,
+                        params=params or {},
+                        json=json_data,
+                        timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                    )
                 else:
-                    response = requests.post(url, headers=headers, params=params or {}, data=form_data or {})
+                    response = requests.post(
+                        url,
+                        headers=headers,
+                        params=params or {},
+                        data=form_data or {},
+                        timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                    )
             response.raise_for_status()
             data = response.json()
 
