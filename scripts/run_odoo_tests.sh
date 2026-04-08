@@ -11,6 +11,7 @@ CONF_FILE="${CONF_FILE:-odoo.conf}"
 MODULES="${MODULES:-automotive_parts}"
 DB_NAME="${ODOO_TEST_DB:-automotive_parts_test_$(date +%s)}"
 KEEP_DB="${KEEP_TEST_DB:-0}"
+TEST_TAGS="${ODOO_TEST_TAGS:-/automotive_parts}"
 TMP_CONF_FILE=""
 
 parse_conf() {
@@ -78,6 +79,7 @@ echo "Installing and testing ${MODULES} on temp db ${DB_NAME}"
   -d "${DB_NAME}" \
   -i "${MODULES}" \
   --test-enable \
+  --test-tags "${TEST_TAGS}" \
   --stop-after-init \
   --no-http \
   --logfile -

@@ -1,26 +1,22 @@
 # -*- coding: utf-8 -*-
 import json
-import logging
-import os
 from datetime import datetime, timezone
 
 from odoo import http
 from odoo.http import Response, request
 
-
-_logger = logging.getLogger(__name__)
-_TRACE_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "runtime_trace.log"))
-
+from ..runtime_logging import emit_runtime_event
 
 def _append_trace(event):
-    payload = json.dumps(event, ensure_ascii=True, sort_keys=True)
-    try:
-        with open(_TRACE_FILE, "a", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.write("\n")
-    except OSError:
-        _logger.exception("Failed to write browser diagnostic trace")
-    _logger.error(payload)
+    emit_runtime_event(
+        {
+            **dict(event or {}),
+            "category": "browser",
+            "source": "browser_diagnostics",
+            "level": "error",
+        },
+        persist_db=True,
+    )
 
 
 class AutomotiveBrowserDiagnosticsController(http.Controller):

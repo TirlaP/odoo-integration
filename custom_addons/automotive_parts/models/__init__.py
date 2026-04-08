@@ -19,6 +19,7 @@ from . import automotive_payment_allocation
 from . import mechanic_portal_request
 from . import commercial_document_archive
 from . import audit_log
+from . import runtime_log
 from . import res_config_settings
 from . import mail_orphan_cleanup
 from . import label_report

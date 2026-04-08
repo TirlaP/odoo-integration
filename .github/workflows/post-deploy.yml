@@ -1,0 +1,50 @@
+name: Post Deploy Smoke
+
+on:
+  deployment_status:
+
+concurrency:
+  group: post-deploy-${{ github.event.deployment.id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  deployments: read
+
+jobs:
+  smoke:
+    if: github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve deployment URL
+        id: deployment
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open(os.environ["GITHUB_EVENT_PATH"], "r", encoding="utf-8") as handle:
+              event = json.load(handle)
+
+          status = event.get("deployment_status", {})
+          url = (status.get("environment_url") or status.get("target_url") or "").strip()
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"deployment_url={url}\n")
+          PY
+
+      - name: Skip when deployment URL is unavailable
+        if: steps.deployment.outputs.deployment_url == ''
+        run: echo "No deployment URL on this deployment_status payload; skipping smoke test."
+
+      - name: Make smoke script executable
+        if: steps.deployment.outputs.deployment_url != ''
+        run: chmod +x scripts/smoke_test.sh
+
+      - name: Run smoke test
+        if: steps.deployment.outputs.deployment_url != ''
+        run: ./scripts/smoke_test.sh "${{ steps.deployment.outputs.deployment_url }}"

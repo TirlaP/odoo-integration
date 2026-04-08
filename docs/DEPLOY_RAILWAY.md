@@ -14,6 +14,8 @@ This project now includes a Railway-ready container setup:
 3. Add a **Volume** and mount it at `/data` (required for filestore persistence).
 4. Connect this Git repository as a new service (Railway will detect `Dockerfile`).
 
+Do not skip the `/data` volume. Odoo attachments are stored in the filestore by default. Without a persistent volume, OCR imports can keep the attachment row in PostgreSQL while losing the actual PDF/image bytes on redeploy or restart.
+
 ## 2. Configure environment variables
 
 Set these on the Odoo service:
@@ -80,11 +82,12 @@ After first successful boot, disable one-time init/update:
 
 Recommended flow:
 
-1. Open Railway service settings for the app service.
-2. Enable **Wait for CI** on the connected GitHub branch.
-3. Use GitHub Actions workflow `.github/workflows/ci.yml` as the required CI check.
-4. Merge to `main` only after CI passes.
-5. Railway auto-deploys `main` after GitHub reports success.
+1. Protect `main` in GitHub and require the `CI / validate` check.
+2. Create a second Railway service or Railway environment for staging.
+3. Track `staging` on the staging service and `main` on the production service.
+4. Enable **Wait for CI** on both Railway tracked branches.
+5. Merge feature branches into `staging` first, verify the staging deployment, then merge `staging` into `main`.
+6. Railway auto-deploys the tracked branch only after GitHub reports success.
 
 What CI validates:
 
@@ -92,14 +95,43 @@ What CI validates:
 - XML parsing for addon data/views/security files
 - invoice ingest frontend bundle build
 - Docker image build
+- Odoo regression tests via `scripts/run_odoo_tests.sh`
 
 What CD does:
 
-- Railway rebuilds and redeploys the app service from `main`
+- Railway rebuilds and redeploys the tracked service from `staging` or `main`
 - production DB remains in place
 - schema changes must still be applied by upgrading `automotive_parts`
+- GitHub Actions workflow `.github/workflows/post-deploy.yml` runs a smoke test against the Railway deployment URL after Railway marks the deployment successful
 
-## 6. Production-safe migrations
+## 6. Observability
+
+Use three layers:
+
+1. Railway logs
+- Odoo already starts with `--logfile -`, so app logs go to stdout/stderr
+- PostgreSQL service logs remain available from the Railway Postgres service
+- use Railway as the raw infrastructure log collector first
+
+2. Odoo Runtime Logs
+- the addon now exposes `Runtime Logs` in the backend UI
+- this captures high-signal runtime failures such as browser diagnostics, HTTP exceptions, cron failures, and async job failures
+- retention is controlled by `automotive.runtime_log_retention_days` and defaults to 30 days
+
+3. Optional Sentry
+- use Sentry for exception tracking, stack traces, frontend Owl/browser errors, and performance traces
+- do not treat Sentry as the primary storage for raw DB or infrastructure logs
+- smallest practical stack is `Railway logs + Runtime Logs + optional Sentry`
+
+4. Optional Better Stack
+- use Better Stack as the centralized app log panel when you want time-window queries outside Railway
+- create an HTTP source and set:
+  - `BETTER_STACK_SOURCE_TOKEN`
+  - `BETTER_STACK_INGESTING_HOST`
+- the addon runtime logger forwards structured JSON events there when both env vars are present
+- start with the Odoo app service first; keep PostgreSQL logs in Railway until you decide whether you also want a separate DB-log pipeline
+
+## 7. Production-safe migrations
 
 Do not rely on `ODOO_AUTO_UPDATE_MODULES=true` on the web service in production. It delays HTTP startup and can fail Railway healthchecks while Odoo is still migrating.
 
@@ -118,6 +150,13 @@ Use a dedicated migration step instead:
 
 This runs the Odoo module upgrade before the new deployment goes live, without tying schema updates to the web server healthcheck window.
 
+Important Railway constraint:
+
+- pre-deploy commands run in a separate container
+- volumes are not mounted there
+- do not make pre-deploy logic depend on `/data` filestore contents
+- keep pre-deploy limited to database-only migrations and module upgrades
+
 Manual fallback:
 
 - open a Railway shell for the app service and run:
@@ -135,9 +174,29 @@ python3 /app/odoo/odoo-bin -c /tmp/odoo-railway.conf -d "$ODOO_DB_NAME" -u "$ODO
 Suggested environments:
 
 - `main` -> production
-- separate Railway environment/service -> staging
+- `staging` -> staging
 
-## 5. Known constraints
+## 8. What This Repo Now Supports
+
+Repo-side CI/CD for Railway is now:
+
+- `.github/workflows/ci.yml`
+  - runs on pull requests, `staging`, and `main`
+  - validates Python, XML, frontend build, Odoo tests, and Docker build
+- `.github/workflows/post-deploy.yml`
+  - runs on Railway `deployment_status=success`
+  - smoke-tests `/web/health` and `/web/login`
+- `scripts/smoke_test.sh`
+  - reusable smoke test for Railway deployments
+
+This is the DIY version of the Odoo.sh/Skysize workflow:
+
+- feature branch -> pull request -> CI
+- merge to `staging` -> Railway staging deploy -> smoke test
+- merge to `main` -> Railway production deploy -> smoke test
+- run `/app/scripts/railway_migrate.sh` as pre-deploy for schema changes
+
+## 9. Known constraints
 
 - This is self-hosted deployment. Odoo Enterprise license is still required if you use Enterprise edition features.
 - `wkhtmltopdf` is not bundled in this container by default; PDF rendering may be limited depending on report usage.

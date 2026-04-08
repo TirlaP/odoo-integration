@@ -19,10 +19,10 @@ for path in sorted(Path("custom_addons/automotive_parts").rglob("*.xml")):
 PY
 
 echo "[3/5] Frontend bundle"
-scripts/build_invoice_ingest_react.sh
+bash scripts/build_invoice_ingest_react.sh
 
 echo "[4/5] Odoo regression tests"
-scripts/run_odoo_tests.sh
+bash scripts/run_odoo_tests.sh
 
 echo "[5/5] Docker build"
 docker build -t odoo-integration-ci .

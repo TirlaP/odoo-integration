@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_runtime_log_tree" model="ir.ui.view">
+        <field name="name">automotive.runtime.log.tree</field>
+        <field name="model">automotive.runtime.log</field>
+        <field name="arch" type="xml">
+            <list string="Runtime Logs" create="false" delete="false">
+                <field name="create_date"/>
+                <field name="level"/>
+                <field name="category"/>
+                <field name="event"/>
+                <field name="outcome"/>
+                <field name="db_name" optional="hide"/>
+                <field name="user_id" optional="hide"/>
+                <field name="request_method" optional="hide"/>
+                <field name="request_path"/>
+                <field name="message"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_runtime_log_form" model="ir.ui.view">
+        <field name="name">automotive.runtime.log.form</field>
+        <field name="model">automotive.runtime.log</field>
+        <field name="arch" type="xml">
+            <form string="Runtime Log" create="false" delete="false">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="create_date"/>
+                            <field name="level"/>
+                            <field name="category"/>
+                            <field name="event"/>
+                            <field name="source"/>
+                            <field name="outcome"/>
+                        </group>
+                        <group>
+                            <field name="db_name"/>
+                            <field name="user_id"/>
+                            <field name="request_method"/>
+                            <field name="request_path"/>
+                            <field name="related_model"/>
+                            <field name="related_res_id"/>
+                        </group>
+                    </group>
+                    <group string="Message">
+                        <field name="message" readonly="1" nolabel="1"/>
+                    </group>
+                    <group string="Payload">
+                        <field name="payload_json" widget="text" readonly="1" nolabel="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_runtime_log_search" model="ir.ui.view">
+        <field name="name">automotive.runtime.log.search</field>
+        <field name="model">automotive.runtime.log</field>
+        <field name="arch" type="xml">
+            <search string="Runtime Logs">
+                <field name="create_date"/>
+                <field name="level"/>
+                <field name="category"/>
+                <field name="event"/>
+                <field name="source"/>
+                <field name="request_path"/>
+                <field name="message"/>
+                <filter string="Errors" name="errors" domain="[('level', 'in', ['error', 'critical'])]"/>
+                <filter string="HTTP" name="http" domain="[('category', '=', 'http')]"/>
+                <filter string="Cron" name="cron" domain="[('category', '=', 'cron')]"/>
+                <filter string="Browser" name="browser" domain="[('category', '=', 'browser')]"/>
+                <filter string="Async Jobs" name="async_jobs" domain="[('category', '=', 'async_job')]"/>
+                <group expand="0" string="Group By">
+                    <filter string="Level" name="group_level" context="{'group_by': 'level'}"/>
+                    <filter string="Category" name="group_category" context="{'group_by': 'category'}"/>
+                    <filter string="Event" name="group_event" context="{'group_by': 'event'}"/>
+                    <filter string="User" name="group_user" context="{'group_by': 'user_id'}"/>
+                    <filter string="Date" name="group_date" context="{'group_by': 'create_date:day'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_runtime_log" model="ir.actions.act_window">
+        <field name="name">Runtime Logs</field>
+        <field name="path">runtime-logs</field>
+        <field name="res_model">automotive.runtime.log</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="view_runtime_log_search"/>
+    </record>
+</odoo>

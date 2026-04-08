@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import contextlib
-import json
 import logging
 import os
 import select
@@ -11,12 +10,10 @@ import traceback
 import odoo
 from odoo.service import server as odoo_server
 
+from .runtime_logging import emit_runtime_event
 
 _logger = logging.getLogger(__name__)
 _PATCH_FLAG = "_automotive_server_trace_patched"
-_DEFAULT_TRACE_FILE = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "runtime_trace.log")
-)
 
 
 def _trace_enabled():
@@ -25,16 +22,15 @@ def _trace_enabled():
 
 
 def _write_trace_payload(event):
-    payload = json.dumps(event, ensure_ascii=True, sort_keys=True)
-    trace_file = os.getenv("AUTOMOTIVE_HTTP_TRACE_FILE", _DEFAULT_TRACE_FILE)
-    try:
-        with open(trace_file, "a", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.write("\n")
-    except OSError:
-        _logger.exception("Failed to write automotive server trace file")
-
-    _logger.error(payload)
+    emit_runtime_event(
+        {
+            **dict(event or {}),
+            "category": "cron",
+            "source": "server_trace",
+            "level": "error",
+        },
+        persist_db=True,
+    )
 
 
 def _patch_cron_thread():

@@ -125,4 +125,10 @@
               action="action_audit_log"
               sequence="90"/>
 
+    <menuitem id="menu_runtime_log"
+              name="Runtime Logs"
+              parent="menu_automotive_root"
+              action="action_runtime_log"
+              sequence="95"/>
+
 </odoo>

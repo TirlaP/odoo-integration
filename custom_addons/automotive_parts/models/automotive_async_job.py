@@ -5,6 +5,7 @@ from datetime import timedelta
 from odoo import api, fields, models, _
 from odoo.exceptions import UserError
 
+from ..runtime_logging import emit_runtime_event
 
 def _json_dumps(value):
     return json.dumps([] if value is None else value, ensure_ascii=False, default=str)
@@ -558,6 +559,26 @@ class AutomotiveAsyncJob(models.Model):
             else:
                 vals['state'] = 'failed'
             self.write(vals)
+            emit_runtime_event(
+                {
+                    'event': 'automotive_async_job_failed',
+                    'category': 'async_job',
+                    'source': 'automotive.async.job',
+                    'level': 'error',
+                    'outcome': 'failed',
+                    'db': self.env.cr.dbname,
+                    'uid': self.env.user.id,
+                    'message': str(exc),
+                    'error_type': exc.__class__.__name__,
+                    'error_message': str(exc),
+                    'job_id': self.id,
+                    'job_type': self.job_type,
+                    'batch_id': self.batch_id.id if self.batch_id else False,
+                    'related_model': self.target_model or self.source_model,
+                    'related_res_id': self.target_res_id or self.source_res_id,
+                },
+                persist_db=True,
+            )
             self.message_post(body=_('Async job failed: %s') % (exc,))
             if self.batch_id:
                 self.batch_id._sync_state_from_jobs()

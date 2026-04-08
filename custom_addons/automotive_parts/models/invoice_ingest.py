@@ -121,6 +121,12 @@ class InvoiceIngestJob(models.Model):
 
     picking_id = fields.Many2one('stock.picking', string='Reception (Optional)')
     attachment_id = fields.Many2one('ir.attachment', string='Invoice File (PDF/Image)')
+    attachment_data = fields.Binary(
+        'Invoice File Data',
+        attachment=False,
+        readonly=True,
+    )
+    attachment_filename = fields.Char('Invoice File Name', readonly=True)
 
     partner_id = fields.Many2one('res.partner', string='Supplier')
     invoice_number = fields.Char('Invoice Number')
@@ -321,6 +327,14 @@ class InvoiceIngestJob(models.Model):
         self.ensure_one()
         if self.source != 'ocr' or not self.attachment_id:
             raise UserError('Only OCR imports with an attached document can be reprocessed.')
+
+        if not self.attachment_data:
+            stored_binary = self._get_attachment_binary(raise_if_missing=False)
+            if stored_binary:
+                self.write({
+                    'attachment_data': base64.b64encode(stored_binary),
+                    'attachment_filename': self.attachment_id.name,
+                })
 
         self.write({
             'state': 'pending',
@@ -1003,16 +1017,44 @@ class InvoiceIngestJob(models.Model):
         except Exception:
             return ''
 
+    def _get_attachment_binary(self, raise_if_missing=True):
+        self.ensure_one()
+        if self.attachment_data:
+            return base64.b64decode(self.attachment_data)
+
+        attachment = self.attachment_id.sudo()
+        if not attachment:
+            if raise_if_missing:
+                raise UserError('Attach a PDF or image first.')
+            return b''
+
+        try:
+            raw = attachment.raw
+        except Exception:
+            raw = b''
+        if raw:
+            return raw
+
+        datas = attachment.datas
+        if datas:
+            return base64.b64decode(datas)
+
+        if raise_if_missing:
+            raise UserError(
+                'The attached PDF/image file is no longer available on the server. Re-upload the document and try again.'
+            )
+        return b''
+
     def _extract_pdf_text(self):
         self.ensure_one()
-        if not self.attachment_id or not self.attachment_id.datas:
+        if not self.attachment_id and not self.attachment_data:
             raise UserError('Attach a PDF or image first.')
 
-        binary = base64.b64decode(self.attachment_id.datas)
+        binary = self._get_attachment_binary()
         kind = self._detect_attachment_kind(
             binary,
-            filename=self.attachment_id.name,
-            mimetype=self.attachment_id.mimetype,
+            filename=self.attachment_filename or self.attachment_id.name,
+            mimetype=self.attachment_id.mimetype if self.attachment_id else None,
         )
         if kind == 'image':
             return self._extract_image_text_with_ocr(binary)
@@ -1462,6 +1504,7 @@ class InvoiceIngestJob(models.Model):
             if job.state not in {'pending', 'running', 'failed', 'needs_review'}:
                 continue
             try:
+                raise_on_error = raise_on_error or bool(self.env.context.get('skip_automotive_async_queue'))
                 job.write({
                     'state': 'running',
                     'error': False,
@@ -3079,6 +3122,7 @@ class InvoiceIngestJobLine(models.Model):
     label_display_name = fields.Char(
         string='Denumire',
         compute='_compute_label_display_fields',
+        store=True,
     )
     label_barcode_value = fields.Char(
         string='Cod de bare',
@@ -3568,6 +3612,8 @@ class InvoiceIngestUploadWizard(models.TransientModel):
             'source': 'ocr',
             'external_id': f'upload:{uuid.uuid4().hex}',
             'state': 'pending',
+            'attachment_data': base64.b64encode(binary),
+            'attachment_filename': filename,
             'partner_id': self.supplier_id.id if self.supplier_id else False,
             'ai_model': self.env['invoice.ingest.job']._default_ai_model(),
             'batch_uid': batch_uid,

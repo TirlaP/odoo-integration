@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-import json
 import logging
 import os
 import threading
@@ -8,12 +7,10 @@ import traceback
 
 import odoo.http
 
+from .runtime_logging import emit_runtime_event
 
 _logger = logging.getLogger(__name__)
 _PATCH_FLAG = "_automotive_request_trace_patched"
-_DEFAULT_TRACE_FILE = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "runtime_trace.log")
-)
 
 
 def _trace_enabled():
@@ -22,19 +19,15 @@ def _trace_enabled():
 
 
 def _write_trace_payload(event):
-    payload = json.dumps(event, ensure_ascii=True, sort_keys=True)
-    trace_file = os.getenv("AUTOMOTIVE_HTTP_TRACE_FILE", _DEFAULT_TRACE_FILE)
-    try:
-        with open(trace_file, "a", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.write("\n")
-    except OSError:
-        _logger.exception("Failed to write automotive HTTP trace file")
-
-    if event.get("outcome") in {"error", "exception"}:
-        _logger.error(payload)
-    else:
-        _logger.info(payload)
+    emit_runtime_event(
+        {
+            **dict(event or {}),
+            "category": "http",
+            "source": "request_trace",
+            "level": "error" if event.get("outcome") in {"error", "exception"} else "info",
+        },
+        persist_db=event.get("outcome") in {"error", "exception"},
+    )
 
 
 def _patch_dispatcher_error_handlers():

@@ -4,7 +4,15 @@ on:
   pull_request:
   push:
     branches:
+      - staging
       - main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   validate:
@@ -25,7 +33,7 @@ jobs:
           node-version: '20'
 
       - name: Make CI script executable
-        run: chmod +x scripts/ci_validate.sh scripts/build_invoice_ingest_react.sh
+        run: chmod +x scripts/ci_validate.sh scripts/build_invoice_ingest_react.sh scripts/smoke_test.sh
 
       - name: Run validation
         run: ./scripts/ci_validate.sh

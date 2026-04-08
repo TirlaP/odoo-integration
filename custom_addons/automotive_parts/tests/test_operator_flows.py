@@ -310,6 +310,8 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertEqual(job.batch_index, 1)
         self.assertEqual(job.state, 'pending')
         self.assertTrue(job.attachment_id, 'The ingest job should keep the uploaded file as an attachment.')
+        self.assertTrue(job.attachment_data, 'The ingest job should keep a DB-backed copy of the uploaded file bytes.')
+        self.assertEqual(job.attachment_filename, 'supplier_invoice.pdf')
 
         async_job = self.env['automotive.async.job'].search(
             [
@@ -444,6 +446,51 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertTrue(async_job, 'Invoice ingest cron should enqueue an async job for OCR imports.')
         self.assertEqual(async_job.state, 'done')
         self.assertEqual(job.state, 'needs_review')
+
+    def test_invoice_ingest_reads_db_backed_upload_bytes_when_attachment_is_missing(self):
+        payload = b'%PDF-1.4\n% db-backed upload\n'
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Stored Upload',
+            'source': 'ocr',
+            'state': 'pending',
+            'attachment_data': base64.b64encode(payload),
+            'attachment_filename': 'stored.pdf',
+        })
+
+        self.assertEqual(job._get_attachment_binary(), payload)
+        self.assertEqual(job._extract_pdf_text(), '')
+
+    def test_async_job_records_ingest_failures_in_last_error(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Missing File',
+            'source': 'ocr',
+            'state': 'pending',
+            'attachment_id': self.env['ir.attachment'].create({
+                'name': 'missing.pdf',
+                'type': 'binary',
+                'mimetype': 'application/pdf',
+                'res_model': 'invoice.ingest.job',
+            }).id,
+            'external_id': 'missing-file-checksum',
+        })
+
+        async_job = job._enqueue_async_processing()
+        processed = async_job._process_one(force=True)
+
+        self.assertFalse(processed)
+        self.assertEqual(job.state, 'failed')
+        self.assertIn('Re-upload the document', job.error or '')
+        self.assertEqual(async_job.state, 'queued')
+        self.assertEqual(async_job.last_error_type, 'UserError')
+        self.assertIn('Re-upload the document', async_job.last_error or '')
+        runtime_log = self.env['automotive.runtime.log'].search(
+            [('event', '=', 'automotive_async_job_failed'), ('related_res_id', '=', job.id)],
+            order='id desc',
+            limit=1,
+        )
+        self.assertTrue(runtime_log)
+        self.assertEqual(runtime_log.category, 'async_job')
+        self.assertIn('Re-upload the document', runtime_log.message or '')
 
     def test_invoice_ingest_shows_message_when_no_lines_extracted(self):
         job = self.env['invoice.ingest.job'].create({
@@ -899,6 +946,8 @@ class TestAutomotiveOperatorFlows(TransactionCase):
 
         self.assertEqual(action['type'], 'ir.actions.client')
         self.assertEqual(job.state, 'pending')
+        self.assertTrue(job.attachment_data)
+        self.assertEqual(job.attachment_filename, 'reprocess.pdf')
         async_job = self.env['automotive.async.job'].search(
             [
                 ('target_model', '=', 'invoice.ingest.job'),
