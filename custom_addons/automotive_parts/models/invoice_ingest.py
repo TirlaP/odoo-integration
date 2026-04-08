@@ -2066,7 +2066,7 @@ class InvoiceIngestJob(models.Model):
                 continue
             attempted.add(compact_code)
             try:
-                product = api.sync_product_from_tecdoc(
+                product = api.with_context(tecdoc_single_attempt=True).sync_product_from_tecdoc(
                     article_no=normalized_code,
                     supplier_id=supplier_id or None,
                 )

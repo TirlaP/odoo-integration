@@ -1207,12 +1207,15 @@ class TecDocAPI(models.Model):
 
         raw_details = None
         if article_no:
+            single_attempt = bool(self.env.context.get('tecdoc_single_attempt'))
             try:
                 raw_details = self.post_article_details_by_number_form(article_no)
             except UserError as e:
                 raw_details = None
                 last_error = e
                 _logger.info("TecDoc: article-number-details POST failed for %s: %s", article_no, e)
+                if single_attempt:
+                    raise last_error
                 try:
                     raw_details = self.get_article_details_by_number_typed(article_no)
                 except UserError:

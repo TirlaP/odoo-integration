@@ -1343,6 +1343,62 @@ Data sc:        06/05/2026
         self.assertEqual(normalized['match_method'], 'exact:tecdoc_auto_sync')
         self.assertEqual(normalized['supplier_brand'], 'ABE')
 
+    def test_invoice_ingest_auto_tecdoc_match_uses_single_attempt(self):
+        api = self.env['tecdoc.api'].create({
+            'name': 'TecDoc Single Attempt Auto Match',
+            'api_key': 'test-key',
+            'lang_id': 21,
+            'country_filter_id': 63,
+        })
+
+        calls = []
+        api_model = type(api)
+        original_form = api_model.post_article_details_by_number_form
+        original_typed = api_model.get_article_details_by_number_typed
+        original_number = api_model.get_article_details_by_number
+        original_search = api_model.search_articles_by_article_no
+        original_supplier = api_model.search_article_by_number_and_supplier
+
+        def fail_form(self, article_no, type_id=1, lang_id=None, country_filter_id=None):
+            calls.append('form')
+            raise UserError('Article not found in TecDoc.')
+
+        def fail_typed(self, article_no, type_id=1, lang_id=None, country_filter_id=None):
+            calls.append('typed')
+            raise AssertionError('single-attempt OCR match should not hit typed fallback')
+
+        def fail_number(self, article_no):
+            calls.append('number')
+            raise AssertionError('single-attempt OCR match should not hit number fallback')
+
+        def fail_search(self, article_no, article_type='ArticleNumber', lang_id=None):
+            calls.append('search')
+            raise AssertionError('single-attempt OCR match should not hit article search fallback')
+
+        def fail_supplier(self, article_no, supplier_id):
+            calls.append('supplier')
+            raise AssertionError('single-attempt OCR match should not hit supplier fallback')
+
+        api_model.post_article_details_by_number_form = fail_form
+        api_model.get_article_details_by_number_typed = fail_typed
+        api_model.get_article_details_by_number = fail_number
+        api_model.search_articles_by_article_no = fail_search
+        api_model.search_article_by_number_and_supplier = fail_supplier
+        try:
+            with self.assertRaises(UserError):
+                api.with_context(tecdoc_single_attempt=True).sync_product_from_tecdoc(
+                    article_no='C2W029ABE',
+                    supplier_id=4426,
+                )
+        finally:
+            api_model.post_article_details_by_number_form = original_form
+            api_model.get_article_details_by_number_typed = original_typed
+            api_model.get_article_details_by_number = original_number
+            api_model.search_articles_by_article_no = original_search
+            api_model.search_article_by_number_and_supplier = original_supplier
+
+        self.assertEqual(calls, ['form'])
+
     def test_tecdoc_sync_does_not_create_product_for_explicit_empty_article_response(self):
         api = self.env['tecdoc.api'].create({
             'name': 'TecDoc Empty Response API',
