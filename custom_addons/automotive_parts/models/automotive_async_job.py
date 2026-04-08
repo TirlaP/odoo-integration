@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 import json
+import logging
 from datetime import timedelta
 
 from odoo import api, fields, models, _
 from odoo.exceptions import UserError
 
 from ..runtime_logging import emit_runtime_event
+
+
+_logger = logging.getLogger(__name__)
 
 def _json_dumps(value):
     return json.dumps([] if value is None else value, ensure_ascii=False, default=str)
@@ -530,11 +534,12 @@ class AutomotiveAsyncJob(models.Model):
         if self.state == 'running' and not force:
             return False
 
+        attempt_count = self.attempt_count
         self.write({
             'state': 'running',
             'started_at': self.started_at or fields.Datetime.now(),
             'finished_at': False,
-            'attempt_count': self.attempt_count + (0 if force else 1),
+            'attempt_count': attempt_count + (0 if force else 1),
             'progress': max(self.progress, 1.0),
             'progress_message': _('Processing'),
         })
@@ -544,7 +549,9 @@ class AutomotiveAsyncJob(models.Model):
         try:
             result = self.with_context(skip_automotive_async_queue=True)._execute_target_call()
         except Exception as exc:
-            retryable = self.attempt_count < self.max_attempts
+            # SQL errors leave the transaction aborted; clear it before persisting failure state.
+            self.env.cr.rollback()
+            retryable = attempt_count < self.max_attempts
             vals = {
                 'last_error': str(exc),
                 'last_error_type': exc.__class__.__name__,
@@ -579,7 +586,10 @@ class AutomotiveAsyncJob(models.Model):
                 },
                 persist_db=True,
             )
-            self.message_post(body=_('Async job failed: %s') % (exc,))
+            try:
+                self.message_post(body=_('Async job failed: %s') % (exc,))
+            except Exception:
+                _logger.exception("Failed to post async job failure message for job %s", self.id)
             if self.batch_id:
                 self.batch_id._sync_state_from_jobs()
             return False
@@ -656,10 +666,16 @@ class AutomotiveAsyncJob(models.Model):
             claim_ids = self._claim_job_ids(min(remaining, 10))
             if not claim_ids:
                 break
-            for job in self.browse(claim_ids):
-                with self.env.cr.savepoint():
-                    job._process_one(force=True)
-                processed += 1
+            self.env.cr.commit()
+            for job_id in claim_ids:
+                with self.pool.cursor() as job_cr:
+                    job_env = api.Environment(job_cr, self.env.uid, dict(self.env.context))
+                    job = job_env[self._name].browse(job_id).exists()
+                    if not job:
+                        continue
+                    if job._process_one(force=True):
+                        processed += 1
+                    job_cr.commit()
                 if processed >= limit:
                     break
         return processed
