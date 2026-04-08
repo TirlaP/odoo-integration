@@ -1481,6 +1481,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             job_model._auto_create_or_update_receipt = original_auto_receipt
 
         self.assertEqual(action['type'], 'ir.actions.client')
+        self.assertTrue(job.account_move_id)
         self.assertEqual(job.state, 'done')
 
     def test_label_print_wizard_queue_mode_creates_async_job(self):

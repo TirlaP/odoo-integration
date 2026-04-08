@@ -2919,6 +2919,104 @@ class InvoiceIngestJob(models.Model):
             },
         }
 
+    def _ensure_draft_vendor_bill(self, supplier, move_type=None, payload=None):
+        self.ensure_one()
+        if not supplier:
+            normalized = self._get_normalized_invoice_payload()
+            hinted_name = (normalized.get('supplier_name') or '').strip()
+            hint = f' Extracted invoice supplier hint: {hinted_name}.' if hinted_name else ''
+            raise UserError(
+                'Select the invoice supplier first (the vendor who issued the invoice, '
+                'not the per-line product brand).'
+                f'{hint}'
+            )
+        if not self.invoice_number:
+            raise UserError('Set invoice number first.')
+
+        payload = payload or self._get_payload_dict()
+        move_type = move_type or self._infer_vendor_bill_move_type(payload=payload)
+        bill_origin = 'existing_linked'
+
+        if self.account_move_id:
+            move = self.account_move_id
+            if move.move_type != move_type:
+                if move.state != 'draft':
+                    raise UserError(
+                        'The linked vendor bill is already posted and its type does not match the imported document.'
+                    )
+                move.write({'move_type': move_type})
+            return move, bill_origin
+
+        existing_move = self.env['account.move'].search(
+            [
+                ('move_type', '=', move_type),
+                ('partner_id', '=', supplier.id),
+                ('ref', '=', self.invoice_number),
+                ('state', '!=', 'cancel'),
+            ],
+            order='id desc',
+            limit=1,
+        )
+        if existing_move:
+            self.write({'account_move_id': existing_move.id})
+            return existing_move, 'reused_existing'
+
+        line_vals = []
+        if self.line_ids:
+            for line in self.line_ids.sorted('sequence'):
+                description = (
+                    (line.product_description or '').strip()
+                    or (line.product_code or '').strip()
+                    or 'Imported invoice line'
+                )
+                vals = {
+                    'name': description,
+                    'quantity': line.quantity or 1.0,
+                    'price_unit': line.discounted_unit_price or line.unit_price or 0.0,
+                }
+                if line.product_id:
+                    vals['product_id'] = line.product_id.id
+                line_vals.append((0, 0, vals))
+        else:
+            parsed_lines = self._get_normalized_invoice_payload().get('invoice_lines', [])
+            for line in parsed_lines:
+                if not isinstance(line, dict):
+                    continue
+                quantity = self._safe_float(line.get('quantity'), default=1.0) or 1.0
+                unit_price = self._safe_float(line.get('unit_price'), default=0.0)
+                description = (
+                    (line.get('product_description') or '').strip()
+                    or (line.get('product_code') or '').strip()
+                    or 'Imported invoice line'
+                )
+                vals = {
+                    'name': description,
+                    'quantity': quantity,
+                    'price_unit': unit_price,
+                }
+                if line.get('matched_product_id'):
+                    vals['product_id'] = line['matched_product_id']
+                line_vals.append((0, 0, vals))
+
+        if not line_vals:
+            line_vals = [
+                (0, 0, {
+                    'name': 'Imported invoice (needs review)',
+                    'quantity': 1,
+                    'price_unit': self.amount_total or 0.0,
+                }),
+            ]
+
+        move = self.env['account.move'].create({
+            'move_type': move_type,
+            'partner_id': supplier.id,
+            'ref': self.invoice_number,
+            'invoice_date': self.invoice_date,
+            'invoice_line_ids': line_vals,
+        })
+        self.write({'account_move_id': move.id})
+        return move, 'created'
+
     def action_create_draft_vendor_bill(self):
         notifications = []
         for job in self:
@@ -2936,101 +3034,13 @@ class InvoiceIngestJob(models.Model):
                 raise UserError('This ingest job is flagged as a duplicate. Resolve the original invoice before creating a bill.')
 
             supplier = job._resolve_supplier_for_billing()
-            if not supplier:
-                normalized = job._get_normalized_invoice_payload()
-                hinted_name = (normalized.get('supplier_name') or '').strip()
-                hint = f' Extracted invoice supplier hint: {hinted_name}.' if hinted_name else ''
-                raise UserError(
-                    'Select the invoice supplier first (the vendor who issued the invoice, '
-                    'not the per-line product brand).'
-                    f'{hint}'
-                )
-            if not job.invoice_number:
-                raise UserError('Set invoice number first.')
-
             payload = job._get_payload_dict()
             move_type = job._infer_vendor_bill_move_type(payload=payload)
-            bill_origin = 'existing_linked'
-
-            if job.account_move_id:
-                move = job.account_move_id
-                if move.move_type != move_type:
-                    if move.state != 'draft':
-                        raise UserError(
-                            'The linked vendor bill is already posted and its type does not match the imported document.'
-                        )
-                    move.write({'move_type': move_type})
-            else:
-                existing_move = self.env['account.move'].search(
-                    [
-                        ('move_type', '=', move_type),
-                        ('partner_id', '=', supplier.id),
-                        ('ref', '=', job.invoice_number),
-                        ('state', '!=', 'cancel'),
-                    ],
-                    order='id desc',
-                    limit=1,
-                )
-                if existing_move:
-                    move = existing_move
-                    bill_origin = 'reused_existing'
-                else:
-                    line_vals = []
-                    if job.line_ids:
-                        for line in job.line_ids.sorted('sequence'):
-                            description = (
-                                (line.product_description or '').strip()
-                                or (line.product_code or '').strip()
-                                or 'Imported invoice line'
-                            )
-                            vals = {
-                                'name': description,
-                                'quantity': line.quantity or 1.0,
-                                'price_unit': line.discounted_unit_price or line.unit_price or 0.0,
-                            }
-                            if line.product_id:
-                                vals['product_id'] = line.product_id.id
-                            line_vals.append((0, 0, vals))
-                    else:
-                        parsed_lines = job._get_normalized_invoice_payload().get('invoice_lines', [])
-                        for line in parsed_lines:
-                            if not isinstance(line, dict):
-                                continue
-                            quantity = self._safe_float(line.get('quantity'), default=1.0) or 1.0
-                            unit_price = self._safe_float(line.get('unit_price'), default=0.0)
-                            description = (
-                                (line.get('product_description') or '').strip()
-                                or (line.get('product_code') or '').strip()
-                                or 'Imported invoice line'
-                            )
-                            vals = {
-                                'name': description,
-                                'quantity': quantity,
-                                'price_unit': unit_price,
-                            }
-                            if line.get('matched_product_id'):
-                                vals['product_id'] = line['matched_product_id']
-                            line_vals.append((0, 0, vals))
-
-                    if not line_vals:
-                        line_vals = [
-                            (0, 0, {
-                                'name': 'Imported invoice (needs review)',
-                                'quantity': 1,
-                                'price_unit': job.amount_total or 0.0,
-                            }),
-                        ]
-
-                    move = self.env['account.move'].create({
-                        'move_type': move_type,
-                        'partner_id': supplier.id,
-                        'ref': job.invoice_number,
-                        'invoice_date': job.invoice_date,
-                        'invoice_line_ids': line_vals,
-                    })
-                    bill_origin = 'created'
-
-            job.write({'account_move_id': move.id})
+            move, bill_origin = job._ensure_draft_vendor_bill(
+                supplier=supplier,
+                move_type=move_type,
+                payload=payload,
+            )
 
             if move_type == 'in_refund':
                 receipt_info = {
@@ -3112,6 +3122,10 @@ class InvoiceIngestJob(models.Model):
 
             supplier = job._resolve_supplier_for_billing() or job.partner_id
             move_type = job._infer_vendor_bill_move_type()
+            move, bill_origin = job._ensure_draft_vendor_bill(
+                supplier=supplier,
+                move_type=move_type,
+            )
             if move_type == 'in_refund':
                 receipt_info = {
                     'created': False,
@@ -3121,23 +3135,27 @@ class InvoiceIngestJob(models.Model):
                 }
             else:
                 receipt_info = job._auto_create_or_update_receipt(supplier=supplier)
-            if job.account_move_id and job.picking_id and move_type != 'in_refund':
+            if move and job.picking_id and move_type != 'in_refund':
                 job.picking_id.with_context(skip_audit_log=True).write({
-                    'supplier_invoice_id': job.account_move_id.id,
+                    'supplier_invoice_id': move.id,
                     'supplier_invoice_number': job.invoice_number,
                     'supplier_invoice_date': job.invoice_date,
                 })
             if receipt_info.get('reason') == 'credit_note':
-                notifications.append(f"{job.invoice_number or job.id}: receipt sync skipped for credit note / refund.")
+                notifications.append(
+                    f"{job.invoice_number or job.id}: draft bill ready; receipt sync skipped for credit note / refund."
+                )
             elif receipt_info.get('reason') == 'no_matched_products':
-                notifications.append(f"{job.invoice_number or job.id}: no matched lines, nothing received.")
+                notifications.append(
+                    f"{job.invoice_number or job.id}: draft bill ready, but receipt skipped (no matched products)."
+                )
             elif receipt_info.get('reason') == 'unmatched_lines':
                 notifications.append(
-                    f"{job.invoice_number or job.id}: receipt updated, but unmatched lines remain; validation left pending review."
+                    f"{job.invoice_number or job.id}: draft bill ready; receipt updated, but unmatched lines remain; validation left pending review."
                 )
             else:
                 notifications.append(
-                    f"{job.invoice_number or job.id}: receipt {'created' if receipt_info.get('created') else 'updated'} "
+                    f"{job.invoice_number or job.id}: draft bill ready; receipt {'created' if receipt_info.get('created') else 'updated'} "
                     f"({receipt_info.get('updated_lines', 0)} lines), validated={bool(receipt_info.get('validated'))}."
                 )
             job._audit_log(
@@ -3147,7 +3165,8 @@ class InvoiceIngestJob(models.Model):
                     'partner_id': supplier.id if supplier else False,
                     'move_type': move_type,
                     'picking_id': job.picking_id.id if job.picking_id else False,
-                    'account_move_id': job.account_move_id.id if job.account_move_id else False,
+                    'account_move_id': move.id if move else False,
+                    'bill_origin': bill_origin,
                     'receipt_info': receipt_info,
                     **job._audit_line_summary(),
                 },
@@ -3159,7 +3178,7 @@ class InvoiceIngestJob(models.Model):
                 'type': 'ir.actions.client',
                 'tag': 'display_notification',
                 'params': {
-                    'title': 'Receipt Sync',
+                    'title': 'Receipt + Bill Sync',
                     'message': notifications[0],
                     'type': 'success',
                     'sticky': False,
@@ -3827,7 +3846,7 @@ class InvoiceIngestUploadWizard(models.TransientModel):
             return self._open_existing_duplicate_document_action(duplicate_jobs[:1])
 
         batch_uid = uuid.uuid4().hex
-        batch_name = (self.pdf_filename or queued_documents[0]['filename'] or 'invoice batch').strip()
+        batch_name = (queued_documents[0]['filename'] or 'invoice batch').strip()
         async_batch = self.env['automotive.async.batch'].sudo().create({
             'name': batch_name,
             'job_type': 'invoice_ingest',

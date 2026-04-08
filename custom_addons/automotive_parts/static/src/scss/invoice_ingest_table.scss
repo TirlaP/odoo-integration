@@ -40,3 +40,19 @@
     max-height: none !important;
   }
 }
+
+.o_invoice_ingest_upload_attachments {
+  .o_field_many2many_binary .o_attach.btn {
+    background-color: var(--o-brand-odoo);
+    border-color: var(--o-brand-odoo);
+    color: #fff;
+  }
+
+  .o_field_many2many_binary .o_attach.btn:hover,
+  .o_field_many2many_binary .o_attach.btn:focus,
+  .o_field_many2many_binary .o_attach.btn:active {
+    background-color: color-mix(in srgb, var(--o-brand-odoo) 88%, #000);
+    border-color: color-mix(in srgb, var(--o-brand-odoo) 88%, #000);
+    color: #fff;
+  }
+}

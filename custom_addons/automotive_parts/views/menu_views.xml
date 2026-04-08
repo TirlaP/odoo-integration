@@ -4,19 +4,20 @@
     <menuitem id="menu_automotive_root"
               name="Piese Auto"
               sequence="10"
+              action="action_invoice_ingest_jobs"
               web_icon="automotive_parts,static/description/icon.png"/>
 
     <menuitem id="menu_invoice_ingest_upload_wizard"
               name="Import AI"
               parent="menu_automotive_root"
               action="action_invoice_ingest_upload_wizard"
-              sequence="10"/>
+              sequence="20"/>
 
     <menuitem id="menu_invoice_ingest_jobs"
               name="Importuri facturi"
               parent="menu_automotive_root"
               action="action_invoice_ingest_jobs"
-              sequence="20"/>
+              sequence="10"/>
 
     <menuitem id="menu_stock_workspace"
               name="Stocuri"
