@@ -358,6 +358,13 @@ class InvoiceIngestJob(models.Model):
         self.write(values)
         return values['batch_uid']
 
+    @api.model
+    def _trigger_async_job_processor(self):
+        cron = self.env.ref('automotive_parts.ir_cron_automotive_async_jobs', raise_if_not_found=False)
+        if cron:
+            cron.sudo()._trigger()
+        return True
+
     def action_reprocess(self):
         self.ensure_one()
         if self.source != 'ocr' or not self.attachment_id:
@@ -525,6 +532,7 @@ class InvoiceIngestJob(models.Model):
                     'progress': 0.0,
                     'progress_message': _('Queued, waiting for worker'),
                 })
+                self._trigger_async_job_processor()
             return existing_job
 
         effective_batch_name = batch_name or self.batch_name or self.display_name
@@ -553,6 +561,7 @@ class InvoiceIngestJob(models.Model):
             'progress': 0.0,
             'progress_message': _('Queued, waiting for worker'),
         })
+        self._trigger_async_job_processor()
         return async_job
 
     @api.model_create_multi

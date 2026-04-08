@@ -683,6 +683,37 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertEqual(job.async_progress_message, 'Worker claimed, starting import')
         self.assertGreaterEqual(job.async_progress_percent, 1.0)
 
+    def test_enqueue_async_processing_triggers_async_cron_immediately(self):
+        attachment = self.env['ir.attachment'].create({
+            'name': 'trigger_cron.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% trigger cron\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Trigger Cron',
+            'source': 'ocr',
+            'state': 'pending',
+            'attachment_id': attachment.id,
+            'external_id': 'trigger-cron-checksum',
+        })
+        cron = self.env.ref('automotive_parts.ir_cron_automotive_async_jobs')
+        original_trigger = type(cron)._trigger
+        trigger_calls = []
+
+        def traced_trigger(recordset, at=None):
+            if cron.id in recordset.ids:
+                trigger_calls.append(at)
+            return original_trigger(recordset, at=at)
+
+        with patch.object(type(cron), '_trigger', autospec=True, side_effect=traced_trigger):
+            async_job = job._enqueue_async_processing()
+
+        self.assertTrue(async_job)
+        self.assertEqual(async_job.state, 'queued')
+        self.assertEqual(len(trigger_calls), 1)
+
     def test_async_job_completes_after_live_progress_updates_same_row(self):
         attachment = self.env['ir.attachment'].create({
             'name': 'progress_commit.pdf',
