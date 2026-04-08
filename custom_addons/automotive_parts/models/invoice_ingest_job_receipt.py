@@ -107,6 +107,46 @@ class InvoiceIngestJobReceipt(models.Model):
         MoveLine = self.env['stock.move.line']
         SaleOrderLine = self.env['sale.order.line']
         updated = 0
+
+        def upsert_move(existing_move, move_vals, create_vals):
+            if existing_move:
+                existing_move.write(move_vals)
+                move = existing_move
+            else:
+                move = Move.create(create_vals)
+            if move.state == 'draft':
+                move._action_confirm()
+            return move
+
+        def upsert_move_line(move, quantity):
+            move_line = move.move_line_ids.filtered(
+                lambda line: line.product_id.id == product.id
+                and line.location_id.id == picking.location_id.id
+                and line.location_dest_id.id == picking.location_dest_id.id
+                and not line.lot_id
+            )[:1]
+            move_line_vals = {
+                'product_uom_id': product.uom_id.id,
+                'quantity': quantity,
+            }
+            if move_line:
+                move_line.write(move_line_vals)
+                extra_lines = (move.move_line_ids - move_line).filtered(
+                    lambda line: line.product_id.id == product.id and not line.lot_id and line.state != 'done'
+                )
+                if extra_lines:
+                    extra_lines.unlink()
+            else:
+                MoveLine.create({
+                    'picking_id': picking.id,
+                    'move_id': move.id,
+                    'product_id': product.id,
+                    'product_uom_id': product.uom_id.id,
+                    'location_id': picking.location_id.id,
+                    'location_dest_id': picking.location_dest_id.id,
+                    'quantity': quantity,
+                })
+
         for product_id, qty in product_quantities.items():
             if qty <= 0:
                 continue
@@ -165,7 +205,7 @@ class InvoiceIngestJobReceipt(models.Model):
 
                     allocated_qty = min(remaining_qty, line_needed_qty, needed_qty)
                     linked_sale_lines = target_move._get_sale_order_lines()
-                    move = picking.move_ids_without_package.filtered(
+                    existing_move = picking.move_ids_without_package.filtered(
                         lambda move: move.product_id == product
                         and move.state not in {'done', 'cancel'}
                         and target_move in move.move_dest_ids
@@ -176,67 +216,48 @@ class InvoiceIngestJobReceipt(models.Model):
                         'product_uom': product.uom_id.id,
                         'move_dest_ids': [(6, 0, [target_move.id])],
                     }
+                    create_vals = {
+                        'name': product.display_name,
+                        'product_id': product.id,
+                        'picking_id': picking.id,
+                        'location_id': picking.location_id.id,
+                        'location_dest_id': picking.location_dest_id.id,
+                        'product_uom_qty': allocated_qty,
+                        'quantity': allocated_qty,
+                        'product_uom': product.uom_id.id,
+                        'move_dest_ids': [(6, 0, [target_move.id])],
+                    }
                     if len(linked_sale_lines) == 1:
-                        move_vals['sale_line_id'] = linked_sale_lines.id
-                        move_vals['group_id'] = linked_sale_lines.order_id.procurement_group_id.id
-                    if move:
-                        move.write(move_vals)
-                    else:
-                        move_vals.update({
-                            'name': product.display_name,
-                            'product_id': product.id,
-                            'picking_id': picking.id,
-                            'location_id': picking.location_id.id,
-                            'location_dest_id': picking.location_dest_id.id,
-                        })
-                        move = Move.create(move_vals)
-                    if move.state == 'draft':
-                        move._action_confirm()
-
-                    move_line = move.move_line_ids.filtered(
-                        lambda line: line.product_id.id == product.id
-                        and line.location_id.id == picking.location_id.id
-                        and line.location_dest_id.id == picking.location_dest_id.id
-                        and not line.lot_id
-                    )[:1]
-                    if move_line:
-                        move_line.write({
-                            'product_uom_id': product.uom_id.id,
-                            'quantity': allocated_qty,
-                        })
-                        extra_lines = (move.move_line_ids - move_line).filtered(
-                            lambda line: line.product_id.id == product.id and not line.lot_id and line.state != 'done'
-                        )
-                        if extra_lines:
-                            extra_lines.unlink()
-                    else:
-                        MoveLine.create({
-                            'picking_id': picking.id,
-                            'move_id': move.id,
-                            'product_id': product.id,
-                            'product_uom_id': product.uom_id.id,
-                            'location_id': picking.location_id.id,
-                            'location_dest_id': picking.location_dest_id.id,
-                            'quantity': allocated_qty,
-                        })
+                        sale_link_vals = {
+                            'sale_line_id': linked_sale_lines.id,
+                            'group_id': linked_sale_lines.order_id.procurement_group_id.id,
+                        }
+                        move_vals.update(sale_link_vals)
+                        create_vals.update(sale_link_vals)
+                    move = upsert_move(
+                        existing_move=existing_move,
+                        move_vals=move_vals,
+                        create_vals=create_vals,
+                    )
+                    upsert_move_line(move, allocated_qty)
                     updated += 1
                     remaining_qty -= allocated_qty
                     line_needed_qty -= allocated_qty
 
             if remaining_qty > 0:
-                move = picking.move_ids_without_package.filtered(
+                existing_move = picking.move_ids_without_package.filtered(
                     lambda m: m.product_id.id == product.id
                     and m.state not in {'done', 'cancel'}
                     and not m.move_dest_ids
                 )[:1]
-                if move:
-                    move.write({
+                move = upsert_move(
+                    existing_move=existing_move,
+                    move_vals={
                         'product_uom_qty': remaining_qty,
                         'quantity': remaining_qty,
                         'product_uom': product.uom_id.id,
-                    })
-                else:
-                    move = Move.create({
+                    },
+                    create_vals={
                         'name': product.display_name,
                         'product_id': product.id,
                         'product_uom_qty': remaining_qty,
@@ -245,36 +266,9 @@ class InvoiceIngestJobReceipt(models.Model):
                         'picking_id': picking.id,
                         'location_id': picking.location_id.id,
                         'location_dest_id': picking.location_dest_id.id,
-                    })
-                if move.state == 'draft':
-                    move._action_confirm()
-
-                move_line = move.move_line_ids.filtered(
-                    lambda l: l.product_id.id == product.id
-                    and l.location_id.id == picking.location_id.id
-                    and l.location_dest_id.id == picking.location_dest_id.id
-                    and not l.lot_id
-                )[:1]
-                if move_line:
-                    move_line.write({
-                        'product_uom_id': product.uom_id.id,
-                        'quantity': remaining_qty,
-                    })
-                    extra_lines = (move.move_line_ids - move_line).filtered(
-                        lambda l: l.product_id.id == product.id and not l.lot_id and l.state != 'done'
-                    )
-                    if extra_lines:
-                        extra_lines.unlink()
-                else:
-                    MoveLine.create({
-                        'picking_id': picking.id,
-                        'move_id': move.id,
-                        'product_id': product.id,
-                        'product_uom_id': product.uom_id.id,
-                        'location_id': picking.location_id.id,
-                        'location_dest_id': picking.location_dest_id.id,
-                        'quantity': remaining_qty,
-                    })
+                    },
+                )
+                upsert_move_line(move, remaining_qty)
                 updated += 1
 
         affected_orders = self.env['sale.order']
@@ -348,35 +342,18 @@ class InvoiceIngestJobReceipt(models.Model):
     def _prepare_draft_vendor_bill_lines(self):
         self.ensure_one()
         line_vals = []
-        if self.line_ids:
-            for line in self.line_ids.sorted('sequence'):
-                description = (
-                    (line.product_description or '').strip()
-                    or (line.product_code or '').strip()
-                    or 'Imported invoice line'
-                )
-                line_vals.append((0, 0, self._prepare_vendor_bill_line_vals(
-                    description=description,
-                    quantity=line.quantity or 1.0,
-                    price_unit=line.discounted_unit_price or line.unit_price or 0.0,
-                    product_id=line.product_id.id if line.product_id else False,
-                )))
-        else:
-            parsed_lines = self._get_normalized_invoice_payload().get('invoice_lines', [])
-            for line in parsed_lines:
-                if not isinstance(line, dict):
-                    continue
-                description = (
-                    (line.get('product_description') or '').strip()
-                    or (line.get('product_code') or '').strip()
-                    or 'Imported invoice line'
-                )
-                line_vals.append((0, 0, self._prepare_vendor_bill_line_vals(
-                    description=description,
-                    quantity=self._safe_float(line.get('quantity'), default=1.0) or 1.0,
-                    price_unit=self._safe_float(line.get('unit_price'), default=0.0),
-                    product_id=line.get('matched_product_id') or False,
-                )))
+        for line in self._iter_effective_normalized_lines():
+            description = (
+                (line.get('product_description') or '').strip()
+                or (line.get('product_code') or '').strip()
+                or 'Imported invoice line'
+            )
+            line_vals.append((0, 0, self._prepare_vendor_bill_line_vals(
+                description=description,
+                quantity=self._safe_float(line.get('quantity'), default=1.0) or 1.0,
+                price_unit=self._safe_float(line.get('unit_price'), default=0.0),
+                product_id=line.get('matched_product_id') or False,
+            )))
 
         if line_vals:
             return line_vals
@@ -500,6 +477,61 @@ class InvoiceIngestJobReceipt(models.Model):
             'receipt_info': receipt_info,
         }
 
+    def _run_bill_receipt_action(
+        self,
+        *,
+        duplicate_description,
+        duplicate_user_message,
+        audit_description,
+        notification_title,
+        draft_bill,
+        supplier_resolver,
+        payload_resolver=None,
+    ):
+        notifications = []
+        for job in self:
+            job._raise_if_duplicate_job(
+                description=f'{duplicate_description}: {job.display_name}',
+                user_message=duplicate_user_message,
+            )
+            supplier = supplier_resolver(job)
+            payload = payload_resolver(job) if payload_resolver else None
+            flow = job._execute_bill_receipt_flow(supplier=supplier, payload=payload)
+            receipt_info = flow['receipt_info']
+            notifications.append(job._format_bill_receipt_notification(
+                receipt_info,
+                draft_bill=draft_bill,
+            ))
+            job._audit_log(
+                action='custom',
+                description=f'{audit_description}: {job.display_name}',
+                new_values=job._build_bill_receipt_audit_values(
+                    supplier=flow['supplier'],
+                    move=flow['move'],
+                    bill_origin=flow['bill_origin'],
+                    move_type=flow['move_type'],
+                    receipt_info=receipt_info,
+                ),
+            )
+            job._sync_workflow_state(
+                receipt_info=receipt_info,
+                move_type=flow['move_type'],
+            )
+
+        if len(self) == 1 and notifications:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': notification_title,
+                    'message': notifications[0],
+                    'type': 'success',
+                    'sticky': False,
+                    'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
+                },
+            }
+        return True
+
     def _format_bill_receipt_notification(self, receipt_info, draft_bill=False):
         self.ensure_one()
         reference = self.invoice_number or self.id
@@ -539,90 +571,22 @@ class InvoiceIngestJobReceipt(models.Model):
         }
 
     def action_create_draft_vendor_bill(self):
-        notifications = []
-        for job in self:
-            job._raise_if_duplicate_job(
-                description=f'Invoice bill creation blocked for duplicate job: {job.display_name}',
-                user_message='This ingest job is flagged as a duplicate. Resolve the original invoice before creating a bill.',
-            )
-            flow = job._execute_bill_receipt_flow(
-                supplier=job._resolve_supplier_for_billing(),
-                payload=job._get_payload_dict(),
-            )
-            notifications.append(job._format_bill_receipt_notification(
-                flow['receipt_info'],
-                draft_bill=False,
-            ))
-            job._audit_log(
-                action='custom',
-                description=f'Invoice ingest vendor bill prepared: {job.display_name}',
-                new_values=job._build_bill_receipt_audit_values(
-                    supplier=flow['supplier'],
-                    move=flow['move'],
-                    bill_origin=flow['bill_origin'],
-                    move_type=flow['move_type'],
-                    receipt_info=flow['receipt_info'],
-                ),
-            )
-            job._sync_workflow_state(
-                receipt_info=flow['receipt_info'],
-                move_type=flow['move_type'],
-            )
-
-        if len(self) == 1 and notifications:
-            return {
-                'type': 'ir.actions.client',
-                'tag': 'display_notification',
-                'params': {
-                    'title': 'Invoice Import',
-                    'message': notifications[0],
-                    'type': 'success',
-                    'sticky': False,
-                    'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
-                },
-            }
-        return True
+        return self._run_bill_receipt_action(
+            duplicate_description='Invoice bill creation blocked for duplicate job',
+            duplicate_user_message='This ingest job is flagged as a duplicate. Resolve the original invoice before creating a bill.',
+            audit_description='Invoice ingest vendor bill prepared',
+            notification_title='Invoice Import',
+            draft_bill=False,
+            supplier_resolver=lambda job: job._resolve_supplier_for_billing(),
+            payload_resolver=lambda job: job._get_payload_dict(),
+        )
 
     def action_sync_receipt_stock(self):
-        notifications = []
-        for job in self:
-            job._raise_if_duplicate_job(
-                description=f'Invoice receipt sync blocked for duplicate job: {job.display_name}',
-                user_message='This ingest job is flagged as a duplicate. Resolve the original invoice before syncing receipt stock.',
-            )
-            flow = job._execute_bill_receipt_flow(
-                supplier=job._resolve_supplier_for_billing() or job.partner_id,
-            )
-            notifications.append(job._format_bill_receipt_notification(
-                flow['receipt_info'],
-                draft_bill=True,
-            ))
-            job._audit_log(
-                action='custom',
-                description=f'Invoice ingest receipt sync executed: {job.display_name}',
-                new_values=job._build_bill_receipt_audit_values(
-                    supplier=flow['supplier'],
-                    move=flow['move'],
-                    bill_origin=flow['bill_origin'],
-                    move_type=flow['move_type'],
-                    receipt_info=flow['receipt_info'],
-                ),
-            )
-            job._sync_workflow_state(
-                receipt_info=flow['receipt_info'],
-                move_type=flow['move_type'],
-            )
-
-        if len(self) == 1 and notifications:
-            return {
-                'type': 'ir.actions.client',
-                'tag': 'display_notification',
-                'params': {
-                    'title': 'Receipt + Bill Sync',
-                    'message': notifications[0],
-                    'type': 'success',
-                    'sticky': False,
-                    'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
-                },
-            }
-        return True
+        return self._run_bill_receipt_action(
+            duplicate_description='Invoice receipt sync blocked for duplicate job',
+            duplicate_user_message='This ingest job is flagged as a duplicate. Resolve the original invoice before syncing receipt stock.',
+            audit_description='Invoice ingest receipt sync executed',
+            notification_title='Receipt + Bill Sync',
+            draft_bill=True,
+            supplier_resolver=lambda job: job._resolve_supplier_for_billing() or job.partner_id,
+        )

@@ -25,58 +25,15 @@ from .invoice_ingest_parse_utils import (
     extract_invoice_header_from_text,
     extract_invoice_number_from_filename,
     extract_invoice_totals_from_text,
-    normalize_cui_digits,
     safe_date,
     safe_float,
     safe_money,
 )
-from .invoice_ingest import _logger
+from .invoice_ingest_shared import _logger
 
 
 class InvoiceIngestJobExtract(models.Model):
     _inherit = 'invoice.ingest.job'
-    def _normalize_payload_line(self, line, supplier=None, default_vat_rate=0.0):
-        self.ensure_one()
-        if not isinstance(line, dict):
-            return False
-
-        description = (line.get('product_description') or line.get('description') or '').strip()
-        resolved = self._resolve_line_match_data(
-            raw_code=(
-                line.get('product_code_raw')
-                or line.get('product_code')
-                or line.get('description')
-                or line.get('product_description')
-                or ''
-            ),
-            product_code=line.get('product_code'),
-            product_description=description,
-            supplier=supplier,
-            supplier_brand=line.get('supplier_brand'),
-        )
-
-        quantity = self._safe_float(
-            line.get('quantity') or line.get('invoiced_quantity') or line.get('credited_quantity'),
-            default=1.0,
-        ) or 1.0
-        unit_price = self._safe_float(
-            line.get('unit_price')
-            or line.get('price_unit')
-            or line.get('price'),
-            default=0.0,
-        )
-        line_total = self._safe_float(line.get('line_total'), default=0.0)
-        if not unit_price and line_total and quantity:
-            unit_price = line_total / quantity
-
-        return {
-            'quantity': quantity,
-            'product_description': description,
-            'unit_price': unit_price,
-            'vat_rate': self._safe_float(line.get('vat_rate'), default=default_vat_rate or self.vat_rate or 0.0),
-            **resolved,
-        }
-
     @api.model
     def _infer_document_move_type_from_xml(self, xml_payload):
         return infer_document_move_type_from_xml(xml_payload)
@@ -388,15 +345,17 @@ class InvoiceIngestJobExtract(models.Model):
                 inferred = round((vat_amount / line_total) * 100.0, 2)
                 if inferred > 0:
                     vat_rate = inferred
-            out.append({
-                'quantity': row.get('quantity') or 1.0,
-                'product_code_raw': parsed.get('product_code_raw') or description,
-                'product_code': parsed.get('product_code_primary') or False,
-                'supplier_brand': parsed.get('supplier_brand') or '',
-                'product_description': description,
-                'unit_price': row.get('unit_price') or 0.0,
-                'vat_rate': vat_rate,
-            })
+            out.append(self._build_normalized_invoice_line(
+                quantity=row.get('quantity') or 1.0,
+                product_description=description,
+                unit_price=row.get('unit_price') or 0.0,
+                vat_rate=vat_rate,
+                resolved={
+                    'product_code_raw': parsed.get('product_code_raw') or description,
+                    'product_code': parsed.get('product_code_primary') or False,
+                    'supplier_brand': parsed.get('supplier_brand') or '',
+                },
+            ))
         return out
 
     @api.model
@@ -452,83 +411,6 @@ class InvoiceIngestJobExtract(models.Model):
     def _safe_date(self, value):
         return safe_date(value)
 
-    def _find_supplier_partner(self, supplier_name=None, supplier_code=None, supplier_vat=None):
-        self.ensure_one()
-        Partner = self.env['res.partner']
-        if self.partner_id:
-            return self.partner_id
-
-        if supplier_vat:
-            clean_vat = self._normalize_cui_digits(supplier_vat)
-            if clean_vat:
-                partner = (
-                    Partner.search([('vat', '=', clean_vat)], limit=1)
-                    or Partner.search([('vat', '=ilike', f'RO{clean_vat}')], limit=1)
-                    or Partner.search([('cui', '=', clean_vat)], limit=1)
-                    or Partner.search([('cui', '=ilike', f'RO{clean_vat}')], limit=1)
-                )
-                if partner:
-                    return partner
-
-        # Try exact code first (legacy app seems to use short codes like AD/MT/CX).
-        if supplier_code:
-            clean_code = supplier_code.strip()
-            partner = Partner.search([('name', '=ilike', clean_code)], limit=1)
-            if partner:
-                return partner
-            partner = Partner.search([('ref', '=ilike', clean_code)], limit=1)
-            if partner:
-                return partner
-
-        if supplier_name:
-            partner = Partner.search([('name', '=ilike', supplier_name.strip())], limit=1)
-            if partner:
-                return partner
-            partner = Partner.search([('name', 'ilike', supplier_name.strip())], limit=1)
-            if partner:
-                return partner
-        return Partner
-
-    def _get_or_create_supplier_partner(self, supplier_name=None, supplier_code=None, supplier_vat=None):
-        self.ensure_one()
-        partner = self._find_supplier_partner(
-            supplier_name=supplier_name,
-            supplier_code=supplier_code,
-            supplier_vat=supplier_vat,
-        )
-        if partner:
-            return partner
-
-        clean_name = (supplier_name or '').strip()
-        clean_vat = self._normalize_cui_digits(supplier_vat)
-        if not clean_name and not clean_vat:
-            return self.env['res.partner']
-
-        if not clean_name:
-            clean_name = f'Supplier {clean_vat}'
-
-        vals = {
-            'name': clean_name,
-            'company_type': 'company',
-            'supplier_rank': 1,
-        }
-        if 'client_type' in self.env['res.partner']._fields:
-            vals['client_type'] = 'company'
-        if clean_vat:
-            vals['vat'] = f'RO{clean_vat}'
-            if 'cui' in self.env['res.partner']._fields:
-                vals['cui'] = clean_vat
-
-        partner = self.env['res.partner'].sudo().create(vals)
-        _logger.info(
-            "Auto-created supplier partner id=%s name=%s vat=%s for invoice ingest job id=%s",
-            partner.id,
-            partner.name,
-            vals.get('vat'),
-            self.id,
-        )
-        return partner
-
     @api.model
     def _extract_invoice_number_from_filename(self, filename):
         return extract_invoice_number_from_filename(filename)
@@ -537,51 +419,6 @@ class InvoiceIngestJobExtract(models.Model):
     def _extract_invoice_header_from_text(self, text, filename=None):
         return extract_invoice_header_from_text(text, filename=filename)
 
-    @api.model
-    def _normalize_cui_digits(self, value):
-        return normalize_cui_digits(value)
-
-    def _resolve_supplier_for_billing(self):
-        """Best-effort supplier resolution for bill creation."""
-        self.ensure_one()
-        if self.partner_id:
-            return self.partner_id
-
-        # 1) If job is linked to a reception, use its supplier.
-        if self.picking_id and self.picking_id.partner_id:
-            self.partner_id = self.picking_id.partner_id.id
-            return self.partner_id
-
-        payload = self._get_payload_dict()
-
-        # 2) OpenAI normalized supplier hints.
-        normalized = self._get_normalized_invoice_payload()
-        supplier = self._get_or_create_supplier_partner(
-            supplier_name=(normalized.get('supplier_name') or '').strip(),
-            supplier_code=(normalized.get('supplier_code') or '').strip(),
-            supplier_vat=(normalized.get('supplier_vat') or '').strip(),
-        )
-        if supplier:
-            self.partner_id = supplier.id
-            return self.partner_id
-
-        # 3) ANAF parsed CUI fallback.
-        parsed_payload = payload.get('parsed') or {}
-        supplier_cui = self._normalize_cui_digits(parsed_payload.get('supplier_cui'))
-        if supplier_cui:
-            Partner = self.env['res.partner']
-            supplier = (
-                Partner.search([('vat', '=', supplier_cui)], limit=1)
-                or Partner.search([('vat', '=ilike', f'RO{supplier_cui}')], limit=1)
-                or Partner.search([('cui', '=', supplier_cui)], limit=1)
-                or Partner.search([('cui', '=ilike', f'RO{supplier_cui}')], limit=1)
-            )
-            if supplier:
-                self.partner_id = supplier.id
-                return self.partner_id
-
-        return self.env['res.partner']
-
     def _process_ingest_job(self, raise_on_error=False):
         for job in self:
             if job.state not in {'pending', 'running', 'failed', 'needs_review'}:
@@ -589,22 +426,16 @@ class InvoiceIngestJobExtract(models.Model):
             try:
                 job._ensure_async_not_cancelled()
                 raise_on_error = raise_on_error or bool(self.env.context.get('skip_automotive_async_queue'))
-                start_values = {'finished_at': False}
-                if job.state != 'running':
-                    start_values['state'] = 'running'
-                if job.error:
-                    start_values['error'] = False
-                if not job.started_at:
-                    start_values['started_at'] = fields.Datetime.now()
+                start_values = job._build_running_state_values()
                 if start_values:
                     job.write(start_values)
                 job._ensure_async_not_cancelled()
                 if job.source == 'ocr' and job.attachment_id:
                     job.action_extract_with_openai()
                 elif job.account_move_id:
-                    job.write({'state': 'done', 'finished_at': fields.Datetime.now()})
+                    job.write(job._build_finished_state_values('done'))
                 else:
-                    job.write({'state': 'needs_review', 'finished_at': fields.Datetime.now()})
+                    job.write(job._build_finished_state_values('needs_review'))
                 if job.state in {'done', 'needs_review'} and not job.finished_at:
                     job.write({'finished_at': fields.Datetime.now()})
             except Exception as exc:  # noqa: BLE001
@@ -616,11 +447,7 @@ class InvoiceIngestJobExtract(models.Model):
                             'finished_at': fields.Datetime.now(),
                         })
                     continue
-                job.write({
-                    'state': 'failed',
-                    'error': str(exc) or repr(exc),
-                    'finished_at': fields.Datetime.now(),
-                })
+                job.write(job._build_failed_state_values(str(exc) or repr(exc)))
                 if raise_on_error:
                     raise
         return True
@@ -752,26 +579,38 @@ class InvoiceIngestJobExtract(models.Model):
                 )
 
             job._report_async_progress(80.0, _('Matching products and normalizing lines'))
+            total_lines = len(lines)
+            job._emit_match_runtime_event(
+                phase='stage_start',
+                detail='starting extracted line normalization',
+                line_total=total_lines,
+                supplier=supplier,
+                extra={
+                    'ai_line_count': len(ai_lines),
+                    'fallback_line_count': len(fallback_lines),
+                    'normalized_line_target_count': total_lines,
+                },
+            )
             normalized_lines = []
-            for line in lines:
+            for line_index, line in enumerate(lines, start=1):
                 job._ensure_async_not_cancelled()
-                if not isinstance(line, dict):
-                    continue
-                raw_code = (line.get('product_code_raw') or line.get('product_code') or '').strip()
-                description = (line.get('product_description') or '').strip()
-                resolved = job._resolve_line_match_data(
-                    raw_code=raw_code,
-                    product_code=line.get('product_code'),
-                    product_description=description,
+                normalized_line = job.with_context(
+                    invoice_ingest_match_line_index=line_index,
+                    invoice_ingest_match_line_total=total_lines,
+                )._normalize_payload_line(
+                    line,
                     supplier=supplier,
-                    supplier_brand=line.get('supplier_brand'),
+                    default_vat_rate=pdf_totals.get('vat_rate') or self._safe_float(parsed.get('vat_rate')),
                 )
-                normalized_lines.append({
-                    'quantity': self._safe_float(line.get('quantity'), default=1.0) or 1.0,
-                    'product_description': description,
-                    'unit_price': self._safe_float(line.get('unit_price'), default=0.0),
-                    **resolved,
-                })
+                if normalized_line:
+                    normalized_lines.append(normalized_line)
+            job._emit_match_runtime_event(
+                phase='stage_complete',
+                detail='finished extracted line normalization',
+                line_total=total_lines,
+                supplier=supplier,
+                extra={'normalized_line_count': len(normalized_lines)},
+            )
 
             payload = job._get_payload_dict()
             payload['openai'] = {

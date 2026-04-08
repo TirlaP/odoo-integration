@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import re
 
-from .invoice_ingest import (
+from .invoice_ingest_shared import (
     INVOICE_CODE_STOP_WORDS,
     INVOICE_META_PREFIXES,
     INVOICE_SUPPLIER_NOISE_TOKENS,

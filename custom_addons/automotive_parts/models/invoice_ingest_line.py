@@ -5,6 +5,8 @@ from math import ceil
 from odoo import api, fields, models
 from odoo.exceptions import UserError
 
+from .invoice_ingest_shared import snapshot_record
+
 
 class InvoiceIngestJobLine(models.Model):
     _name = 'invoice.ingest.job.line'
@@ -125,18 +127,7 @@ class InvoiceIngestJobLine(models.Model):
     )
 
     def _audit_snapshot(self, field_names=None):
-        self.ensure_one()
-        tracked_fields = field_names or self._AUDIT_FIELDS
-        snapshot = {}
-        for field_name in tracked_fields:
-            if field_name not in self._fields:
-                continue
-            value = self[field_name]
-            if isinstance(value, models.BaseModel):
-                snapshot[field_name] = value.ids
-            else:
-                snapshot[field_name] = value
-        return snapshot
+        return snapshot_record(self, field_names or self._AUDIT_FIELDS)
 
     def write(self, vals):
         context = dict(self.env.context or {})
@@ -237,32 +228,28 @@ class InvoiceIngestJobLine(models.Model):
     def _compute_label_display_fields(self):
         for line in self:
             line.label_display_name = line.product_id.display_name or line.product_description or ''
-            line.matched_internal_code = (
-                line.manual_internal_code
-                or line.product_id.default_code
-                or ''
-            )
-            line.label_barcode_value = (
-                line.manual_barcode_value
-                or line.product_id.barcode
-                or line.product_id.barcode_internal
-                or line.product_code
-                or line.product_code_raw
-                or line.product_id.default_code
-                or ''
-            )
+            line.matched_internal_code = line.manual_internal_code or line._default_internal_code_value()
+            line.label_barcode_value = line.manual_barcode_value or line._default_barcode_value()
+
+    def _default_internal_code_value(self):
+        self.ensure_one()
+        return self.product_id.default_code or ''
+
+    def _default_barcode_value(self):
+        self.ensure_one()
+        return (
+            self.product_id.barcode
+            or self.product_id.barcode_internal
+            or self.product_code
+            or self.product_code_raw
+            or self.product_id.default_code
+            or ''
+        )
 
     def _inverse_label_display_fields(self):
         for line in self:
-            default_internal_code = line.product_id.default_code or ''
-            default_barcode_value = (
-                line.product_id.barcode
-                or line.product_id.barcode_internal
-                or line.product_code
-                or line.product_code_raw
-                or line.product_id.default_code
-                or ''
-            )
+            default_internal_code = line._default_internal_code_value()
+            default_barcode_value = line._default_barcode_value()
             line.manual_internal_code = (
                 False
                 if (line.matched_internal_code or '') == default_internal_code
@@ -302,43 +289,13 @@ class InvoiceIngestJobLine(models.Model):
         for line in self:
             if line.product_id or not line.product_code or not line.job_id:
                 continue
-            parsed = line.job_id._parse_invoice_line_identity(
-                line.product_code,
+            resolved = line.job_id._resolve_line_match_data(
+                raw_code=line.product_code_raw or line.product_code,
+                product_code=line.product_code,
                 product_description=line.product_description,
-                supplier_hint=line.supplier_brand,
-            )
-            if parsed.get('product_code_primary'):
-                line.product_code = parsed['product_code_primary']
-            if parsed.get('supplier_brand'):
-                line.supplier_brand = parsed['supplier_brand']
-            if not line.product_code_raw:
-                line.product_code_raw = parsed.get('product_code_raw') or line.product_code
-            product, meta = line.job_id._match_product_with_meta(
-                line.product_code,
                 supplier=line.job_id.partner_id,
-                product_description=line.product_description,
                 supplier_brand=line.supplier_brand,
-                extra_codes=parsed.get('code_candidates') or [],
             )
-            resolved = {
-                'product_code_raw': line.product_code_raw or parsed.get('product_code_raw') or line.product_code,
-                'product_code': line.product_code or parsed.get('product_code_primary') or False,
-                'supplier_brand': line.supplier_brand or parsed.get('supplier_brand') or '',
-                'supplier_brand_id': False,
-                'matched_product_id': False,
-                'match_method': False,
-                'match_confidence': 0.0,
-            }
-            if product:
-                resolved.update({
-                    'matched_product_id': product.id,
-                    'match_method': meta.get('method'),
-                    'match_confidence': meta.get('confidence', 0.0),
-                })
-                canonical_brand, canonical_supplier_id = line.job_id._brand_from_matched_product(product)
-                if canonical_brand:
-                    resolved['supplier_brand'] = canonical_brand
-                resolved['supplier_brand_id'] = canonical_supplier_id or False
             line._apply_resolved_match(resolved, write=False)
 
     @api.onchange('job_id')

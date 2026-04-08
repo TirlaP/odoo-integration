@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 import re
+from time import monotonic
 
 from odoo import api, models
 from odoo.exceptions import UserError
 from odoo.osv import expression
 
+from ..runtime_logging import emit_runtime_event
 from .invoice_ingest_code_utils import (
     allow_progressive_tail_trim_name,
     build_openai_extraction_prompt,
@@ -18,7 +20,7 @@ from .invoice_ingest_code_utils import (
     progressive_tail_trim_candidates,
     trimmed_code_variants,
 )
-from .invoice_ingest import (
+from .invoice_ingest_shared import (
     AUTO_MATCH_CONFIDENCE_THRESHOLD,
     _logger,
 )
@@ -26,6 +28,81 @@ from .invoice_ingest import (
 
 class InvoiceIngestJobMatch(models.Model):
     _inherit = 'invoice.ingest.job'
+
+    @api.model
+    def _format_match_trace_message(self, line_index=None, line_total=None, detail=''):
+        if line_index and line_total:
+            return f'Line {line_index}/{line_total}: {detail}'
+        if line_index:
+            return f'Line {line_index}: {detail}'
+        return detail
+
+    def _emit_match_runtime_event(
+        self,
+        phase,
+        detail,
+        line_index=None,
+        line_total=None,
+        raw_code='',
+        product_code='',
+        product_description='',
+        supplier=None,
+        supplier_brand='',
+        match_meta=None,
+        matched_product=None,
+        elapsed_ms=None,
+        extra=None,
+    ):
+        self.ensure_one()
+        async_job = self._get_context_async_job()
+        supplier_id = False
+        if isinstance(supplier, models.BaseModel):
+            supplier = supplier[:1]
+            supplier_id = supplier.id if supplier and supplier._name == 'res.partner' else False
+        elif supplier:
+            try:
+                supplier_id = int(supplier)
+            except Exception:
+                supplier_id = False
+
+        payload = {
+            'event': 'invoice_ingest_match_trace',
+            'level': 'info',
+            'category': 'invoice_ingest',
+            'source': 'invoice.ingest.job',
+            'outcome': 'progress',
+            'db': self.env.cr.dbname,
+            'uid': self.env.uid,
+            'job_type': 'invoice_ingest',
+            'job_id': async_job.id if async_job else False,
+            'related_model': self._name,
+            'related_res_id': self.id,
+            'phase': phase,
+            'message': self._format_match_trace_message(line_index=line_index, line_total=line_total, detail=detail),
+            'line_index': line_index or False,
+            'line_total': line_total or False,
+            'raw_code': raw_code or '',
+            'product_code': product_code or '',
+            'product_description': product_description or '',
+            'supplier_id': supplier_id or False,
+            'supplier_brand': supplier_brand or '',
+        }
+        if matched_product:
+            payload.update({
+                'matched_product_id': matched_product.id,
+                'matched_product_name': matched_product.display_name,
+            })
+        if match_meta:
+            payload.update({
+                'match_method': match_meta.get('method'),
+                'match_confidence': match_meta.get('confidence'),
+                'matched_code': match_meta.get('matched_code'),
+            })
+        if elapsed_ms is not None:
+            payload['elapsed_ms'] = round(float(elapsed_ms), 2)
+        if extra:
+            payload.update(extra)
+        emit_runtime_event(payload, persist_db=True)
 
     @api.model
     def _normalize_code_value(self, value):
@@ -311,8 +388,15 @@ class InvoiceIngestJobMatch(models.Model):
         supplier=None,
         supplier_brand='',
         extra_codes=None,
+        line_index=None,
+        line_total=None,
     ):
         self.ensure_one()
+        if line_index is None:
+            line_index = self.env.context.get('invoice_ingest_match_line_index')
+        if line_total is None:
+            line_total = self.env.context.get('invoice_ingest_match_line_total')
+        line_started_at = monotonic()
         raw_code = (
             raw_code
             or product_code
@@ -342,12 +426,30 @@ class InvoiceIngestJobMatch(models.Model):
             if normalized_code and normalized_code not in candidate_codes:
                 candidate_codes.append(normalized_code)
 
+        self._emit_match_runtime_event(
+            phase='line_start',
+            detail='starting local product matching',
+            line_index=line_index,
+            line_total=line_total,
+            raw_code=raw_code,
+            product_code=product_code or visible_code,
+            product_description=product_description,
+            supplier=supplier,
+            supplier_brand=parsed_supplier_brand,
+            extra={
+                'candidate_code_count': len(candidate_codes),
+                'allow_progressive_trim': use_trimmed_visible_code,
+            },
+        )
         product, match_meta = self._match_product_with_meta(
             parsed_code,
             supplier=supplier,
             product_description=product_description,
             supplier_brand=parsed_supplier_brand,
             extra_codes=candidate_codes,
+            raw_code=raw_code,
+            line_index=line_index,
+            line_total=line_total,
         )
         if use_trimmed_visible_code:
             trim_candidates = self._progressive_tail_trim_candidates(exact_code or parsed_code)
@@ -365,6 +467,25 @@ class InvoiceIngestJobMatch(models.Model):
                 parsed_supplier_brand = canonical_brand
             supplier_brand_id = canonical_supplier_id or False
 
+        self._emit_match_runtime_event(
+            phase='line_complete',
+            detail='finished local product matching',
+            line_index=line_index,
+            line_total=line_total,
+            raw_code=raw_code,
+            product_code=visible_code or product_code,
+            product_description=product_description,
+            supplier=supplier,
+            supplier_brand=parsed_supplier_brand,
+            match_meta=match_meta,
+            matched_product=matched_product,
+            elapsed_ms=(monotonic() - line_started_at) * 1000.0,
+            extra={
+                'match_status': 'matched' if matched_product else 'not_found',
+                'supplier_brand_id': supplier_brand_id or False,
+            },
+        )
+
         return {
             'product_code_raw': raw_code,
             'product_code': visible_code or False,
@@ -377,7 +498,17 @@ class InvoiceIngestJobMatch(models.Model):
             'match_confidence': match_meta.get('confidence', 0.0),
         }
 
-    def _match_product_with_meta(self, product_code, supplier=None, product_description=None, supplier_brand=None, extra_codes=None):
+    def _match_product_with_meta(
+        self,
+        product_code,
+        supplier=None,
+        product_description=None,
+        supplier_brand=None,
+        extra_codes=None,
+        raw_code='',
+        line_index=None,
+        line_total=None,
+    ):
         self.ensure_one()
         Product = self.env['product.product']
         supplier_domain = self._supplier_product_domain(supplier)
@@ -391,6 +522,18 @@ class InvoiceIngestJobMatch(models.Model):
         # 1) Strict exact matching by code fields; try constrained scopes first.
         # Prefer article-based matching first (TecDoc articleNo / internal references),
         # then fall back to supplier/barcode fields.
+        self._emit_match_runtime_event(
+            phase='exact_start',
+            detail='starting strict exact code matching',
+            line_index=line_index,
+            line_total=line_total,
+            raw_code=raw_code,
+            product_code=product_code,
+            product_description=product_description,
+            supplier=supplier,
+            supplier_brand=supplier_brand,
+            extra={'candidate_code_count': len(codes)},
+        )
         product, match_meta = self._search_code_fields_with_scopes(
             codes=codes,
             field_names=('tecdoc_article_no', 'default_code', 'supplier_code', 'barcode_internal', 'barcode'),
@@ -401,9 +544,33 @@ class InvoiceIngestJobMatch(models.Model):
             confidence_without_scope=96.0,
         )
         if product:
+            self._emit_match_runtime_event(
+                phase='matched',
+                detail=f"matched during {match_meta.get('method') or 'exact'}",
+                line_index=line_index,
+                line_total=line_total,
+                raw_code=raw_code,
+                product_code=product_code,
+                product_description=product_description,
+                supplier=supplier,
+                supplier_brand=supplier_brand,
+                match_meta=match_meta,
+                matched_product=product,
+            )
             return product, match_meta
 
         # 2) Exact TecDoc lookup through variant/oem/ean/cross relations.
+        self._emit_match_runtime_event(
+            phase='lookup_start',
+            detail='starting catalog lookup matching',
+            line_index=line_index,
+            line_total=line_total,
+            raw_code=raw_code,
+            product_code=product_code,
+            product_description=product_description,
+            supplier=supplier,
+            supplier_brand=supplier_brand,
+        )
         for code in codes:
             product, lookup_reason = self._match_by_catalog_lookup(
                 code=code,
@@ -412,17 +579,43 @@ class InvoiceIngestJobMatch(models.Model):
             )
             if product:
                 confidence = 95.0 if 'supplier' in lookup_reason else 84.0
-                return product, {
+                match_meta = {
                     'method': lookup_reason or 'lookup',
                     'matched_code': code,
                     'confidence': confidence,
                 }
+                self._emit_match_runtime_event(
+                    phase='matched',
+                    detail=f"matched during {match_meta.get('method') or 'lookup'}",
+                    line_index=line_index,
+                    line_total=line_total,
+                    raw_code=raw_code,
+                    product_code=product_code,
+                    product_description=product_description,
+                    supplier=supplier,
+                    supplier_brand=supplier_brand,
+                    match_meta=match_meta,
+                    matched_product=product,
+                )
+                return product, match_meta
 
         # 2b) Progressive tail-trim pass (only if strict candidates failed).
         trim_candidates = (
             self._progressive_tail_trim_candidates(product_code)
             if self._allow_progressive_tail_trim(supplier)
             else []
+        )
+        self._emit_match_runtime_event(
+            phase='trim_start',
+            detail='starting progressive trim matching',
+            line_index=line_index,
+            line_total=line_total,
+            raw_code=raw_code,
+            product_code=product_code,
+            product_description=product_description,
+            supplier=supplier,
+            supplier_brand=supplier_brand,
+            extra={'trim_candidate_count': len(trim_candidates)},
         )
         product, match_meta = self._search_code_fields_with_scopes(
             codes=trim_candidates,
@@ -434,6 +627,19 @@ class InvoiceIngestJobMatch(models.Model):
             confidence_without_scope=75.0,
         )
         if product:
+            self._emit_match_runtime_event(
+                phase='matched',
+                detail=f"matched during {match_meta.get('method') or 'progressive trim'}",
+                line_index=line_index,
+                line_total=line_total,
+                raw_code=raw_code,
+                product_code=product_code,
+                product_description=product_description,
+                supplier=supplier,
+                supplier_brand=supplier_brand,
+                match_meta=match_meta,
+                matched_product=product,
+            )
             return product, match_meta
 
         for code in trim_candidates:
@@ -444,13 +650,38 @@ class InvoiceIngestJobMatch(models.Model):
             )
             if product:
                 confidence = 82.0 if 'supplier' in lookup_reason else 74.0
-                return product, {
+                match_meta = {
                     'method': f'progressive_trim:{lookup_reason or "lookup"}',
                     'matched_code': code,
                     'confidence': confidence,
                 }
+                self._emit_match_runtime_event(
+                    phase='matched',
+                    detail=f"matched during {match_meta.get('method') or 'progressive trim lookup'}",
+                    line_index=line_index,
+                    line_total=line_total,
+                    raw_code=raw_code,
+                    product_code=product_code,
+                    product_description=product_description,
+                    supplier=supplier,
+                    supplier_brand=supplier_brand,
+                    match_meta=match_meta,
+                    matched_product=product,
+                )
+                return product, match_meta
 
         # 3) Relaxed `ilike` only for code-like fields and only when we do have a code.
+        self._emit_match_runtime_event(
+            phase='ilike_start',
+            detail='starting relaxed code matching',
+            line_index=line_index,
+            line_total=line_total,
+            raw_code=raw_code,
+            product_code=product_code,
+            product_description=product_description,
+            supplier=supplier,
+            supplier_brand=supplier_brand,
+        )
         product, match_meta = self._search_code_fields_with_scopes(
             codes=codes,
             field_names=('tecdoc_article_no', 'default_code', 'supplier_code'),
@@ -462,74 +693,113 @@ class InvoiceIngestJobMatch(models.Model):
             min_compact_len=4,
         )
         if product:
+            self._emit_match_runtime_event(
+                phase='matched',
+                detail=f"matched during {match_meta.get('method') or 'ilike'}",
+                line_index=line_index,
+                line_total=line_total,
+                raw_code=raw_code,
+                product_code=product_code,
+                product_description=product_description,
+                supplier=supplier,
+                supplier_brand=supplier_brand,
+                match_meta=match_meta,
+                matched_product=product,
+            )
             return product, match_meta
 
         # 4) Description fallback only when no code was parsed at all.
         description = (product_description or '').strip()
         if description and not codes:
+            self._emit_match_runtime_event(
+                phase='description_start',
+                detail='starting description-only matching',
+                line_index=line_index,
+                line_total=line_total,
+                raw_code=raw_code,
+                product_code=product_code,
+                product_description=product_description,
+                supplier=supplier,
+                supplier_brand=supplier_brand,
+            )
             product, reason_suffix = self._search_product_with_scopes(
                 [('name', '=ilike', ' '.join(description.split()))],
                 scopes,
             )
             if product:
                 confidence = 70.0 if reason_suffix else 62.0
-                return product, {
+                match_meta = {
                     'method': f'description_exact{reason_suffix}',
                     'matched_code': '',
                     'confidence': confidence,
                 }
+                self._emit_match_runtime_event(
+                    phase='matched',
+                    detail=f"matched during {match_meta.get('method') or 'description'}",
+                    line_index=line_index,
+                    line_total=line_total,
+                    raw_code=raw_code,
+                    product_code=product_code,
+                    product_description=product_description,
+                    supplier=supplier,
+                    supplier_brand=supplier_brand,
+                    match_meta=match_meta,
+                    matched_product=product,
+                )
+                return product, match_meta
 
-        return Product, {
+        match_meta = {
             'method': 'not_found',
             'matched_code': '',
             'confidence': 0.0,
         }
+        self._emit_match_runtime_event(
+            phase='not_found',
+            detail='no local product match found',
+            line_index=line_index,
+            line_total=line_total,
+            raw_code=raw_code,
+            product_code=product_code,
+            product_description=product_description,
+            supplier=supplier,
+            supplier_brand=supplier_brand,
+            match_meta=match_meta,
+        )
+        return Product, match_meta
 
     def _replace_lines_from_normalized(self, normalized_lines):
         self.ensure_one()
         commands = [(5, 0, 0)]
         sequence = 1
         for line in normalized_lines or []:
-            if not isinstance(line, dict):
+            normalized_line = self._normalized_line_from_payload(line)
+            if not normalized_line:
                 continue
-            description = (line.get('product_description') or '').strip()
+            description = (normalized_line.get('product_description') or '').strip()
             has_precomputed_match = any(
-                key in line
-                for key in (
-                    'matched_product_id',
-                    'match_method',
-                    'match_confidence',
-                    'supplier_brand_id',
-                )
-            )
+                key in normalized_line
+                for key in ('matched_product_id', 'match_method', 'match_confidence', 'supplier_brand_id')
+            ) and bool(normalized_line.get('match_method') or normalized_line.get('matched_product_id'))
             if has_precomputed_match:
-                resolved = {
-                    'product_code_raw': line.get('product_code_raw') or line.get('product_code') or False,
-                    'product_code': line.get('product_code') or False,
-                    'supplier_brand': line.get('supplier_brand') or '',
-                    'supplier_brand_id': line.get('supplier_brand_id') or False,
-                    'matched_product_id': line.get('matched_product_id') or False,
-                    'match_method': line.get('match_method') or False,
-                    'match_confidence': self._safe_float(line.get('match_confidence'), default=0.0),
-                }
+                resolved = normalized_line
             else:
                 resolved = self._resolve_line_match_data(
-                    raw_code=line.get('product_code_raw') or line.get('product_code'),
-                    product_code=line.get('product_code'),
+                    raw_code=normalized_line.get('product_code_raw') or normalized_line.get('product_code'),
+                    product_code=normalized_line.get('product_code'),
                     product_description=description,
                     supplier=self.partner_id,
-                    supplier_brand=line.get('supplier_brand'),
+                    supplier_brand=normalized_line.get('supplier_brand'),
                 )
             commands.append((0, 0, {
                 'sequence': sequence,
-                'quantity': self._safe_float(line.get('quantity'), default=1.0) or 1.0,
+                'quantity': self._safe_float(normalized_line.get('quantity'), default=1.0) or 1.0,
                 'product_code_raw': resolved['product_code_raw'],
                 'product_code': resolved['product_code'],
                 'supplier_brand': resolved['supplier_brand'],
                 'supplier_brand_id': resolved['supplier_brand_id'],
                 'product_description': description,
-                'unit_price': self._safe_float(line.get('unit_price'), default=0.0),
-                'vat_rate': self._safe_float(line.get('vat_rate'), default=self.vat_rate or 0.0),
+                'unit_price': self._safe_float(normalized_line.get('unit_price'), default=0.0),
+                'vat_rate': self._safe_float(normalized_line.get('vat_rate'), default=self.vat_rate or 0.0),
                 'product_id': resolved['matched_product_id'],
                 'match_method': resolved['match_method'],
                 'match_confidence': resolved['match_confidence'],

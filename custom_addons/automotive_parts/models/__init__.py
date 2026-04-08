@@ -15,6 +15,9 @@ from . import tecdoc_fast_import
 from . import tecdoc_fast_purge
 from . import anaf_efactura
 from . import invoice_ingest
+from . import invoice_ingest_job_async
+from . import invoice_ingest_job_identity
+from . import invoice_ingest_job_normalization
 from . import invoice_ingest_job_extract
 from . import invoice_ingest_job_match
 from . import invoice_ingest_job_receipt

@@ -8,7 +8,6 @@ import uuid
 from odoo import _, fields, models
 from odoo.exceptions import UserError
 
-
 class InvoiceIngestUploadWizard(models.TransientModel):
     _name = 'invoice.ingest.upload.wizard'
     _description = 'Invoice Ingest Upload Wizard'
@@ -173,12 +172,7 @@ class InvoiceIngestUploadWizard(models.TransientModel):
 
         batch_uid = uuid.uuid4().hex
         batch_name = (queued_documents[0]['filename'] or 'invoice batch').strip()
-        async_batch = self.env['automotive.async.batch'].sudo().create({
-            'name': batch_name,
-            'job_type': 'invoice_ingest',
-            'company_id': self.env.company.id,
-            'requested_by_id': self.env.user.id,
-        })
+        async_batch = self.env['invoice.ingest.job']._create_invoice_ingest_batch(batch_name)
         jobs = self.env['invoice.ingest.job']
         total = len(queued_documents)
         for index, document in enumerate(queued_documents, start=1):

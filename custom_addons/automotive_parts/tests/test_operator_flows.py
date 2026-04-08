@@ -858,6 +858,31 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertTrue(runtime_log)
         self.assertIn('post-process crash', runtime_log.message or '')
 
+    def test_async_job_cancels_missing_invoice_ingest_target_instead_of_failing(self):
+        async_job = self.env['automotive.async.job'].enqueue_job(
+            'invoice_ingest',
+            name='Missing invoice ingest target',
+            payload={'invoice_ingest_job_id': 999999},
+            target_model='invoice.ingest.job',
+            target_method='_process_ingest_job',
+            target_res_id=999999,
+        )
+
+        processed = async_job._process_one(force=True)
+
+        self.assertFalse(processed)
+        async_job.invalidate_recordset()
+        self.assertEqual(async_job.state, 'cancelled')
+        self.assertEqual(async_job.last_error, False)
+        self.assertEqual(async_job.last_error_type, False)
+        self.assertEqual(async_job.progress_message, 'Cancelled because the target record was deleted.')
+        runtime_log = self.env['automotive.runtime.log'].search(
+            [('event', '=', 'automotive_async_job_failed'), ('related_res_id', '=', 999999)],
+            order='id desc',
+            limit=1,
+        )
+        self.assertFalse(runtime_log)
+
     def test_invoice_extract_reports_real_async_progress_milestones(self):
         attachment = self.env['ir.attachment'].create({
             'name': 'milestones.pdf',
@@ -915,7 +940,17 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             milestones.append((progress, message))
             return True
 
-        def fake_resolve(_recordset, raw_code='', product_code='', product_description='', supplier=None, supplier_brand='', extra_codes=None):
+        def fake_resolve(
+            _recordset,
+            raw_code='',
+            product_code='',
+            product_description='',
+            supplier=None,
+            supplier_brand='',
+            extra_codes=None,
+            line_index=None,
+            line_total=None,
+        ):
             return {
                 'product_code_raw': raw_code or product_code or 'AUTO-TEST-001',
                 'product_code': product_code or 'AUTO-TEST-001',
@@ -953,6 +988,62 @@ class TestAutomotiveOperatorFlows(TransactionCase):
                 (80.0, 'Matching products and normalizing lines'),
                 (95.0, 'Saving extracted invoice lines'),
             ],
+        )
+
+    def test_invoice_match_runtime_logs_capture_80_percent_phases(self):
+        attachment = self.env['ir.attachment'].create({
+            'name': 'match-trace.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% match trace\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Match Trace',
+            'source': 'ocr',
+            'state': 'running',
+            'attachment_id': attachment.id,
+            'external_id': 'match-trace-checksum',
+        })
+        async_job = self.env['automotive.async.job'].enqueue_job(
+            'invoice_ingest',
+            name='Match Trace Async',
+            payload={'invoice_ingest_job_id': job.id},
+            target_model='invoice.ingest.job',
+            target_method='_process_ingest_job',
+            target_res_id=job.id,
+        )
+        empty_product = self.env['product.product']
+
+        with patch.object(type(job), '_search_code_fields_with_scopes', side_effect=[
+            (empty_product, {}),
+            (empty_product, {}),
+            (self.product, {
+                'method': 'ilike:default_code supplier',
+                'matched_code': 'AUTO-TRACE-001',
+                'confidence': 86.0,
+            }),
+        ]), patch.object(type(job), '_match_by_catalog_lookup', return_value=(empty_product, '')):
+            resolved = job.with_context(automotive_async_job_id=async_job.id)._resolve_line_match_data(
+                raw_code='AUTO TRACE 001',
+                product_code='AUTO-TRACE-001',
+                product_description='Traceable Automotive Product',
+                supplier=self.supplier,
+                supplier_brand='TRACE',
+                line_index=1,
+                line_total=1,
+            )
+
+        self.assertEqual(resolved['match_status'], 'matched')
+        runtime_logs = self.env['automotive.runtime.log'].search(
+            [('event', '=', 'invoice_ingest_match_trace'), ('related_res_id', '=', job.id)],
+            order='id asc',
+        )
+        self.assertTrue(runtime_logs)
+        phases = [json.loads(log.payload_json).get('phase') for log in runtime_logs]
+        self.assertEqual(
+            phases,
+            ['line_start', 'exact_start', 'lookup_start', 'trim_start', 'ilike_start', 'matched', 'line_complete'],
         )
 
     def test_replace_lines_from_normalized_reuses_precomputed_match_data(self):
@@ -1299,7 +1390,7 @@ Data sc:        06/05/2026
         self.assertEqual(template.tecdoc_variant_ids[:1].ean_ids[:1].ean, '5900427194311')
         self.assertTrue(template.tecdoc_variant_ids[:1].vehicle_ids)
 
-    def test_invoice_ingest_auto_tecdoc_match_creates_product_when_local_match_misses(self):
+    def test_invoice_ingest_does_not_auto_sync_tecdoc_when_local_match_misses(self):
         api = self.env['tecdoc.api'].create({
             'name': 'TecDoc Test API Auto Match',
             'api_key': 'test-key',
@@ -1316,17 +1407,7 @@ Data sc:        06/05/2026
         original_sync = api_model.sync_product_from_tecdoc
 
         def fake_sync_product_from_tecdoc(self, article_id=None, article_no=None, supplier_id=None):
-            if article_no != 'C2W029ABE':
-                raise UserError('Article not found in TecDoc.')
-            template = self.env['product.template'].create({
-                'name': 'TecDoc Auto Product',
-                'default_code': 'C2W029ABE',
-                'tecdoc_article_no': 'C2W029ABE',
-                'tecdoc_supplier_name': 'ABE',
-                'type': 'consu',
-                'is_storable': True,
-            })
-            return template.product_variant_id
+            raise AssertionError('invoice ingest should not auto-sync TecDoc during OCR matching')
 
         api_model.sync_product_from_tecdoc = fake_sync_product_from_tecdoc
         try:
@@ -1339,65 +1420,9 @@ Data sc:        06/05/2026
         finally:
             api_model.sync_product_from_tecdoc = original_sync
 
-        self.assertTrue(normalized['matched_product_id'])
-        self.assertEqual(normalized['match_method'], 'exact:tecdoc_auto_sync')
+        self.assertFalse(normalized['matched_product_id'])
+        self.assertFalse(normalized['match_method'])
         self.assertEqual(normalized['supplier_brand'], 'ABE')
-
-    def test_invoice_ingest_auto_tecdoc_match_uses_single_attempt(self):
-        api = self.env['tecdoc.api'].create({
-            'name': 'TecDoc Single Attempt Auto Match',
-            'api_key': 'test-key',
-            'lang_id': 21,
-            'country_filter_id': 63,
-        })
-
-        calls = []
-        api_model = type(api)
-        original_form = api_model.post_article_details_by_number_form
-        original_typed = api_model.get_article_details_by_number_typed
-        original_number = api_model.get_article_details_by_number
-        original_search = api_model.search_articles_by_article_no
-        original_supplier = api_model.search_article_by_number_and_supplier
-
-        def fail_form(self, article_no, type_id=1, lang_id=None, country_filter_id=None):
-            calls.append('form')
-            raise UserError('Article not found in TecDoc.')
-
-        def fail_typed(self, article_no, type_id=1, lang_id=None, country_filter_id=None):
-            calls.append('typed')
-            raise AssertionError('single-attempt OCR match should not hit typed fallback')
-
-        def fail_number(self, article_no):
-            calls.append('number')
-            raise AssertionError('single-attempt OCR match should not hit number fallback')
-
-        def fail_search(self, article_no, article_type='ArticleNumber', lang_id=None):
-            calls.append('search')
-            raise AssertionError('single-attempt OCR match should not hit article search fallback')
-
-        def fail_supplier(self, article_no, supplier_id):
-            calls.append('supplier')
-            raise AssertionError('single-attempt OCR match should not hit supplier fallback')
-
-        api_model.post_article_details_by_number_form = fail_form
-        api_model.get_article_details_by_number_typed = fail_typed
-        api_model.get_article_details_by_number = fail_number
-        api_model.search_articles_by_article_no = fail_search
-        api_model.search_article_by_number_and_supplier = fail_supplier
-        try:
-            with self.assertRaises(UserError):
-                api.with_context(tecdoc_single_attempt=True).sync_product_from_tecdoc(
-                    article_no='C2W029ABE',
-                    supplier_id=4426,
-                )
-        finally:
-            api_model.post_article_details_by_number_form = original_form
-            api_model.get_article_details_by_number_typed = original_typed
-            api_model.get_article_details_by_number = original_number
-            api_model.search_articles_by_article_no = original_search
-            api_model.search_article_by_number_and_supplier = original_supplier
-
-        self.assertEqual(calls, ['form'])
 
     def test_tecdoc_sync_does_not_create_product_for_explicit_empty_article_response(self):
         api = self.env['tecdoc.api'].create({
