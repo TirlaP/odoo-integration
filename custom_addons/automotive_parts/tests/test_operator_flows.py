@@ -683,6 +683,53 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertEqual(job.async_progress_message, 'Worker claimed, starting import')
         self.assertGreaterEqual(job.async_progress_percent, 1.0)
 
+    def test_async_progress_update_works_for_non_admin_run_user(self):
+        with self.registry.cursor() as setup_cr:
+            setup_env = api.Environment(setup_cr, self.env.uid, {})
+            run_user = setup_env['res.users'].with_context(no_reset_password=True).create({
+                'name': 'Invoice Import Operator',
+                'login': 'invoice.operator@example.com',
+                'email': 'invoice.operator@example.com',
+                'groups_id': [(6, 0, [setup_env.ref('base.group_user').id])],
+            })
+            job = setup_env['invoice.ingest.job'].create({
+                'name': 'OCR Non Admin Progress',
+                'source': 'ocr',
+                'state': 'pending',
+                'external_id': 'non-admin-progress-checksum',
+            })
+            async_job = setup_env['automotive.async.job'].enqueue_job(
+                'invoice_ingest',
+                name='Non Admin Progress',
+                payload={'invoice_ingest_job_id': job.id},
+                source=job,
+                target_model='invoice.ingest.job',
+                target_method='_process_ingest_job',
+                target_res_id=job.id,
+                run_as_user=run_user,
+            )
+            run_user_id = run_user.id
+            job_id = job.id
+            async_job_id = async_job.id
+            setup_cr.commit()
+
+        updated = self.env['automotive.async.job'].with_user(run_user_id).report_progress(
+            async_job_id,
+            progress=15,
+            progress_message='Calling OpenAI extraction',
+            state='running',
+        )
+
+        self.assertTrue(updated)
+        with self.registry.cursor() as check_cr:
+            check_env = api.Environment(check_cr, self.env.uid, {})
+            async_job = check_env['automotive.async.job'].browse(async_job_id).exists()
+            job = check_env['invoice.ingest.job'].browse(job_id).exists()
+            self.assertEqual(async_job.state, 'running')
+            self.assertEqual(async_job.progress, 15.0)
+            self.assertEqual(async_job.progress_message, 'Calling OpenAI extraction')
+            self.assertEqual(job.state, 'running')
+
     def test_enqueue_async_processing_triggers_async_cron_immediately(self):
         attachment = self.env['ir.attachment'].create({
             'name': 'trigger_cron.pdf',

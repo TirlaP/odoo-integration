@@ -6,6 +6,7 @@ import time
 import traceback
 
 import odoo.http
+from werkzeug.exceptions import HTTPException
 
 from .runtime_logging import emit_runtime_event
 
@@ -19,14 +20,17 @@ def _trace_enabled():
 
 
 def _write_trace_payload(event):
+    http_status_code = int(event.get("http_status_code") or 0)
+    is_client_http_exception = event.get("event") == "automotive_http_exception" and 400 <= http_status_code < 500
+    is_error = event.get("outcome") in {"error", "exception"} and not is_client_http_exception
     emit_runtime_event(
         {
             **dict(event or {}),
             "category": "http",
             "source": "request_trace",
-            "level": "error" if event.get("outcome") in {"error", "exception"} else "info",
+            "level": "error" if is_error else ("warning" if is_client_http_exception else "info"),
         },
-        persist_db=event.get("outcome") in {"error", "exception"},
+        persist_db=is_error,
     )
 
 
@@ -42,6 +46,7 @@ def _patch_dispatcher_error_handlers():
             if _trace_enabled():
                 thread = threading.current_thread()
                 req = getattr(self, "request", None)
+                http_status_code = getattr(exc, "code", None) if isinstance(exc, HTTPException) else None
                 event = {
                     "event": "automotive_http_exception",
                     "dispatcher": _dispatcher_name,
@@ -54,6 +59,7 @@ def _patch_dispatcher_error_handlers():
                     "uid": getattr(thread, "uid", None),
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
+                    "http_status_code": http_status_code,
                     "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
                     "outcome": "exception",
                 }

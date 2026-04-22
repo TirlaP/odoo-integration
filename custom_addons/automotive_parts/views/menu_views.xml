@@ -120,14 +120,17 @@
               sequence="95"/>
 
     <record id="menu_tecdoc" model="ir.ui.menu">
+        <field name="name">TecDoc</field>
         <field name="active" eval="False"/>
     </record>
 
     <record id="menu_anaf" model="ir.ui.menu">
+        <field name="name">ANAF</field>
         <field name="active" eval="False"/>
     </record>
 
     <record id="menu_tecdoc_fast_import" model="ir.ui.menu">
+        <field name="name">TecDoc Fast Import</field>
         <field name="active" eval="False"/>
     </record>
 

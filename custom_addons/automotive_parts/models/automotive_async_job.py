@@ -508,7 +508,7 @@ class AutomotiveAsyncJob(models.Model):
             return False
         with self.pool.cursor() as status_cr:
             status_env = api.Environment(status_cr, self.env.uid, dict(self.env.context or {}))
-            async_job = status_env[self._name].browse(job_id).exists()
+            async_job = status_env[self._name].sudo().browse(job_id).exists()
             return bool(async_job and async_job.state == 'cancelled')
 
     @api.model
@@ -519,7 +519,7 @@ class AutomotiveAsyncJob(models.Model):
         normalized_progress = self._normalize_progress_value(progress)
         with self.pool.cursor() as progress_cr:
             progress_env = api.Environment(progress_cr, self.env.uid, dict(self.env.context or {}))
-            async_job = progress_env[self._name].browse(job_id).exists()
+            async_job = progress_env[self._name].sudo().browse(job_id).exists()
             if not async_job:
                 return False
             if async_job.state == 'cancelled':
@@ -675,6 +675,8 @@ class AutomotiveAsyncJob(models.Model):
             else:
                 vals['state'] = 'failed'
             self.write(vals)
+            if not retryable:
+                self._call_target_progress_hook('_automotive_async_on_failed')
             emit_runtime_event(
                 {
                     'event': 'automotive_async_job_failed',
