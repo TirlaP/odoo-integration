@@ -21,70 +21,27 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { parseArgs } = require("node:util");
-
-function nowIsoSeconds() {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-}
-
-function safeFilenameFragment(value) {
-  const s = String(value || "").trim().replace(/[^A-Za-z0-9._-]+/g, "_");
-  return s || "_";
-}
-
-function normalizeSupplierName(name) {
-  return String(name || "")
-    .normalize("NFKD")
-    .replace(/[^0-9A-Za-z]+/g, "")
-    .toUpperCase();
-}
-
-function parseCsvList(value) {
-  if (!value) return [];
-  return String(value)
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function asListOfObjects(value) {
-  return Array.isArray(value) ? value.filter((x) => x && typeof x === "object" && !Array.isArray(x)) : [];
-}
+const {
+  asListOfObjects,
+  createProgressRenderer,
+  normalizeSupplierName,
+  nowIsoSeconds,
+  parseCsvList,
+  progressBar,
+  progressPercent,
+  readJsonFile,
+  resolveUiMode,
+  safeFilenameFragment,
+  writeJsonAtomic,
+} = require("./tecdoc_shared");
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
 }
 
-function writeJsonAtomic(filePath, obj) {
-  const tmp = `${filePath}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), "utf8");
-  fs.renameSync(tmp, filePath);
-}
-
-function createProgressRenderer() {
-  let lastLineLen = 0;
-  const clearLine = () => {
-    process.stderr.write("\r" + " ".repeat(Math.max(0, lastLineLen)) + "\r");
-    lastLineLen = 0;
-  };
-  const render = (line) => {
-    const clipped = String(line || "");
-    const pad = Math.max(0, lastLineLen - clipped.length);
-    process.stderr.write("\r" + clipped + (pad ? " ".repeat(pad) : ""));
-    lastLineLen = Math.max(lastLineLen, clipped.length);
-  };
-  const note = (msg) => {
-    clearLine();
-    process.stderr.write(String(msg) + "\n");
-  };
-  const end = () => clearLine();
-  return { render, note, end };
-}
-
 function buildProgressLine({ idx, total, written, skipped, current }) {
-  const pct = total > 0 ? Math.min(100, Math.floor((idx / total) * 100)) : 0;
-  const width = 28;
-  const filled = Math.round((pct / 100) * width);
-  const bar = "[" + "#".repeat(filled) + "-".repeat(Math.max(0, width - filled)) + "]";
+  const pct = progressPercent(idx, total);
+  const bar = progressBar(pct);
   return `${idx}/${total} ${String(pct).padStart(3, " ")}% ${bar} | written=${written} skipped=${skipped} | code=${String(current || "").slice(0, 28)}`;
 }
 
@@ -96,8 +53,8 @@ function stripXrefMeta(meta) {
   return out;
 }
 
-async function main() {
-  const args = parseArgs({
+function parseSplitArgs() {
+  return parseArgs({
     options: {
       out: { type: "string", default: path.join(process.cwd(), "tecdoc_data", "art_2026_01_01_js") },
       input: { type: "string", default: "" }, // defaults to <out>/by_code
@@ -109,205 +66,274 @@ async function main() {
     },
     allowPositionals: false,
   });
+}
 
+function resolveSplitConfig(args) {
   const outDir = path.resolve(args.values.out);
   const inDir = path.resolve(args.values.input || path.join(outDir, "by_code"));
   const byArticleDir = path.resolve(args.values.output || path.join(outDir, "by_article"));
   const summaryPath = path.join(outDir, "split_summary.json");
 
-  const ui =
-    args.values.ui && ["pretty", "json"].includes(args.values.ui)
-      ? args.values.ui
-      : process.stdout.isTTY
-        ? "pretty"
-        : "json";
-
+  const ui = resolveUiMode(args.values.ui);
   const progress = ui === "pretty" ? createProgressRenderer() : null;
+  return { args, outDir, inDir, byArticleDir, summaryPath, ui, progress };
+}
 
+function validateSplitConfig(config) {
+  const { inDir, byArticleDir } = config;
   if (!fs.existsSync(inDir)) {
     console.error(`Missing input directory: ${inDir}`);
     process.exitCode = 2;
-    return;
+    return false;
   }
   ensureDir(byArticleDir);
+  return true;
+}
 
+function buildSplitTodo(config) {
+  const { args, inDir } = config;
   const codesFilterRaw = parseCsvList(args.values.codes);
   const codesFilter = codesFilterRaw.length ? new Set(codesFilterRaw) : null;
   const limit = Number.parseInt(args.values.limit, 10) || 0;
+  return limitedSplitTodo(splitInputFiles(inDir).filter((item) => shouldProcessCode(item.codeFromFile, codesFilter)), limit);
+}
 
-  const files = fs
+function splitInputFiles(inDir) {
+  return fs
     .readdirSync(inDir)
     .filter((f) => f.endsWith(".json"))
     .map((f) => path.join(inDir, f))
-    .sort((a, b) => a.localeCompare(b));
+    .sort((a, b) => a.localeCompare(b))
+    .map((filePath) => ({ filePath, codeFromFile: path.basename(filePath, ".json") }));
+}
 
+function limitedSplitTodo(files, limit) {
   const toProcess = [];
-  for (const filePath of files) {
-    const codeFromFile = path.basename(filePath, ".json");
-    if (codesFilter && !codesFilter.has(codeFromFile)) continue;
-    toProcess.push({ filePath, codeFromFile });
-    if (limit > 0 && toProcess.length >= limit) break;
+  for (const item of files) {
+    toProcess.push(item);
+    if (reachedLimit(toProcess, limit)) break;
   }
+  return toProcess;
+}
 
-  const stats = {
+function shouldProcessCode(code, codesFilter) {
+  return !codesFilter || codesFilter.has(code);
+}
+
+function reachedLimit(items, limit) {
+  return limit > 0 && items.length >= limit;
+}
+
+function createSplitStats(config, toProcess) {
+  return {
     started_at: nowIsoSeconds(),
-    in_dir: inDir,
-    out_dir: byArticleDir,
+    in_dir: config.inDir,
+    out_dir: config.byArticleDir,
     files_total: toProcess.length,
     files_processed: 0,
     files_skipped: 0,
     articles_written: 0,
     articles_skipped: 0,
   };
+}
 
+function emitSplitTodo(config, toProcess) {
+  const { ui, progress } = config;
   if (ui === "pretty" && progress) progress.note(`Split todo: ${toProcess.length} files`);
   if (ui === "json") console.log(JSON.stringify({ ts: nowIsoSeconds(), event: "split_todo", count: toProcess.length }));
+}
 
-  let idx = 0;
-  for (const item of toProcess) {
-    idx += 1;
-    const filePath = item.filePath;
-    const codeFromFile = item.codeFromFile;
-    let payload;
-    try {
-      payload = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    } catch {
-      stats.files_skipped += 1;
-      stats.files_processed += 1;
+function renderSplitProgress(config, stats, idx, total, current) {
+  const { ui, progress } = config;
+  if (ui !== "pretty" || !progress) return;
+  progress.render(
+    buildProgressLine({
+      idx,
+      total,
+      written: stats.articles_written,
+      skipped: stats.articles_skipped,
+      current,
+    }),
+  );
+}
+
+function markSkippedFile(stats, articleSkipped = false) {
+  stats.files_skipped += 1;
+  stats.files_processed += 1;
+  if (articleSkipped) stats.articles_skipped += 1;
+}
+
+function buildSplitOutputFile(config, code, article, index) {
+  const supplierName = String(article.supplierName || "").trim();
+  const supplierKey = normalizeSupplierName(supplierName) || safeFilenameFragment(supplierName);
+  const supplierId = nullableString(article.supplierId);
+  const articleId = nullableString(article.articleId) || String(index + 1);
+  return path.join(config.byArticleDir, splitFileName(code, supplierKey, supplierId, articleId));
+}
+
+function nullableString(value) {
+  return value == null ? "" : String(value);
+}
+
+function nullableValue(value) {
+  return value == null ? null : value;
+}
+
+function splitFileName(code, supplierKey, supplierId, articleId) {
+  return [
+    safeFilenameFragment(code),
+    safeFilenameFragment(supplierKey),
+    safeFilenameFragment(supplierId),
+    `${safeFilenameFragment(articleId)}.json`,
+  ].join("__");
+}
+
+function buildSplitMeta({ config, payload, filePath, details, article, articles, supplierName }) {
+  return {
+    ...stripXrefMeta(payload.meta || {}),
+    split_at: nowIsoSeconds(),
+    split_from: {
+      file: path.relative(config.outDir, filePath),
+      original_count_articles: nullableValue(details.countArticles),
+      original_articles_len: articles.length,
+    },
+    split_variant: {
+      supplier_name: supplierName || null,
+      supplier_id: nullableValue(article.supplierId),
+      article_id: nullableValue(article.articleId),
+    },
+  };
+}
+
+function buildSingleArticleDetails(code, details, article) {
+  return {
+    articleNo: String(article.articleNo || details.articleNo || code).trim(),
+    countArticles: 1,
+    articles: [article],
+  };
+}
+
+function buildSplitPayload({ config, payload, filePath, code, details, article, articles }) {
+  const supplierName = String(article.supplierName || "").trim();
+  return {
+    code,
+    outcome: "found",
+    inputLines: payload.inputLines || [],
+    tecdoc: {
+      articleNumberDetails: buildSingleArticleDetails(code, details, article),
+      crossReferencesBySupplier: [],
+      articlesEnriched: [],
+    },
+    meta: buildSplitMeta({ config, payload, filePath, details, article, articles, supplierName }),
+  };
+}
+
+function writeSplitArticles(config, stats, payload, filePath, code, details, articles) {
+  let wroteAny = false;
+  for (let i = 0; i < articles.length; i += 1) {
+    const article = articles[i];
+    const outFile = buildSplitOutputFile(config, code, article, i);
+    if (!config.args.values.force && fs.existsSync(outFile)) {
       stats.articles_skipped += 1;
-      if (ui === "pretty" && progress) {
-        progress.render(
-          buildProgressLine({
-            idx,
-            total: toProcess.length,
-            written: stats.articles_written,
-            skipped: stats.articles_skipped,
-            current: codeFromFile,
-          }),
-        );
-      }
       continue;
     }
-
-    if (!payload || payload.outcome !== "found") {
-      stats.files_skipped += 1;
-      stats.files_processed += 1;
-      if (ui === "pretty" && progress) {
-        progress.render(
-          buildProgressLine({
-            idx,
-            total: toProcess.length,
-            written: stats.articles_written,
-            skipped: stats.articles_skipped,
-            current: payload?.code || codeFromFile,
-          }),
-        );
-      }
-      continue;
-    }
-
-    const tecdoc = payload.tecdoc || {};
-    const details = tecdoc.articleNumberDetails || {};
-    const code = String(payload.code || details.articleNo || codeFromFile || "").trim();
-    const articles = asListOfObjects(details.articles);
-
-    if (!code || articles.length === 0) {
-      stats.files_skipped += 1;
-      stats.files_processed += 1;
-      if (ui === "pretty" && progress) {
-        progress.render(
-          buildProgressLine({
-            idx,
-            total: toProcess.length,
-            written: stats.articles_written,
-            skipped: stats.articles_skipped,
-            current: codeFromFile,
-          }),
-        );
-      }
-      continue;
-    }
-
-    let wroteAny = false;
-    for (let i = 0; i < articles.length; i += 1) {
-      const a = articles[i];
-      const supplierName = String(a.supplierName || "").trim();
-      const supplierKey = normalizeSupplierName(supplierName) || safeFilenameFragment(supplierName);
-      const supplierId = a.supplierId != null ? String(a.supplierId) : "";
-      const articleId = a.articleId != null ? String(a.articleId) : String(i + 1);
-
-      const outFile = path.join(
-        byArticleDir,
-        `${safeFilenameFragment(code)}__${safeFilenameFragment(supplierKey)}__${safeFilenameFragment(supplierId)}__${safeFilenameFragment(articleId)}.json`,
-      );
-
-      if (!args.values.force && fs.existsSync(outFile)) {
-        stats.articles_skipped += 1;
-        continue;
-      }
-
-      const meta = stripXrefMeta(payload.meta || {});
-      const splitPayload = {
-        code,
-        outcome: "found",
-        inputLines: payload.inputLines || [],
-        tecdoc: {
-          articleNumberDetails: {
-            articleNo: String(a.articleNo || details.articleNo || code).trim(),
-            countArticles: 1,
-            articles: [a],
-          },
-          // Intentionally omit xrefs in split outputs; they can be fetched later per supplier/article.
-          crossReferencesBySupplier: [],
-          articlesEnriched: [],
-        },
-        meta: {
-          ...meta,
-          split_at: nowIsoSeconds(),
-          split_from: {
-            file: path.relative(outDir, filePath),
-            original_count_articles: details.countArticles ?? null,
-            original_articles_len: articles.length,
-          },
-          split_variant: {
-            supplier_name: supplierName || null,
-            supplier_id: a.supplierId ?? null,
-            article_id: a.articleId ?? null,
-          },
-        },
-      };
-
-      writeJsonAtomic(outFile, splitPayload);
-      wroteAny = true;
-      stats.articles_written += 1;
-    }
-
-    if (!wroteAny) stats.files_skipped += 1;
-    stats.files_processed += 1;
-
-    if (ui === "pretty" && progress) {
-      progress.render(
-        buildProgressLine({
-          idx,
-          total: toProcess.length,
-          written: stats.articles_written,
-          skipped: stats.articles_skipped,
-          current: code,
-        }),
-      );
-    }
+    writeJsonAtomic(outFile, buildSplitPayload({ config, payload, filePath, code, details, article, articles }));
+    wroteAny = true;
+    stats.articles_written += 1;
   }
+  return wroteAny;
+}
 
+function processSplitItem(config, stats, item, idx, total) {
+  const result = resolveSplitItem(config, stats, item);
+  if (result.skip) return skipSplitItem(config, stats, idx, total, result.current, result.articleSkipped);
+  renderSplitProgress(config, stats, idx, total, result.current);
+}
+
+function resolveSplitItem(config, stats, item) {
+  const payloadResult = readSplitPayload(item);
+  if (payloadResult.skip) return payloadResult;
+  return resolveSplitPayload(config, stats, item, payloadResult.payload);
+}
+
+function readSplitPayload(item) {
+  const { filePath, codeFromFile } = item;
+  const readResult = readJsonFile(filePath);
+  if (!readResult.ok) return unreadableSplitPayload(codeFromFile);
+  if (!isFoundPayload(readResult.data)) return ignoredSplitPayload(readResult.data, codeFromFile);
+  return { payload: readResult.data };
+}
+
+function unreadableSplitPayload(codeFromFile) {
+  return { skip: true, current: codeFromFile, articleSkipped: true };
+}
+
+function ignoredSplitPayload(payload, codeFromFile) {
+  return { skip: true, current: firstText(payload?.code, codeFromFile) };
+}
+
+function resolveSplitPayload(config, stats, item, payload) {
+  const { filePath, codeFromFile } = item;
+  const context = buildSplitContext(payload, filePath, codeFromFile);
+  if (!hasSplitArticles(context)) return { skip: true, current: codeFromFile };
+  const wroteAny = writeSplitArticles(config, stats, payload, filePath, context.code, context.details, context.articles);
+  if (!wroteAny) stats.files_skipped += 1;
+  stats.files_processed += 1;
+  return { current: context.code };
+}
+
+function skipSplitItem(config, stats, idx, total, current, articleSkipped = false) {
+  markSkippedFile(stats, articleSkipped);
+  renderSplitProgress(config, stats, idx, total, current);
+}
+
+function isFoundPayload(payload) {
+  return Boolean(payload) && payload.outcome === "found";
+}
+
+function buildSplitContext(payload, _filePath, codeFromFile) {
+  const tecdoc = payload.tecdoc || {};
+  const details = tecdoc.articleNumberDetails || {};
+  return {
+    details,
+    code: firstText(payload.code, details.articleNo, codeFromFile),
+    articles: asListOfObjects(details.articles),
+  };
+}
+
+function firstText(...values) {
+  return String(values.find((value) => value) || "").trim();
+}
+
+function hasSplitArticles(context) {
+  return Boolean(context.code) && context.articles.length > 0;
+}
+
+function finishSplitRun(config, stats) {
   stats.finished_at = nowIsoSeconds();
-  writeJsonAtomic(summaryPath, stats);
-  if (ui === "pretty" && progress) {
-    progress.end();
-    progress.note(`Split done. articles_written=${stats.articles_written} articles_skipped=${stats.articles_skipped}`);
+  writeJsonAtomic(config.summaryPath, stats);
+  finishSplitProgress(config, stats);
+}
+
+function finishSplitProgress(config, stats) {
+  if (config.ui !== "pretty" || !config.progress) return;
+  config.progress.end();
+  config.progress.note(`Split done. articles_written=${stats.articles_written} articles_skipped=${stats.articles_skipped}`);
+}
+
+async function main() {
+  const config = resolveSplitConfig(parseSplitArgs());
+  if (!validateSplitConfig(config)) return;
+  const toProcess = buildSplitTodo(config);
+  const stats = createSplitStats(config, toProcess);
+  emitSplitTodo(config, toProcess);
+  for (let i = 0; i < toProcess.length; i += 1) {
+    processSplitItem(config, stats, toProcess[i], i + 1, toProcess.length);
   }
+  finishSplitRun(config, stats);
 }
 
 main().catch((err) => {
   console.error(JSON.stringify({ ts: nowIsoSeconds(), level: "error", event: "fatal", error: String(err) }));
   process.exitCode = 1;
 });
-

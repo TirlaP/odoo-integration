@@ -20,116 +20,33 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { parseArgs } = require("node:util");
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function nowIsoSeconds() {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-}
-
-function formatDurationSeconds(totalSeconds) {
-  const sec = Math.max(0, Math.floor(Number(totalSeconds) || 0));
-  const s = sec % 60;
-  const totalMinutes = Math.floor(sec / 60);
-  const m = totalMinutes % 60;
-  const totalHours = Math.floor(totalMinutes / 60);
-  const h = totalHours % 24;
-  const d = Math.floor(totalHours / 24);
-  if (d > 0) return `${d}d ${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m`;
-  if (totalHours > 0) return `${String(totalHours).padStart(2, "0")}h ${String(m).padStart(2, "0")}m`;
-  return `${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`;
-}
-
-function safeFilenameFragment(value) {
-  const s = String(value || "").trim().replace(/[^A-Za-z0-9._-]+/g, "_");
-  return s || "_";
-}
-
-function normalizeSupplierName(name) {
-  return String(name || "")
-    .normalize("NFKD")
-    .replace(/[^0-9A-Za-z]+/g, "")
-    .toUpperCase();
-}
-
-function parseCsvList(value) {
-  if (!value) return [];
-  return String(value)
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function asListOfObjects(value) {
-  return Array.isArray(value) ? value.filter((x) => x && typeof x === "object" && !Array.isArray(x)) : [];
-}
-
-function dedupeCrossRefs(items) {
-  const list = asListOfObjects(items);
-  const seen = new Set();
-  const out = [];
-  for (const item of list) {
-    const key = [
-      String(item.crossManufacturerName || "").trim(),
-      String(item.crossNumber || "").trim(),
-      String(item.searchLevel || "").trim(),
-    ].join("|");
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(item);
-  }
-  return out;
-}
-
-function extractInfoMessage(data) {
-  if (!data) return "";
-  if (typeof data === "string") return data;
-  if (typeof data !== "object") return "";
-  for (const key of ["info", "message", "error", "detail", "status"]) {
-    const v = data[key];
-    if (typeof v === "string" && v.trim()) return v.trim();
-  }
-  return "";
-}
-
-function isMaintenanceOrRateLimitedPayload(data) {
-  const msg = extractInfoMessage(data);
-  if (!msg) return false;
-  return /maintenance|too many requests|rate limit|try again later|temporarily unavailable/i.test(msg);
-}
+const {
+  asListOfObjects,
+  createProgressRenderer,
+  crossReferencePath,
+  dedupeCrossRefs,
+  extractInfoMessage,
+  fetchTecDocJson,
+  formatDurationSeconds,
+  isMaintenanceOrRateLimitedPayload,
+  normalizeSupplierName,
+  nowIsoSeconds,
+  parseCsvList,
+  progressBar,
+  progressPercent,
+  rateLimitClient,
+  readJsonFile,
+  reportFatal,
+  resolveUiMode,
+  trimText,
+  uniqueSortedStrings,
+  writeJsonAtomic,
+} = require("./tecdoc_shared");
 
 function entryHasTransientMaintenance(entry) {
   if (!entry || typeof entry !== "object") return false;
   if (entry.error === "maintenance") return true;
   return isMaintenanceOrRateLimitedPayload(entry.response);
-}
-
-function createProgressRenderer() {
-  let lastLineLen = 0;
-  const clearLine = () => {
-    process.stderr.write("\r" + " ".repeat(Math.max(0, lastLineLen)) + "\r");
-    lastLineLen = 0;
-  };
-  const render = (line) => {
-    const clipped = String(line || "");
-    const pad = Math.max(0, lastLineLen - clipped.length);
-    process.stderr.write("\r" + clipped + (pad ? " ".repeat(pad) : ""));
-    lastLineLen = Math.max(lastLineLen, clipped.length);
-  };
-  const note = (msg) => {
-    clearLine();
-    process.stderr.write(String(msg) + "\n");
-  };
-  const end = () => clearLine();
-  return { render, note, end };
-}
-
-function writeJsonAtomic(filePath, obj) {
-  const tmp = `${filePath}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), "utf8");
-  fs.renameSync(tmp, filePath);
 }
 
 function pickInputDir(outDir, explicitInputDir) {
@@ -145,134 +62,85 @@ function pickInputDir(outDir, explicitInputDir) {
 
 class TecDocClient {
   constructor({ apiKey, apiHost, rps, timeoutMs, maxRetries }) {
-    this.apiKey = apiKey;
-    this.apiHost = apiHost;
-    this.baseUrl = `https://${apiHost}`;
-    this.minDelayMs = rps > 0 ? Math.ceil(1000 / rps) : 0;
-    this.timeoutMs = timeoutMs;
-    this.maxRetries = maxRetries;
-    this._lastRequestAt = 0;
-    this._rateQueue = Promise.resolve();
+    Object.assign(this, initialClientState({ apiKey, apiHost, rps, timeoutMs, maxRetries }));
   }
 
   async _rateLimit() {
-    if (!this.minDelayMs) return;
-    this._rateQueue = this._rateQueue.then(async () => {
-      const now = Date.now();
-      const elapsed = now - this._lastRequestAt;
-      if (elapsed < this.minDelayMs) await sleep(this.minDelayMs - elapsed);
-      this._lastRequestAt = Date.now();
-    });
-    await this._rateQueue;
+    await rateLimitClient(this);
   }
 
   async _getJson(pathname) {
-    const url = `${this.baseUrl}${pathname}`;
-    let backoffMs = 1000;
-
-    for (let attempt = 1; attempt <= this.maxRetries; attempt += 1) {
-      await this._rateLimit();
-      const start = Date.now();
-      const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), this.timeoutMs);
-      try {
-        const res = await fetch(url, {
-          method: "GET",
-          headers: {
-            "x-rapidapi-key": this.apiKey,
-            "x-rapidapi-host": this.apiHost,
-          },
-          signal: controller.signal,
-        });
-        const durationMs = Date.now() - start;
-
-        if (res.status === 404) return { ok: true, status: 404, data: null, durationMs, attempt };
-        if (res.status === 429) {
-          await sleep(backoffMs);
-          backoffMs = Math.min(backoffMs * 2, 60_000);
-          continue;
-        }
-        if (res.status >= 500 && res.status <= 599) {
-          await sleep(backoffMs);
-          backoffMs = Math.min(backoffMs * 2, 60_000);
-          continue;
-        }
-        if (!res.ok) return { ok: false, status: res.status, data: null, durationMs, attempt, error: `HTTP ${res.status}` };
-
-        const text = await res.text();
-        try {
-          const data = JSON.parse(text);
-          // Provider sometimes returns HTTP 200 with a "maintenance / too many requests" message.
-          // Treat it as a transient failure so we mark the file as incomplete and can retry later.
-          if (isMaintenanceOrRateLimitedPayload(data)) {
-            if (attempt < this.maxRetries) {
-              await sleep(backoffMs);
-              backoffMs = Math.min(backoffMs * 2, 60_000);
-              continue;
-            }
-            return { ok: false, status: res.status, data, durationMs, attempt, error: "maintenance" };
-          }
-          return { ok: true, status: res.status, data, durationMs, attempt };
-        } catch {
-          return { ok: false, status: res.status, data: null, durationMs, attempt, error: "invalid_json" };
-        }
-      } catch (err) {
-        const durationMs = Date.now() - start;
-        const isTimeout = err && err.name === "AbortError";
-        const error = isTimeout ? "timeout" : String(err);
-        if (attempt < this.maxRetries) {
-          await sleep(backoffMs);
-          backoffMs = Math.min(backoffMs * 2, 60_000);
-          continue;
-        }
-        return { ok: false, status: 0, data: null, durationMs, attempt, error };
-      } finally {
-        clearTimeout(t);
-      }
-    }
-    return { ok: false, status: 0, data: null, durationMs: 0, attempt: this.maxRetries, error: "failed" };
+    return fetchTecDocJson({
+      apiKey: this.apiKey,
+      apiHost: this.apiHost,
+      baseUrl: this.baseUrl,
+      maxRetries: this.maxRetries,
+      timeoutMs: this.timeoutMs,
+      timeoutMode: "continue",
+      logger: null,
+      rateLimit: () => this._rateLimit(),
+      detectMaintenance: true,
+    }, pathname);
   }
 
   async crossReferences(articleNo, supplierName) {
-    const encodedArticle = encodeURIComponent(String(articleNo));
-    const encodedSupplier = encodeURIComponent(String(supplierName));
-    const p = `/artlookup/search-for-cross-references-through-oem-numbers/article-no/${encodedArticle}/supplierName/${encodedSupplier}`;
-    return this._getJson(p);
+    return this._getJson(crossReferencePath(articleNo, supplierName));
   }
 }
 
+function initialClientState({ apiKey, apiHost, rps, timeoutMs, maxRetries }) {
+  return {
+    apiKey,
+    apiHost,
+    baseUrl: `https://${apiHost}`,
+    minDelayMs: rps > 0 ? Math.ceil(1000 / rps) : 0,
+    timeoutMs,
+    maxRetries,
+    _lastRequestAt: 0,
+    _rateQueue: Promise.resolve(),
+  };
+}
+
 function buildProgressLine({ done, total, inflight, concurrency, foundComplete, foundIncomplete, errors, current, startedAtMs }) {
-  const pct = total > 0 ? Math.min(100, Math.floor((done / total) * 100)) : 0;
-  const width = 28;
-  const filled = Math.round((pct / 100) * width);
-  const bar = "[" + "#".repeat(filled) + "-".repeat(Math.max(0, width - filled)) + "]";
+  const pct = progressPercent(done, total);
+  const bar = progressBar(pct);
   const elapsedSec = startedAtMs ? (Date.now() - startedAtMs) / 1000 : 0;
   const rate = elapsedSec > 0 ? done / elapsedSec : 0;
-  const remainingSec = rate > 0 ? (total - done) / rate : null;
-  const eta = remainingSec == null ? "?" : formatDurationSeconds(remainingSec);
+  const eta = etaText(rate, total, done);
   return `${done}/${total} ${String(pct).padStart(3, " ")}% ${bar} | inflight=${inflight}/${concurrency} | complete=${foundComplete} incomplete=${foundIncomplete} err=${errors} | eta=${eta} | code=${String(current || "").slice(0, 24)}`;
 }
 
+function etaText(rate, total, done) {
+  if (rate <= 0) return "?";
+  return formatDurationSeconds((total - done) / rate);
+}
+
+function supplierFilterEmpty(supplierFilter) {
+  return !supplierFilter || supplierFilter.size === 0;
+}
+
+function supplierAliases(supplierName) {
+  const raw = trimText(supplierName);
+  return raw ? [raw, raw.toUpperCase(), normalizeSupplierName(raw)] : [];
+}
+
 function supplierMatchesFilter(supplierName, supplierFilter) {
-  if (!supplierFilter || supplierFilter.size === 0) return true;
-  const raw = String(supplierName || "").trim();
-  if (!raw) return false;
-  const norm = normalizeSupplierName(raw);
-  return supplierFilter.has(raw) || supplierFilter.has(raw.toUpperCase()) || supplierFilter.has(norm);
+  return supplierFilterEmpty(supplierFilter) || supplierAliases(supplierName).some((alias) => supplierFilter.has(alias));
+}
+
+function shouldRetryExistingEntry(existingEntry, retryIncomplete) {
+  return retryIncomplete && (existingEntry.error || entryHasTransientMaintenance(existingEntry));
 }
 
 function shouldFetchSupplier({ existingEntry, force, retryIncomplete }) {
-  if (force) return true;
-  if (!existingEntry) return true;
-  if (retryIncomplete && (existingEntry.error || entryHasTransientMaintenance(existingEntry))) return true;
-  return false;
+  return Boolean(force || !existingEntry || shouldRetryExistingEntry(existingEntry, retryIncomplete));
 }
 
-async function main() {
-  const args = parseArgs({
+function parseXrefArgs() {
+  return parseArgs({
     options: {
       out: { type: "string", default: path.join(process.cwd(), "tecdoc_data", "art_2026_01_01_js") },
-      input: { type: "string", default: "" }, // defaults to <out>/by_article if present, else <out>/by_code
+      input: { type: "string", default: "" },
       "api-key": { type: "string", default: process.env.RAPIDAPI_KEY || "" },
       rps: { type: "string", default: "1" },
       timeout: { type: "string", default: "60" },
@@ -280,135 +148,202 @@ async function main() {
       concurrency: { type: "string", default: "1" },
       force: { type: "boolean", default: false },
       "retry-incomplete": { type: "boolean", default: false },
-      supplier: { type: "string", default: "" }, // comma-separated
-      codes: { type: "string", default: "" }, // comma-separated
-      ui: { type: "string", default: "" }, // pretty/json
+      supplier: { type: "string", default: "" },
+      codes: { type: "string", default: "" },
+      ui: { type: "string", default: "" },
     },
     allowPositionals: false,
   });
+}
 
-  const outDir = path.resolve(args.values.out);
-  const byCodeDir = pickInputDir(outDir, args.values.input);
-  const summaryPath = path.join(outDir, "xref_summary.json");
-
-  const supplierFilterRaw = parseCsvList(args.values.supplier);
+function buildSupplierFilter(rawValues) {
   const supplierFilter = new Set();
-  for (const s of supplierFilterRaw) {
-    supplierFilter.add(s);
-    supplierFilter.add(s.toUpperCase());
-    supplierFilter.add(normalizeSupplierName(s));
+  for (const supplier of rawValues) {
+    supplierFilter.add(supplier);
+    supplierFilter.add(supplier.toUpperCase());
+    supplierFilter.add(normalizeSupplierName(supplier));
   }
+  return supplierFilter;
+}
 
+function buildCodesFilter(rawValues) {
+  const codes = rawValues.map((code) => trimText(code)).filter(Boolean);
+  return codes.length ? new Set(codes) : null;
+}
+
+function resolveXrefConfig(args) {
+  const outDir = path.resolve(args.values.out);
+  const supplierFilterRaw = parseCsvList(args.values.supplier);
   const codesFilterRaw = parseCsvList(args.values.codes);
-  const codesFilter = codesFilterRaw.length ? new Set(codesFilterRaw.map((c) => String(c).trim()).filter(Boolean)) : null;
+  const ui = resolveUiMode(args.values.ui);
+  return {
+    args,
+    outDir,
+    byCodeDir: pickInputDir(outDir, args.values.input),
+    summaryPath: path.join(outDir, "xref_summary.json"),
+    supplierFilterRaw,
+    supplierFilter: buildSupplierFilter(supplierFilterRaw),
+    codesFilterRaw,
+    codesFilter: buildCodesFilter(codesFilterRaw),
+    ui,
+    progress: ui === "pretty" ? createProgressRenderer() : null,
+  };
+}
 
-  const ui =
-    args.values.ui && ["pretty", "json"].includes(args.values.ui)
-      ? args.values.ui
-      : process.stdout.isTTY
-        ? "pretty"
-        : "json";
-
-  const progress = ui === "pretty" ? createProgressRenderer() : null;
-
-  if (!args.values["api-key"]) {
+function validateXrefConfig(config) {
+  if (!config.args.values["api-key"]) {
     console.error("Missing RAPIDAPI_KEY (set env var or pass --api-key).");
     process.exitCode = 2;
-    return;
+    return false;
   }
-  if (!fs.existsSync(byCodeDir)) {
-    console.error(`Missing directory: ${byCodeDir}`);
+  if (!fs.existsSync(config.byCodeDir)) {
+    console.error(`Missing directory: ${config.byCodeDir}`);
     process.exitCode = 2;
-    return;
+    return false;
   }
+  return true;
+}
 
-  const client = new TecDocClient({
+function createXrefClient(config) {
+  const args = config.args;
+  return new TecDocClient({
     apiKey: args.values["api-key"],
     apiHost: "tecdoc-catalog.p.rapidapi.com",
     rps: Number.parseFloat(args.values.rps) || 3,
     timeoutMs: (Number.parseInt(args.values.timeout, 10) || 20) * 1000,
     maxRetries: Number.parseInt(args.values.retries, 10) || 1,
   });
+}
 
-  const concurrency = Math.max(1, Number.parseInt(args.values.concurrency, 10) || 1);
+function listJsonFiles(dirPath) {
+  return fs.readdirSync(dirPath).filter((fileName) => fileName.endsWith(".json")).map((fileName) => path.join(dirPath, fileName));
+}
 
-  const files = fs
-    .readdirSync(byCodeDir)
-    .filter((f) => f.endsWith(".json"))
-    .map((f) => path.join(byCodeDir, f));
+function payloadCode(payload, filePath) {
+  return trimText(payload.code || path.basename(filePath, ".json"));
+}
 
+function codeMatchesFilter(code, codesFilter) {
+  return !codesFilter || codesFilter.has(code);
+}
+
+function articleSupplierNames(articles) {
+  return uniqueSortedStrings(articles.map((article) => article.supplierName));
+}
+
+function existingSupplierMap(existing) {
+  return new Map(existing.map((entry) => [trimText(entry.supplierName), entry]).filter(([key]) => key));
+}
+
+function xrefContextFromPayload(config, filePath, payload) {
+  if (!isFoundPayload(payload)) return null;
+  const code = payloadCode(payload, filePath);
+  if (!codeMatchesFilter(code, config.codesFilter)) return null;
+  const details = articleDetails(payload);
+  const articles = detailArticles(details);
+  const supplierNames = articleSupplierNames(articles);
+  const targetSuppliers = supplierNames.filter((supplier) => supplierMatchesFilter(supplier, config.supplierFilter));
+  return { payload, filePath, code, details, articles, supplierNames, targetSuppliers };
+}
+
+function articleDetails(payload) {
+  return payload?.tecdoc?.articleNumberDetails;
+}
+
+function detailArticles(details) {
+  return asListOfObjects(details?.articles);
+}
+
+function isFoundPayload(payload) {
+  return Boolean(payload) && payload.outcome === "found";
+}
+
+function supplierFilterHasNoMatch(config, context) {
+  return !supplierFilterEmpty(config.supplierFilter) && context.targetSuppliers.length === 0;
+}
+
+function fileWasAttempted(meta, hasTransient) {
+  return Boolean(meta.xref_fetched_at) || meta.xref_complete === false || hasTransient;
+}
+
+function fileDone(meta, hasTransient) {
+  return meta.xref_complete === true && !hasTransient;
+}
+
+function shouldSkipAllSupplierMode(config, meta, hasTransient) {
+  return fileDone(meta, hasTransient) || (fileWasAttempted(meta, hasTransient) && !config.args.values["retry-incomplete"]);
+}
+
+function supplierModeNeedsWork(config, context, existingBySupplier) {
+  return config.args.values.force || context.targetSuppliers.some((supplierName) => {
+    const existingEntry = existingBySupplier.get(supplierName) || null;
+    return shouldFetchSupplier({ existingEntry, force: false, retryIncomplete: config.args.values["retry-incomplete"] });
+  });
+}
+
+function shouldQueueXrefFile(config, context, existingBySupplier, hasTransient) {
+  if (!config.args.values.force && supplierFilterEmpty(config.supplierFilter)) {
+    return !shouldSkipAllSupplierMode(config, context.payload.meta || {}, hasTransient);
+  }
+  return supplierModeNeedsWork(config, context, existingBySupplier);
+}
+
+function collectXrefTodo(config) {
   const todo = [];
   let skippedNoMatch = 0;
-  for (const filePath of files) {
-    let payload;
-    try {
-      payload = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    } catch {
-      continue;
-    }
-    if (!payload || payload.outcome !== "found") continue;
-    if (codesFilter && !codesFilter.has(String(payload.code || path.basename(filePath, ".json")).trim())) continue;
-
-    const details = payload?.tecdoc?.articleNumberDetails;
-    const articles = asListOfObjects(details?.articles);
-    const supplierNames = Array.from(
-      new Set(articles.map((a) => String(a.supplierName || "").trim()).filter(Boolean)),
-    ).sort();
-
-    const targetSuppliers = supplierNames.filter((s) => supplierMatchesFilter(s, supplierFilter));
-    if (supplierFilter.size > 0 && targetSuppliers.length === 0) {
+  for (const filePath of listJsonFiles(config.byCodeDir)) {
+    const context = readXrefContext(config, filePath);
+    if (!context) continue;
+    if (shouldSkipNoSupplierMatch(config, context)) {
       skippedNoMatch += 1;
       continue;
     }
-
-    const existing = asListOfObjects(payload?.tecdoc?.crossReferencesBySupplier);
-    const hasTransient = existing.some((e) => entryHasTransientMaintenance(e));
-    const existingBySupplier = new Map(
-      existing.map((e) => [String(e.supplierName || "").trim(), e]).filter(([k]) => k),
-    );
-
-    const meta = payload.meta || {};
-    if (!args.values.force && supplierFilter.size === 0) {
-      // Backwards-compatible file-level behavior when running in "all suppliers" mode.
-      const wasAttempted = Boolean(meta.xref_fetched_at) || meta.xref_complete === false || hasTransient;
-      if (meta.xref_complete === true && !hasTransient) continue;
-      if (wasAttempted && !args.values["retry-incomplete"]) continue;
-    } else {
-      // Supplier-filtered (or forced) mode: decide based on per-supplier needs.
-      let needsWork = args.values.force;
-      if (!needsWork) {
-        for (const supplierName of targetSuppliers) {
-          const existingEntry = existingBySupplier.get(supplierName) || null;
-          if (shouldFetchSupplier({ existingEntry, force: args.values.force, retryIncomplete: args.values["retry-incomplete"] })) {
-            needsWork = true;
-            break;
-          }
-        }
-      }
-      if (!needsWork) continue;
-    }
-
-    todo.push({ filePath, code: payload.code || path.basename(filePath, ".json"), targetSuppliers });
+    queueXrefContext(config, todo, context);
   }
+  return { todo, skippedNoMatch };
+}
 
-  if (ui === "pretty" && progress) {
-    const suffix =
-      supplierFilter.size > 0
-        ? ` (supplier filter, skipped_no_match=${skippedNoMatch})`
-        : "";
-    progress.note(`Xref todo: ${todo.length} files${suffix}`);
+function shouldSkipNoSupplierMatch(config, context) {
+  return supplierFilterHasNoMatch(config, context);
+}
+
+function queueXrefContext(config, todo, context) {
+  const existing = asListOfObjects(context.payload?.tecdoc?.crossReferencesBySupplier);
+  const hasTransient = existing.some((entry) => entryHasTransientMaintenance(entry));
+  const existingBySupplier = existingSupplierMap(existing);
+  if (shouldQueueXrefFile(config, context, existingBySupplier, hasTransient)) {
+    todo.push({ filePath: context.filePath, code: context.code, targetSuppliers: context.targetSuppliers });
   }
-  if (ui === "json") console.log(JSON.stringify({ ts: nowIsoSeconds(), event: "xref_todo", count: todo.length }));
+}
 
+function readXrefContext(config, filePath) {
+  const readResult = readJsonFile(filePath);
+  return readResult.ok ? xrefContextFromPayload(config, filePath, readResult.data) : null;
+}
+
+function emitXrefTodo(config, todo, skippedNoMatch) {
+  emitPrettyXrefTodo(config, todo, skippedNoMatch);
+  if (config.ui === "json") console.log(JSON.stringify({ ts: nowIsoSeconds(), event: "xref_todo", count: todo.length }));
+}
+
+function emitPrettyXrefTodo(config, todo, skippedNoMatch) {
+  if (config.ui !== "pretty" || !config.progress) return;
+  const suffix = config.supplierFilter.size > 0 ? ` (supplier filter, skipped_no_match=${skippedNoMatch})` : "";
+  config.progress.note(`Xref todo: ${todo.length} files${suffix}`);
+}
+
+function createNextItem(todo) {
   let cursor = 0;
-  const nextItem = () => {
+  return () => {
     if (cursor >= todo.length) return null;
     const item = todo[cursor];
     cursor += 1;
     return item;
   };
+}
 
-  const stats = {
+function createXrefStats(config, todo, skippedNoMatch, concurrency) {
+  return {
     total: todo.length,
     done: 0,
     inflight: 0,
@@ -417,206 +352,252 @@ async function main() {
     incomplete: 0,
     errors: 0,
     skipped_no_match: skippedNoMatch,
-    supplier_filter: supplierFilterRaw.length ? supplierFilterRaw : null,
-    codes_filter: codesFilterRaw.length ? codesFilterRaw : null,
+    supplier_filter: config.supplierFilterRaw.length ? config.supplierFilterRaw : null,
+    codes_filter: config.codesFilterRaw.length ? config.codesFilterRaw : null,
     started_at_ms: Date.now(),
     started_at: nowIsoSeconds(),
   };
+}
 
-  const processOne = async ({ filePath, code, targetSuppliers }) => {
-    const currentLabel =
-      Array.isArray(targetSuppliers) && targetSuppliers.length === 1
-        ? `${code} ${targetSuppliers[0]}`
-        : code;
-    stats.inflight += 1;
-    const start = Date.now();
-    let payload;
-    try {
-      payload = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    } catch (err) {
+function xrefCurrentLabel(item) {
+  return Array.isArray(item.targetSuppliers) && item.targetSuppliers.length === 1
+    ? `${item.code} ${item.targetSuppliers[0]}`
+    : item.code;
+}
+
+function renderXrefProgress(config, stats, current) {
+  if (config.ui !== "pretty" || !config.progress) return;
+  config.progress.render(
+    buildProgressLine({
+      done: stats.done,
+      total: stats.total,
+      inflight: stats.inflight,
+      concurrency: stats.concurrency,
+      foundComplete: stats.complete,
+      foundIncomplete: stats.incomplete,
+      errors: stats.errors,
+      startedAtMs: stats.started_at_ms,
+      current,
+    }),
+  );
+}
+
+function articleNumberMap(articles) {
+  const articleNoBySupplier = new Map();
+  for (const article of articles) {
+    const supplierName = trimText(article.supplierName);
+    const articleNo = trimText(article.articleNo);
+    addArticleNo(articleNoBySupplier, supplierName, articleNo);
+  }
+  return articleNoBySupplier;
+}
+
+function addArticleNo(articleNoBySupplier, supplierName, articleNo) {
+  if (supplierName && articleNo && !articleNoBySupplier.has(supplierName)) articleNoBySupplier.set(supplierName, articleNo);
+}
+
+function selectedSupplierNames(config, targetSuppliers, supplierNamesAll) {
+  return Array.isArray(targetSuppliers) && targetSuppliers.length
+    ? targetSuppliers
+    : supplierNamesAll.filter((supplier) => supplierMatchesFilter(supplier, config.supplierFilter));
+}
+
+function countError(errorCounts, error) {
+  errorCounts[error] = (errorCounts[error] || 0) + 1;
+}
+
+function missingArticleEntry(supplierName, errorCounts) {
+  const error = "missing_article_no";
+  countError(errorCounts, error);
+  return { supplierName, supplierNameVariantsTried: [], error, response: null };
+}
+
+function xrefVariants(supplierName) {
+  return Array.from(new Set([supplierName, normalizeSupplierName(supplierName)].filter(Boolean)));
+}
+
+function successfulXrefResponse(data) {
+  if (!data) return null;
+  const articles = dedupeCrossRefs((data || {}).articles);
+  return articles.length > 0 ? { ...data, articles } : data;
+}
+
+function failedVariantState(resp, errorCounts) {
+  const error = resp.error || `HTTP ${resp.status || 0}`;
+  countError(errorCounts, error);
+  return { error, stop: isMaintenanceError(resp), chosen: maintenancePayload(resp) };
+}
+
+function isMaintenanceError(resp) {
+  return resp.error === "maintenance";
+}
+
+function maintenancePayload(resp) {
+  return isMaintenanceError(resp) ? resp.data || null : null;
+}
+
+async function fetchSupplierXref(client, supplierName, articleNoForSupplier, errorCounts) {
+  const variantsTried = [];
+  for (const variant of xrefVariants(supplierName)) {
+    variantsTried.push(variant);
+    const resp = await client.crossReferences(articleNoForSupplier, variant);
+    if (resp.ok) return { supplierName, supplierNameVariantsTried: variantsTried, error: null, response: successfulXrefResponse(resp.data) };
+    const failed = failedVariantState(resp, errorCounts);
+    if (failed.stop) return { supplierName, supplierNameVariantsTried: variantsTried, error: failed.error, response: failed.chosen };
+  }
+  return { supplierName, supplierNameVariantsTried: variantsTried, error: "failed", response: null };
+}
+
+async function supplierXrefEntry(context, supplierName, existingBySupplier, errorCounts) {
+  const existingEntry = existingBySupplier.get(supplierName) || null;
+  if (!supplierNeedsFetch(context, existingEntry)) return existingEntry;
+  const articleNoForSupplier = articleNoForSupplierName(context, supplierName);
+  if (!articleNoForSupplier) return missingArticleEntry(supplierName, errorCounts);
+  return fetchSupplierXref(context.client, supplierName, articleNoForSupplier, errorCounts);
+}
+
+function articleNoForSupplierName(context, supplierName) {
+  return trimText(context.articleNoBySupplier.get(supplierName) || context.lookupArticleNo);
+}
+
+function supplierNeedsFetch(context, existingEntry) {
+  return shouldFetchSupplier({ existingEntry, force: context.force, retryIncomplete: context.retryIncomplete });
+}
+
+async function fetchSupplierEntries(context, supplierNames, existingBySupplier, errorCounts) {
+  const entries = [];
+  for (const supplierName of supplierNames) {
+    entries.push(await supplierXrefEntry(context, supplierName, existingBySupplier, errorCounts));
+  }
+  return entries;
+}
+
+function mergeSupplierEntries(existingBySupplier, entries) {
+  for (const entry of entries) {
+    if (!entry || !entry.supplierName) continue;
+    existingBySupplier.set(trimText(entry.supplierName), entry);
+  }
+  return Array.from(existingBySupplier.values());
+}
+
+function enrichArticles(articles, mergedCrossReferencesBySupplier) {
+  const bySupplier = existingSupplierMap(mergedCrossReferencesBySupplier);
+  return articles.map((article) => ({
+    ...article,
+    crossReferences: bySupplier.get(trimText(article.supplierName)) || null,
+  }));
+}
+
+function updateXrefPayload(config, payload, data) {
+  payload.tecdoc = payload.tecdoc || {};
+  payload.tecdoc.crossReferencesBySupplier = data.mergedCrossReferencesBySupplier;
+  payload.tecdoc.articlesEnriched = data.articlesEnriched;
+  payload.meta = payload.meta || {};
+  payload.meta.xref_fetched_at = nowIsoSeconds();
+  payload.meta.xref_duration_ms = data.durationMs;
+  payload.meta.xref_complete = !data.mergedCrossReferencesBySupplier.some((entry) => entry && entry.error);
+  payload.meta.xref_supplier_count = data.supplierNames.length;
+  payload.meta.xref_supplier_count_total = data.supplierNamesAll.length;
+  if (config.supplierFilterRaw.length) payload.meta.xref_supplier_filter = config.supplierFilterRaw;
+  payload.meta.xref_error_counts = data.errorCounts;
+}
+
+function recordWriteResult(stats, payload) {
+  if (payload.meta.xref_complete) stats.complete += 1;
+  else stats.incomplete += 1;
+}
+
+async function enrichXrefPayload(config, client, payload, targetSuppliers, start) {
+  const details = articleDetails(payload);
+  const articles = detailArticles(details);
+  const supplierNamesAll = articleSupplierNames(articles);
+  const supplierNames = selectedSupplierNames(config, targetSuppliers, supplierNamesAll);
+  const existingBySupplier = existingSupplierMap(existingCrossReferences(payload));
+  const errorCounts = {};
+  const context = xrefFetchContext(config, client, payload, details, articles);
+  const entries = await fetchSupplierEntries(context, supplierNames, existingBySupplier, errorCounts);
+  const mergedCrossReferencesBySupplier = mergeSupplierEntries(existingBySupplier, entries);
+  updateXrefPayload(config, payload, {
+    mergedCrossReferencesBySupplier,
+    articlesEnriched: enrichArticles(articles, mergedCrossReferencesBySupplier),
+    durationMs: Date.now() - start,
+    supplierNames,
+    supplierNamesAll,
+    errorCounts,
+  });
+}
+
+function existingCrossReferences(payload) {
+  return asListOfObjects(payload?.tecdoc?.crossReferencesBySupplier);
+}
+
+function xrefFetchContext(config, client, payload, details, articles) {
+  return {
+    client,
+    force: config.args.values.force,
+    retryIncomplete: config.args.values["retry-incomplete"],
+    lookupArticleNo: trimText(details?.articleNo || payload.code),
+    articleNoBySupplier: articleNumberMap(articles),
+  };
+}
+
+async function processXrefItem(config, client, stats, item) {
+  const currentLabel = xrefCurrentLabel(item);
+  stats.inflight += 1;
+  renderXrefProgress(config, stats, currentLabel);
+  const start = Date.now();
+  try {
+    const readResult = readJsonFile(item.filePath);
+    if (!readResult.ok) {
       stats.errors += 1;
       return;
-    } finally {
-      // keep progress bar live
-      if (ui === "pretty" && progress) {
-        progress.render(
-          buildProgressLine({
-            done: stats.done,
-            total: stats.total,
-            inflight: stats.inflight,
-            concurrency: stats.concurrency,
-            foundComplete: stats.complete,
-            foundIncomplete: stats.incomplete,
-            errors: stats.errors,
-            startedAtMs: stats.started_at_ms,
-            current: currentLabel,
-          }),
-        );
-      }
     }
-
-    const details = payload?.tecdoc?.articleNumberDetails;
-    const articles = asListOfObjects(details?.articles);
-    const lookupArticleNo = String(details?.articleNo || payload.code || "").trim();
-    const articleNoBySupplier = new Map();
-    for (const a of articles) {
-      const supplierName = String(a.supplierName || "").trim();
-      if (!supplierName) continue;
-      const articleNo = String(a.articleNo || "").trim();
-      if (!articleNo) continue;
-      if (!articleNoBySupplier.has(supplierName)) articleNoBySupplier.set(supplierName, articleNo);
-    }
-    const supplierNamesAll = Array.from(
-      new Set(articles.map((a) => String(a.supplierName || "").trim()).filter(Boolean)),
-    ).sort();
-
-    const supplierNames =
-      Array.isArray(targetSuppliers) && targetSuppliers.length
-        ? targetSuppliers
-        : supplierNamesAll.filter((s) => supplierMatchesFilter(s, supplierFilter));
-
-    const existingCross = asListOfObjects(payload?.tecdoc?.crossReferencesBySupplier);
-    const existingBySupplier = new Map(
-      existingCross.map((e) => [String(e.supplierName || "").trim(), e]).filter(([k]) => k),
-    );
-
-    const crossReferencesBySupplier = [];
-    const errorCounts = {};
-
-    for (const supplierName of supplierNames) {
-      const existingEntry = existingBySupplier.get(supplierName) || null;
-      if (!shouldFetchSupplier({ existingEntry, force: args.values.force, retryIncomplete: args.values["retry-incomplete"] })) {
-        crossReferencesBySupplier.push(existingEntry);
-        continue;
-      }
-
-      const articleNoForSupplier = (articleNoBySupplier.get(supplierName) || lookupArticleNo || "").trim();
-      if (!articleNoForSupplier) {
-        const err = "missing_article_no";
-        errorCounts[err] = (errorCounts[err] || 0) + 1;
-        crossReferencesBySupplier.push({
-          supplierName, // ALWAYS present
-          supplierNameVariantsTried: [],
-          error: err,
-          response: null,
-        });
-        continue;
-      }
-
-      const variantsTried = [];
-      const variants = Array.from(new Set([supplierName, normalizeSupplierName(supplierName)].filter(Boolean)));
-      let chosen = null;
-      let lastError = null;
-
-      for (const variant of variants) {
-        variantsTried.push(variant);
-        const resp = await client.crossReferences(articleNoForSupplier, variant);
-        if (!resp.ok) {
-          lastError = resp.error || `HTTP ${resp.status || 0}`;
-          errorCounts[lastError] = (errorCounts[lastError] || 0) + 1;
-          if (resp.error === "maintenance") {
-            chosen = resp.data || null;
-            // No point trying other variants when the provider is throttling/maintenance.
-            break;
-          }
-          // try next variant
-          continue;
-        }
-        const respArticles = dedupeCrossRefs((resp.data || {}).articles);
-        // A successful response (even with 0 cross refs) is a successful fetch.
-        // If we previously had transient failures for other variants, clear them.
-        lastError = null;
-        if (resp.data && respArticles.length > 0) {
-          chosen = { ...resp.data, articles: respArticles };
-        } else {
-          chosen = resp.data || null;
-        }
-        break;
-      }
-
-      crossReferencesBySupplier.push({
-        supplierName, // ALWAYS present
-        supplierNameVariantsTried: variantsTried,
-        error: lastError,
-        response: chosen,
-      });
-    }
-
-    // Merge results with whatever was already present (keep insertion order).
-    for (const entry of crossReferencesBySupplier) {
-      if (!entry || !entry.supplierName) continue;
-      existingBySupplier.set(String(entry.supplierName).trim(), entry);
-    }
-    const mergedCrossReferencesBySupplier = Array.from(existingBySupplier.values());
-
-    const bySupplier = new Map(mergedCrossReferencesBySupplier.map((x) => [String(x.supplierName || "").trim(), x]));
-    const articlesEnriched = articles.map((a) => {
-      const supplierName = String(a.supplierName || "").trim();
-      return {
-        ...a,
-        crossReferences: bySupplier.get(supplierName) || null, // includes supplierName
-      };
-    });
-
-    payload.tecdoc = payload.tecdoc || {};
-    payload.tecdoc.crossReferencesBySupplier = mergedCrossReferencesBySupplier;
-    payload.tecdoc.articlesEnriched = articlesEnriched;
-    payload.meta = payload.meta || {};
-    payload.meta.xref_fetched_at = nowIsoSeconds();
-    payload.meta.xref_duration_ms = Date.now() - start;
-    payload.meta.xref_complete = !mergedCrossReferencesBySupplier.some((e) => e && e.error);
-    payload.meta.xref_supplier_count = supplierNames.length;
-    payload.meta.xref_supplier_count_total = supplierNamesAll.length;
-    if (supplierFilterRaw.length) payload.meta.xref_supplier_filter = supplierFilterRaw;
-    payload.meta.xref_error_counts = errorCounts;
-
-    try {
-      writeJsonAtomic(filePath, payload);
-      if (payload.meta.xref_complete) stats.complete += 1;
-      else stats.incomplete += 1;
-    } catch (err) {
-      stats.errors += 1;
-    } finally {
-      stats.inflight = Math.max(0, stats.inflight - 1);
-      stats.done += 1;
-      if (ui === "pretty" && progress) {
-        progress.render(
-          buildProgressLine({
-            done: stats.done,
-            total: stats.total,
-            inflight: stats.inflight,
-            concurrency: stats.concurrency,
-            foundComplete: stats.complete,
-            foundIncomplete: stats.incomplete,
-            errors: stats.errors,
-            startedAtMs: stats.started_at_ms,
-            current: currentLabel,
-          }),
-        );
-      }
-    }
-  };
-
-  const worker = async () => {
-    while (true) {
-      const item = nextItem();
-      if (!item) return;
-      await processOne(item);
-    }
-  };
-
-  const workers = Array.from({ length: concurrency }, () => worker());
-  await Promise.all(workers);
-
-  stats.finished_at = nowIsoSeconds();
-  writeJsonAtomic(summaryPath, stats);
-  if (ui === "pretty" && progress) {
-    progress.end();
-    progress.note(`Xref done. complete=${stats.complete} incomplete=${stats.incomplete} err=${stats.errors}`);
+    const payload = readResult.data;
+    await enrichXrefPayload(config, client, payload, item.targetSuppliers, start);
+    writeJsonAtomic(item.filePath, payload);
+    recordWriteResult(stats, payload);
+  } catch {
+    stats.errors += 1;
+  } finally {
+    stats.inflight = Math.max(0, stats.inflight - 1);
+    stats.done += 1;
+    renderXrefProgress(config, stats, currentLabel);
   }
 }
 
-main().catch((err) => {
-  console.log(JSON.stringify({ ts: nowIsoSeconds(), level: "error", event: "fatal", error: String(err) }));
-  process.exitCode = 1;
-});
+function createXrefWorker(config, client, stats, nextItem) {
+  return async () => {
+    while (true) {
+      const item = nextItem();
+      if (!item) return;
+      await processXrefItem(config, client, stats, item);
+    }
+  };
+}
+
+function finishXrefRun(config, stats) {
+  stats.finished_at = nowIsoSeconds();
+  writeJsonAtomic(config.summaryPath, stats);
+  finishXrefProgress(config, stats);
+}
+
+function finishXrefProgress(config, stats) {
+  if (config.ui !== "pretty" || !config.progress) return;
+  config.progress.end();
+  config.progress.note(`Xref done. complete=${stats.complete} incomplete=${stats.incomplete} err=${stats.errors}`);
+}
+
+async function main() {
+  const config = resolveXrefConfig(parseXrefArgs());
+  if (!validateXrefConfig(config)) return;
+  const client = createXrefClient(config);
+  const concurrency = Math.max(1, Number.parseInt(config.args.values.concurrency, 10) || 1);
+  const { todo, skippedNoMatch } = collectXrefTodo(config);
+  emitXrefTodo(config, todo, skippedNoMatch);
+  const stats = createXrefStats(config, todo, skippedNoMatch, concurrency);
+  const worker = createXrefWorker(config, client, stats, createNextItem(todo));
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  finishXrefRun(config, stats);
+}
+
+main().catch(reportFatal);
