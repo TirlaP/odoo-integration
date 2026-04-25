@@ -17,10 +17,32 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: odoo
+          POSTGRES_PASSWORD: odoo
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U odoo -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: odoo
+      PGPASSWORD: odoo
+      ODOO_TEST_TAGS: "post_install/automotive_parts:TestAutomotiveOperatorFlows.test_async_job_records_retryable_ingest_failures_in_last_error,post_install/automotive_parts:TestAutomotiveOperatorFlows.test_async_ocr_processing_commits_running_state_before_extraction,post_install/automotive_parts:TestAutomotiveOperatorFlows.test_async_progress_update_works_for_non_admin_run_user,post_install/automotive_parts:TestAutomotiveOperatorFlows.test_async_job_cancels_missing_invoice_ingest_target_instead_of_failing"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,6 +53,29 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            gcc \
+            g++ \
+            libffi-dev \
+            libjpeg-dev \
+            libldap2-dev \
+            libpq-dev \
+            libsasl2-dev \
+            libssl-dev \
+            libxml2-dev \
+            libxslt1-dev \
+            libyaml-dev \
+            poppler-utils \
+            postgresql-client \
+            tesseract-ocr \
+            tesseract-ocr-eng \
+            tesseract-ocr-ron \
+            zlib1g-dev
 
       - name: Make CI script executable
         run: chmod +x scripts/ci_validate.sh scripts/build_invoice_ingest_react.sh scripts/smoke_test.sh

@@ -625,10 +625,11 @@ class AutomotiveAsyncJob(models.Model):
             'finished_at': False,
             'attempt_count': attempt_count + (0 if force else 1),
             'progress': max(self.progress, 1.0),
-            'progress_message': self.progress_message or _('Processing'),
+            'progress_message': _('Worker claimed, starting import') if self.state != 'running' else (self.progress_message or _('Processing')),
         })
         if self.batch_id:
             self.batch_id._sync_state_from_jobs()
+        self._call_target_progress_hook('_automotive_async_on_claim')
         self.env.cr.commit()
 
         try:
@@ -675,7 +676,9 @@ class AutomotiveAsyncJob(models.Model):
             else:
                 vals['state'] = 'failed'
             self.write(vals)
-            if not retryable:
+            if retryable:
+                self._call_target_progress_hook('_automotive_async_on_requeue')
+            else:
                 self._call_target_progress_hook('_automotive_async_on_failed')
             emit_runtime_event(
                 {
@@ -835,7 +838,13 @@ class AutomotiveAsyncJob(models.Model):
                    started_at = COALESCE(job.started_at, NOW()),
                    attempt_count = job.attempt_count + 1,
                    progress = CASE WHEN COALESCE(job.progress, 0) > 0 THEN job.progress ELSE 1 END,
-                   progress_message = COALESCE(NULLIF(job.progress_message, ''), 'Worker claimed, starting import')
+                   progress_message = CASE
+                       WHEN job.progress_message IS NULL
+                            OR job.progress_message = ''
+                            OR job.progress_message = 'Queued, waiting for worker'
+                       THEN 'Worker claimed, starting import'
+                       ELSE job.progress_message
+                   END
               FROM next_jobs
              WHERE job.id = next_jobs.id
             RETURNING job.id

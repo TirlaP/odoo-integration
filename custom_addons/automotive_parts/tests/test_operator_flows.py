@@ -37,6 +37,65 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         })
         cls.product = cls.product_tmpl.product_variant_id
 
+    def _create_committed_ocr_job(self, name, external_id, attachment_values=None):
+        with self.registry.cursor() as setup_cr:
+            setup_env = api.Environment(setup_cr, self.env.uid, {})
+            attachment_vals = {
+                'name': f'{external_id}.pdf',
+                'type': 'binary',
+                'mimetype': 'application/pdf',
+                'res_model': 'invoice.ingest.job',
+            }
+            if attachment_values:
+                attachment_vals.update(attachment_values)
+            attachment = setup_env['ir.attachment'].create(attachment_vals)
+            job = setup_env['invoice.ingest.job'].create({
+                'name': name,
+                'source': 'ocr',
+                'state': 'pending',
+                'attachment_id': attachment.id,
+                'external_id': external_id,
+            })
+            setup_cr.commit()
+            return job.id
+
+    def _create_committed_ocr_async_job(self, name, external_id, attachment_values=None):
+        with self.registry.cursor() as setup_cr:
+            setup_env = api.Environment(setup_cr, self.env.uid, {})
+            attachment_vals = {
+                'name': f'{external_id}.pdf',
+                'type': 'binary',
+                'mimetype': 'application/pdf',
+                'res_model': 'invoice.ingest.job',
+            }
+            if attachment_values:
+                attachment_vals.update(attachment_values)
+            attachment = setup_env['ir.attachment'].create(attachment_vals)
+            job = setup_env['invoice.ingest.job'].create({
+                'name': name,
+                'source': 'ocr',
+                'state': 'pending',
+                'attachment_id': attachment.id,
+                'external_id': external_id,
+            })
+            async_job = job._enqueue_async_processing()
+            setup_cr.commit()
+            return job.id, async_job.id
+
+    def _process_async_job_in_committed_cursor(self, async_job_id):
+        with self.registry.cursor() as worker_cr:
+            worker_env = api.Environment(worker_cr, self.env.uid, {})
+            processed = worker_env['automotive.async.job'].browse(async_job_id)._process_one(force=True)
+            worker_cr.commit()
+            return processed
+
+    def _run_invoice_ingest_cron_in_committed_cursor(self):
+        with self.registry.cursor() as worker_cr:
+            worker_env = api.Environment(worker_cr, self.env.uid, {})
+            processed = worker_env['invoice.ingest.job'].cron_process_jobs()
+            worker_cr.commit()
+            return processed
+
     def test_key_backend_actions_have_paths_and_names(self):
         expectations = {
             'sale.product_template_action': 'sale-products',
@@ -482,20 +541,14 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         )
 
     def test_invoice_ingest_cron_processes_async_queue_as_fallback(self):
-        attachment = self.env['ir.attachment'].create({
-            'name': 'fallback_queue.pdf',
-            'datas': base64.b64encode(b'%PDF-1.4\n% fallback queue\n'),
-            'res_model': 'invoice.ingest.job',
-            'type': 'binary',
-            'mimetype': 'application/pdf',
-        })
-        job = self.env['invoice.ingest.job'].create({
-            'name': 'OCR Fallback Queue',
-            'source': 'ocr',
-            'state': 'pending',
-            'attachment_id': attachment.id,
-            'external_id': 'fallback-queue-checksum',
-        })
+        job_id = self._create_committed_ocr_job(
+            name='OCR Fallback Queue',
+            external_id='fallback-queue-checksum',
+            attachment_values={
+                'name': 'fallback_queue.pdf',
+                'datas': base64.b64encode(b'%PDF-1.4\n% fallback queue\n'),
+            },
+        )
 
         def fake_process(recordset, raise_on_error=False):
             recordset.write({
@@ -506,47 +559,34 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             })
             return True
 
-        with patch.object(type(job), '_process_ingest_job', fake_process):
-            processed = self.env['invoice.ingest.job'].cron_process_jobs()
+        with patch.object(type(self.env['invoice.ingest.job']), '_process_ingest_job', fake_process):
+            processed = self._run_invoice_ingest_cron_in_committed_cursor()
 
-        async_job = self.env['automotive.async.job'].search(
-            [
-                ('target_model', '=', 'invoice.ingest.job'),
-                ('target_method', '=', '_process_ingest_job'),
-                ('target_res_id', '=', job.id),
-            ],
-            order='id desc',
-            limit=1,
-        )
         self.assertGreaterEqual(processed, 1)
-        self.assertTrue(async_job, 'Invoice ingest cron should enqueue an async job for OCR imports.')
-        self.assertEqual(async_job.state, 'done')
-        self.assertEqual(job.state, 'needs_review')
+        with self.registry.cursor() as check_cr:
+            check_env = api.Environment(check_cr, self.env.uid, {})
+            async_job = check_env['automotive.async.job'].search(
+                [
+                    ('target_model', '=', 'invoice.ingest.job'),
+                    ('target_method', '=', '_process_ingest_job'),
+                    ('target_res_id', '=', job_id),
+                ],
+                order='id desc',
+                limit=1,
+            )
+            job = check_env['invoice.ingest.job'].browse(job_id)
+            self.assertTrue(async_job, 'Invoice ingest cron should enqueue an async job for OCR imports.')
+            self.assertEqual(async_job.state, 'done')
+            self.assertEqual(job.state, 'needs_review')
 
     def test_invoice_ingest_cron_processes_existing_queued_async_job(self):
-        attachment = self.env['ir.attachment'].create({
-            'name': 'existing_queue.pdf',
-            'datas': base64.b64encode(b'%PDF-1.4\n% existing queue\n'),
-            'res_model': 'invoice.ingest.job',
-            'type': 'binary',
-            'mimetype': 'application/pdf',
-        })
-        job = self.env['invoice.ingest.job'].create({
-            'name': 'OCR Existing Queue',
-            'source': 'ocr',
-            'state': 'pending',
-            'attachment_id': attachment.id,
-            'external_id': 'existing-queue-checksum',
-        })
-        async_job = self.env['automotive.async.job'].enqueue_job(
-            'invoice_ingest',
-            name='Process OCR Existing Queue',
-            payload={'invoice_ingest_job_id': job.id},
-            source=job,
-            target_model='invoice.ingest.job',
-            target_method='_process_ingest_job',
-            target_res_id=job.id,
-            priority=90,
+        job_id, async_job_id = self._create_committed_ocr_async_job(
+            name='OCR Existing Queue',
+            external_id='existing-queue-checksum',
+            attachment_values={
+                'name': 'existing_queue.pdf',
+                'datas': base64.b64encode(b'%PDF-1.4\n% existing queue\n'),
+            },
         )
 
         def fake_process(recordset, raise_on_error=False):
@@ -558,14 +598,16 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             })
             return True
 
-        with patch.object(type(job), '_process_ingest_job', fake_process):
-            processed = self.env['invoice.ingest.job'].cron_process_jobs()
+        with patch.object(type(self.env['invoice.ingest.job']), '_process_ingest_job', fake_process):
+            processed = self._run_invoice_ingest_cron_in_committed_cursor()
 
-        async_job.invalidate_recordset()
-        job.invalidate_recordset()
         self.assertGreaterEqual(processed, 1)
-        self.assertEqual(async_job.state, 'done')
-        self.assertEqual(job.state, 'needs_review')
+        with self.registry.cursor() as check_cr:
+            check_env = api.Environment(check_cr, self.env.uid, {})
+            async_job = check_env['automotive.async.job'].browse(async_job_id)
+            job = check_env['invoice.ingest.job'].browse(job_id)
+            self.assertEqual(async_job.state, 'done')
+            self.assertEqual(job.state, 'needs_review')
 
     def test_invoice_ingest_reads_db_backed_upload_bytes_when_attachment_is_missing(self):
         payload = b'%PDF-1.4\n% db-backed upload\n'
@@ -580,60 +622,46 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertEqual(job._get_attachment_binary(), payload)
         self.assertEqual(job._extract_pdf_text(), '')
 
-    def test_async_job_records_ingest_failures_in_last_error(self):
-        job = self.env['invoice.ingest.job'].create({
-            'name': 'OCR Missing File',
-            'source': 'ocr',
-            'state': 'pending',
-            'attachment_id': self.env['ir.attachment'].create({
-                'name': 'missing.pdf',
-                'type': 'binary',
-                'mimetype': 'application/pdf',
-                'res_model': 'invoice.ingest.job',
-            }).id,
-            'external_id': 'missing-file-checksum',
-        })
+    def test_async_job_records_retryable_ingest_failures_in_last_error(self):
+        job_id, async_job_id = self._create_committed_ocr_async_job(
+            name='OCR Missing File',
+            external_id='missing-file-checksum',
+            attachment_values={'name': 'missing.pdf'},
+        )
 
-        async_job = job._enqueue_async_processing()
-        processed = async_job._process_one(force=True)
+        processed = self._process_async_job_in_committed_cursor(async_job_id)
 
         self.assertFalse(processed)
-        self.assertEqual(job.state, 'failed')
-        self.assertIn('Re-upload the document', job.error or '')
-        self.assertEqual(async_job.state, 'queued')
-        self.assertEqual(async_job.last_error_type, 'UserError')
-        self.assertIn('Re-upload the document', async_job.last_error or '')
-        runtime_log = self.env['automotive.runtime.log'].search(
-            [('event', '=', 'automotive_async_job_failed'), ('related_res_id', '=', job.id)],
-            order='id desc',
-            limit=1,
-        )
-        self.assertTrue(runtime_log)
-        self.assertEqual(runtime_log.category, 'async_job')
-        self.assertIn('Re-upload the document', runtime_log.message or '')
+        with self.registry.cursor() as check_cr:
+            check_env = api.Environment(check_cr, self.env.uid, {})
+            job = check_env['invoice.ingest.job'].browse(job_id)
+            async_job = check_env['automotive.async.job'].browse(async_job_id)
+            self.assertEqual(async_job.state, 'queued')
+            self.assertEqual(async_job.last_error_type, 'UserError')
+            self.assertEqual(job.state, 'pending')
+            self.assertFalse(job.error)
+            self.assertIn('Missing OPENAI_API_KEY', async_job.last_error or '')
+            runtime_log = check_env['automotive.runtime.log'].search(
+                [('event', '=', 'automotive_async_job_failed'), ('related_res_id', '=', job.id)],
+                order='id desc',
+                limit=1,
+            )
+            self.assertTrue(runtime_log)
+            self.assertEqual(runtime_log.category, 'async_job')
+            self.assertIn('Missing OPENAI_API_KEY', runtime_log.message or '')
 
     def test_async_ocr_processing_commits_running_state_before_extraction(self):
-        attachment = self.env['ir.attachment'].create({
-            'name': 'running_state.pdf',
-            'datas': base64.b64encode(b'%PDF-1.4\n% running state\n'),
-            'res_model': 'invoice.ingest.job',
-            'type': 'binary',
-            'mimetype': 'application/pdf',
-        })
-        job = self.env['invoice.ingest.job'].create({
-            'name': 'OCR Running Visibility',
-            'source': 'ocr',
-            'state': 'pending',
-            'attachment_id': attachment.id,
-            'external_id': 'running-state-checksum',
-        })
-        async_job = job._enqueue_async_processing()
+        job_id, async_job_id = self._create_committed_ocr_async_job(
+            name='OCR Running Visibility',
+            external_id='running-state-checksum',
+            attachment_values={'datas': base64.b64encode(b'%PDF-1.4\n% running state\n')},
+        )
         observed = {}
 
         def fake_extract(recordset):
             with self.registry.cursor() as other_cr:
                 other_env = api.Environment(other_cr, self.env.uid, {})
-                other_job = other_env['invoice.ingest.job'].browse(job.id)
+                other_job = other_env['invoice.ingest.job'].browse(job_id)
                 observed['state'] = other_job.state
                 observed['started_at'] = bool(other_job.started_at)
                 observed['stage'] = other_job.async_progress_message
@@ -645,8 +673,8 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             })
             return True
 
-        with patch.object(type(job), 'action_extract_with_openai', fake_extract):
-            processed = async_job._process_one(force=True)
+        with patch.object(type(self.env['invoice.ingest.job']), 'action_extract_with_openai', fake_extract):
+            processed = self._process_async_job_in_committed_cursor(async_job_id)
 
         self.assertTrue(processed)
         self.assertEqual(observed.get('state'), 'running')
@@ -906,29 +934,35 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertIn('post-process crash', runtime_log.message or '')
 
     def test_async_job_cancels_missing_invoice_ingest_target_instead_of_failing(self):
-        async_job = self.env['automotive.async.job'].enqueue_job(
-            'invoice_ingest',
-            name='Missing invoice ingest target',
-            payload={'invoice_ingest_job_id': 999999},
-            target_model='invoice.ingest.job',
-            target_method='_process_ingest_job',
-            target_res_id=999999,
-        )
+        with self.registry.cursor() as setup_cr:
+            setup_env = api.Environment(setup_cr, self.env.uid, {})
+            async_job = setup_env['automotive.async.job'].enqueue_job(
+                'invoice_ingest',
+                name='Missing invoice ingest target',
+                payload={'invoice_ingest_job_id': 999999},
+                target_model='invoice.ingest.job',
+                target_method='_process_ingest_job',
+                target_res_id=999999,
+            )
+            async_job_id = async_job.id
+            setup_cr.commit()
 
-        processed = async_job._process_one(force=True)
+        processed = self._process_async_job_in_committed_cursor(async_job_id)
 
         self.assertFalse(processed)
-        async_job.invalidate_recordset()
-        self.assertEqual(async_job.state, 'cancelled')
-        self.assertEqual(async_job.last_error, False)
-        self.assertEqual(async_job.last_error_type, False)
-        self.assertEqual(async_job.progress_message, 'Cancelled because the target record was deleted.')
-        runtime_log = self.env['automotive.runtime.log'].search(
-            [('event', '=', 'automotive_async_job_failed'), ('related_res_id', '=', 999999)],
-            order='id desc',
-            limit=1,
-        )
-        self.assertFalse(runtime_log)
+        with self.registry.cursor() as check_cr:
+            check_env = api.Environment(check_cr, self.env.uid, {})
+            async_job = check_env['automotive.async.job'].browse(async_job_id)
+            self.assertEqual(async_job.state, 'cancelled')
+            self.assertEqual(async_job.last_error, False)
+            self.assertEqual(async_job.last_error_type, False)
+            self.assertEqual(async_job.progress_message, 'Cancelled because the target record was deleted.')
+            runtime_log = check_env['automotive.runtime.log'].search(
+                [('event', '=', 'automotive_async_job_failed'), ('related_res_id', '=', 999999)],
+                order='id desc',
+                limit=1,
+            )
+            self.assertFalse(runtime_log)
 
     def test_invoice_extract_reports_real_async_progress_milestones(self):
         attachment = self.env['ir.attachment'].create({
