@@ -10,10 +10,11 @@ try {
     ENABLED = true;
 }
 
-function serializeError(error) {
-    if (!error) {
-        return {};
-    }
+function emptyObject() {
+    return {};
+}
+
+function serializeKnownError(error) {
     const serialized = {
         name: error.name || "Error",
         message: error.message || String(error),
@@ -22,23 +23,28 @@ function serializeError(error) {
     return serialized;
 }
 
-function enqueue(event) {
-    if (!ENABLED) {
-        return;
-    }
-    const body = JSON.stringify(event);
+function serializeError(error) {
+    return error ? serializeKnownError(error) : emptyObject();
+}
+
+function fallbackText(value, fallback) {
+    return value || fallback;
+}
+
+function nullableValue(value) {
+    return value || null;
+}
+
+function trySendBeacon(body) {
     try {
         const blob = new Blob([body], { type: "application/json" });
-        if (navigator.sendBeacon) {
-            const sent = navigator.sendBeacon(ENDPOINT, blob);
-            if (sent) {
-                return;
-            }
-        }
+        return Boolean(navigator.sendBeacon && navigator.sendBeacon(ENDPOINT, blob));
     } catch {
-        // Fall through to fetch.
+        return false;
     }
+}
 
+function sendFetch(body) {
     fetch(ENDPOINT, {
         method: "POST",
         headers: {
@@ -48,6 +54,16 @@ function enqueue(event) {
         keepalive: true,
         credentials: "same-origin",
     }).catch(() => {});
+}
+
+function enqueue(event) {
+    if (!ENABLED) {
+        return;
+    }
+    const body = JSON.stringify(event);
+    if (!trySendBeacon(body)) {
+        sendFetch(body);
+    }
 }
 
 function report(kind, details) {
@@ -62,26 +78,37 @@ function report(kind, details) {
     });
 }
 
+function reportResourceError(event, target) {
+    report("resource_error", {
+        tag_name: target.tagName,
+        src: target.src || target.href || null,
+        filename: event.filename || null,
+    });
+}
+
+function reportWindowError(event) {
+    report("window_error", {
+        message: fallbackText(event.message, "Unknown window error"),
+        filename: nullableValue(event.filename),
+        lineno: nullableValue(event.lineno),
+        colno: nullableValue(event.colno),
+        error: serializeError(event.error),
+    });
+}
+
+function isResourceErrorTarget(target) {
+    return Boolean(target && target !== window && target.tagName);
+}
+
 window.addEventListener(
     "error",
     (event) => {
         const target = event.target;
-        if (target && target !== window && target.tagName) {
-            report("resource_error", {
-                tag_name: target.tagName,
-                src: target.src || target.href || null,
-                filename: event.filename || null,
-            });
+        if (isResourceErrorTarget(target)) {
+            reportResourceError(event, target);
             return;
         }
-
-        report("window_error", {
-            message: event.message || "Unknown window error",
-            filename: event.filename || null,
-            lineno: event.lineno || null,
-            colno: event.colno || null,
-            error: serializeError(event.error),
-        });
+        reportWindowError(event);
     },
     true
 );

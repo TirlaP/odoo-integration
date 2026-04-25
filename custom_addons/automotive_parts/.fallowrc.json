@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+  "entry": [
+    "static/src/js/browser_diagnostics.js",
+    "static/src/js/invoice_ingest_live_status.js",
+    "static/src/js/invoice_ingest_submit_once.js",
+    "static/src/js/pdf_drop_binary_field.js",
+    "static/src/scss/pdf_drop_binary_field.scss",
+    "static/src/scss/invoice_ingest_table.scss"
+  ],
+  "dynamicallyLoaded": [
+    "static/src/xml/pdf_drop_binary_field.xml"
+  ]
+}

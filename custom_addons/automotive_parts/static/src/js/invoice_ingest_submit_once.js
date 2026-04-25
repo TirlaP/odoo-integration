@@ -3,13 +3,17 @@
 import { patch } from "@web/core/utils/patch";
 import { FormController } from "@web/views/form/form_controller";
 
-function isInvoiceIngestUploadAction(controller, clickParams) {
-    return (
-        controller.props.resModel === "invoice.ingest.upload.wizard" &&
-        clickParams?.type === "object" &&
-        clickParams?.name === "action_import_document"
-    );
-}
+const INVOICE_UPLOAD_MODEL = "invoice.ingest.upload.wizard";
+const INVOICE_UPLOAD_ACTION = "action_import_document";
+
+const isInvoiceUploadModel = (controller) => controller.props.resModel === INVOICE_UPLOAD_MODEL;
+const isObjectButton = (clickParams) => clickParams?.type === "object";
+const isImportDocumentAction = (clickParams) => clickParams?.name === INVOICE_UPLOAD_ACTION;
+const isInvoiceIngestUploadAction = (controller, clickParams) => (
+    isInvoiceUploadModel(controller) &&
+    isObjectButton(clickParams) &&
+    isImportDocumentAction(clickParams)
+);
 
 patch(FormController.prototype, {
     setup() {
@@ -17,22 +21,30 @@ patch(FormController.prototype, {
         this._invoiceIngestSubmitLocked = false;
     },
 
+    _unlockInvoiceIngestSubmit() {
+        this._invoiceIngestSubmitLocked = false;
+    },
+
+    async _runInvoiceIngestUploadButton() {
+        this._invoiceIngestSubmitLocked = true;
+        try {
+            const result = await super.beforeExecuteActionButton(...arguments);
+            if (result === false) {
+                this._unlockInvoiceIngestSubmit();
+            }
+            return result;
+        } catch (error) {
+            this._unlockInvoiceIngestSubmit();
+            throw error;
+        }
+    },
+
     async beforeExecuteActionButton(clickParams) {
+        if (this._invoiceIngestSubmitLocked && isInvoiceIngestUploadAction(this, clickParams)) {
+            return false;
+        }
         if (isInvoiceIngestUploadAction(this, clickParams)) {
-            if (this._invoiceIngestSubmitLocked) {
-                return false;
-            }
-            this._invoiceIngestSubmitLocked = true;
-            try {
-                const result = await super.beforeExecuteActionButton(...arguments);
-                if (result === false) {
-                    this._invoiceIngestSubmitLocked = false;
-                }
-                return result;
-            } catch (error) {
-                this._invoiceIngestSubmitLocked = false;
-                throw error;
-            }
+            return this._runInvoiceIngestUploadButton(...arguments);
         }
         return super.beforeExecuteActionButton(...arguments);
     },
@@ -42,7 +54,7 @@ patch(FormController.prototype, {
             return await super.afterExecuteActionButton(...arguments);
         } finally {
             if (isInvoiceIngestUploadAction(this, clickParams)) {
-                this._invoiceIngestSubmitLocked = false;
+                this._unlockInvoiceIngestSubmit();
             }
         }
     },

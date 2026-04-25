@@ -10,6 +10,21 @@ import { standardFieldProps } from "@web/views/fields/standard_field_props";
 
 import { Component, useState } from "@odoo/owl";
 
+function parseAcceptedExtensions(rawExtensions) {
+    return (rawExtensions || "*")
+        .split(",")
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean);
+}
+
+function acceptsAnyFile(accepted) {
+    return !accepted.length || accepted.includes("*");
+}
+
+function fileNameMatchesExtension(fileName, extension) {
+    return extension.startsWith(".") && fileName.endsWith(extension);
+}
+
 export class PdfDropBinaryField extends Component {
     static template = "automotive_parts.PdfDropBinaryField";
     static components = { FileUploader };
@@ -43,15 +58,12 @@ export class PdfDropBinaryField extends Component {
     }
 
     isAcceptedFile(file) {
-        const accepted = (this.props.acceptedFileExtensions || "*")
-            .split(",")
-            .map((item) => item.trim().toLowerCase())
-            .filter(Boolean);
-        if (!accepted.length || accepted.includes("*")) {
+        const accepted = parseAcceptedExtensions(this.props.acceptedFileExtensions);
+        if (acceptsAnyFile(accepted)) {
             return true;
         }
         const fileName = (file.name || "").toLowerCase();
-        return accepted.some((ext) => ext.startsWith(".") && fileName.endsWith(ext));
+        return accepted.some((ext) => fileNameMatchesExtension(fileName, ext));
     }
 
     async processFile(file) {

@@ -13,29 +13,121 @@ const POLL_INTERVAL_MS = 500;
 const INITIAL_POLL_DELAY_MS = 150;
 const INVOICE_INGEST_MODEL = "invoice.ingest.job";
 
+function getRootData(root) {
+    return root?.data || {};
+}
+
+function isActiveState(state) {
+    return ACTIVE_STATES.has(state);
+}
+
+function isInvoiceIngestRecord(resModel, root) {
+    return resModel === INVOICE_INGEST_MODEL && Boolean(root?.resId);
+}
+
+function isInvoiceIngestProcessing(resModel, root) {
+    return isInvoiceIngestRecord(resModel, root) && isActiveState(getRootData(root).state);
+}
+
+function isDuplicateObject(value) {
+    return Boolean(value) && typeof value === "object" && "resId" in value;
+}
+
+function scalarOrFalse(value) {
+    return value || false;
+}
+
 function getDuplicateTargetId(value) {
     if (Array.isArray(value)) {
         return value[0];
     }
-    if (value && typeof value === "object" && "resId" in value) {
+    if (isDuplicateObject(value)) {
         return value.resId;
     }
+    return scalarOrFalse(value);
+}
+
+function fallbackText(value) {
+    return value || "";
+}
+
+function fallbackNumber(value) {
+    return value || 0;
+}
+
+function fallbackFalse(value) {
     return value || false;
+}
+
+function getNotificationTitle(state) {
+    return state === "running" ? _t("Import Running") : _t("Import Queued");
+}
+
+function getRunningMessage(stage, progress) {
+    if (stage) {
+        return `${stage} (${progress}%)`;
+    }
+    return _t("Import is processing in the background. This page updates automatically.");
+}
+
+function getQueuedMessage(stage) {
+    return stage || _t("Import is queued in the background and will start automatically.");
+}
+
+function getNotificationMessage(state, stage, progress) {
+    if (state === "running") {
+        return getRunningMessage(stage, progress);
+    }
+    return getQueuedMessage(stage);
 }
 
 function getNotificationContent(data) {
     const state = data?.state;
-    const isRunning = state === "running";
-    const stage = data?.async_progress_message || "";
-    const progress = Math.round(data?.async_progress_percent || 0);
+    const stage = fallbackText(data?.async_progress_message);
+    const progress = Math.round(fallbackNumber(data?.async_progress_percent));
     return {
-        title: isRunning ? _t("Import Running") : _t("Import Queued"),
-        message: isRunning
-            ? (stage
-                ? `${stage} (${progress}%)`
-                : _t("Import is processing in the background. This page updates automatically."))
-            : (stage || _t("Import is queued in the background and will start automatically.")),
+        title: getNotificationTitle(state),
+        message: getNotificationMessage(state, stage, progress),
     };
+}
+
+function getNotificationKey(data) {
+    return [
+        fallbackText(data.state),
+        fallbackText(data.async_progress_message),
+        fallbackNumber(data.async_progress_percent),
+    ].join(":");
+}
+
+function getRootId(root) {
+    return fallbackFalse(root?.resId);
+}
+
+function getEffectDeps(resModel, root, duplicateId) {
+    const data = getRootData(root);
+    return [
+        resModel,
+        getRootId(root),
+        fallbackText(data.state),
+        fallbackText(data.finished_at),
+        fallbackText(data.async_progress_message),
+        fallbackNumber(data.async_progress_percent),
+        fallbackFalse(duplicateId),
+        fallbackText(data.duplicate_warning_message),
+    ];
+}
+
+function buildDuplicateNoticeKey(root, duplicateId) {
+    return [
+        "invoice_ingest_duplicate",
+        root.resId,
+        duplicateId,
+        fallbackText(getRootData(root).finished_at),
+    ].join(":");
+}
+
+function hasDuplicateWarningPayload(duplicateId, message, noticeKey) {
+    return Boolean(duplicateId && message && noticeKey);
 }
 
 function buildDuplicateAction(duplicateId) {
@@ -79,25 +171,15 @@ patch(FormController.prototype, {
 
     _invoiceIngestEffectDeps() {
         const root = this._invoiceIngestRoot();
-        return [
-            this.props.resModel,
-            root?.resId || false,
-            root?.data?.state || "",
-            root?.data?.finished_at || "",
-            root?.data?.async_progress_message || "",
-            root?.data?.async_progress_percent || 0,
-            this._invoiceDuplicateTargetId() || false,
-            root?.data?.duplicate_warning_message || "",
-        ];
+        return getEffectDeps(this.props.resModel, root, this._invoiceDuplicateTargetId());
     },
 
     _isInvoiceIngestRecord() {
-        const root = this._invoiceIngestRoot();
-        return this.props.resModel === INVOICE_INGEST_MODEL && Boolean(root?.resId);
+        return isInvoiceIngestRecord(this.props.resModel, this._invoiceIngestRoot());
     },
 
     _isInvoiceIngestProcessing() {
-        return this._isInvoiceIngestRecord() && ACTIVE_STATES.has(this._invoiceIngestRoot()?.data?.state);
+        return isInvoiceIngestProcessing(this.props.resModel, this._invoiceIngestRoot());
     },
 
     _scheduleInvoiceIngestInitialPoll() {
@@ -131,9 +213,9 @@ patch(FormController.prototype, {
     },
 
     _showInvoiceIngestNotification() {
-        const data = this._invoiceIngestRoot()?.data || {};
+        const data = getRootData(this._invoiceIngestRoot());
         const { title, message } = getNotificationContent(data);
-        const notificationKey = [data.state || "", data.async_progress_message || "", data.async_progress_percent || 0].join(":");
+        const notificationKey = getNotificationKey(data);
         if (this._closeInvoiceIngestNotification && this._invoiceIngestNotificationKey === notificationKey) {
             return;
         }
@@ -148,7 +230,7 @@ patch(FormController.prototype, {
         this._invoiceIngestNotificationKey = notificationKey;
     },
 
-    _stopInvoiceIngestPolling() {
+    _clearInvoiceIngestTimers() {
         if (this._invoiceIngestPollTimer) {
             browser.clearInterval(this._invoiceIngestPollTimer);
             this._invoiceIngestPollTimer = null;
@@ -157,16 +239,24 @@ patch(FormController.prototype, {
             browser.clearTimeout(this._invoiceIngestInitialPollTimer);
             this._invoiceIngestInitialPollTimer = null;
         }
+    },
+
+    _closeInvoiceIngestStatusNotification() {
         if (this._closeInvoiceIngestNotification) {
             this._closeInvoiceIngestNotification();
             this._closeInvoiceIngestNotification = null;
         }
         this._invoiceIngestNotificationKey = null;
+    },
+
+    _stopInvoiceIngestPolling() {
+        this._clearInvoiceIngestTimers();
+        this._closeInvoiceIngestStatusNotification();
         this._invoiceIngestPolling = false;
     },
 
     _invoiceDuplicateTargetId() {
-        return getDuplicateTargetId(this._invoiceIngestRoot()?.data?.duplicate_of_job_id);
+        return getDuplicateTargetId(getRootData(this._invoiceIngestRoot()).duplicate_of_job_id);
     },
 
     _invoiceDuplicateNoticeKey() {
@@ -178,23 +268,22 @@ patch(FormController.prototype, {
         if (!duplicateId) {
             return false;
         }
-        return [
-            "invoice_ingest_duplicate",
-            root.resId,
-            duplicateId,
-            root?.data?.finished_at || "",
-        ].join(":");
+        return buildDuplicateNoticeKey(root, duplicateId);
     },
 
     _invoiceDuplicateWarningContext() {
         const root = this._invoiceIngestRoot();
-        if (!this._isInvoiceIngestRecord() || ACTIVE_STATES.has(root?.data?.state)) {
+        const data = getRootData(root);
+        if (!this._isInvoiceIngestRecord()) {
+            return null;
+        }
+        if (isActiveState(data.state)) {
             return null;
         }
         const duplicateId = this._invoiceDuplicateTargetId();
-        const message = root?.data?.duplicate_warning_message;
+        const message = data.duplicate_warning_message;
         const noticeKey = this._invoiceDuplicateNoticeKey();
-        if (!duplicateId || !message || !noticeKey) {
+        if (!hasDuplicateWarningPayload(duplicateId, message, noticeKey)) {
             return null;
         }
         return { duplicateId, message, noticeKey };
@@ -235,25 +324,33 @@ patch(FormController.prototype, {
         return this._invoiceIngestPolling;
     },
 
+    async _refreshInvoiceIngestRecordIfClean() {
+        const root = this._invoiceIngestRoot();
+        if (!(await root.isDirty())) {
+            await root.load();
+        }
+    },
+
+    _finalizeInvoiceIngestPoll() {
+        this._invoiceIngestPolling = false;
+        if (!this._isInvoiceIngestProcessing()) {
+            this._stopInvoiceIngestPolling();
+        }
+        this._maybeShowInvoiceDuplicateWarning();
+    },
+
     async _pollInvoiceIngestRecord() {
         if (this._shouldSkipInvoiceIngestPoll()) {
             return;
         }
         this._invoiceIngestPolling = true;
         try {
-            const root = this._invoiceIngestRoot();
-            if (!(await root.isDirty())) {
-                await root.load();
-            }
+            await this._refreshInvoiceIngestRecordIfClean();
         } catch (error) {
             this._stopInvoiceIngestPolling();
             throw error;
         } finally {
-            this._invoiceIngestPolling = false;
-            if (!this._isInvoiceIngestProcessing()) {
-                this._stopInvoiceIngestPolling();
-            }
-            this._maybeShowInvoiceDuplicateWarning();
+            this._finalizeInvoiceIngestPoll();
         }
     },
 });

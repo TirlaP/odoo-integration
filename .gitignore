@@ -22,6 +22,7 @@ runtime_trace.log
 # Local scratch / exports
 exports/
 .cache/
+.fallow/
 ART_*.xml
 INVENTORY_ROLLBACK_*.csv
 remaining_codes.txt
