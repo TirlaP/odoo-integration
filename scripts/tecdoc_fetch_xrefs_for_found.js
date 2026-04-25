@@ -25,7 +25,6 @@ const {
   createProgressRenderer,
   crossReferencePath,
   dedupeCrossRefs,
-  extractInfoMessage,
   fetchTecDocJson,
   formatDurationSeconds,
   isMaintenanceOrRateLimitedPayload,

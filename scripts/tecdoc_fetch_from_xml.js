@@ -213,7 +213,7 @@ function writeLoggerOutput({ ui, progress, level, event, fields, line }) {
   writePrettyWarning(progress, level, event, fields);
 }
 
-function buildProgressLine({ idx, total, code, stats, startedAtMs, recentDurationsMs }) {
+function buildProgressLine({ total, code, stats, startedAtMs, recentDurationsMs }) {
   const handled = stats.processed + stats.skipped;
   const pct = progressPercent(handled, total);
   const bar = progressBar(pct);
@@ -308,8 +308,7 @@ class TecDocClient {
   }
 }
 
-async function resolveDetails(client, code, { enableFallback }) {
-  void enableFallback;
+async function resolveDetails(client, code) {
   const details = await client.articleNumberDetails(code);
   return { details };
 }
@@ -549,7 +548,6 @@ function createProgressSaver(config, state) {
 function renderFetchProgress(config, state, stats, startedAtMs, recentDurationsMs) {
   if (config.ui !== "pretty" || !config.progress || !state.uiState.idx) return;
   config.progress.render(buildProgressLine({
-    idx: state.uiState.idx,
     total: state.codesToProcess.length,
     code: state.uiState.code,
     stats,
@@ -667,7 +665,7 @@ function articleCrossReferences(config, bySupplier, supplierName) {
   return (bySupplier.get(supplierName) || {}).response || null;
 }
 
-function buildCodePayload({ config, client, code, byCode, detailsData, crossReferencesBySupplier, articlesEnriched, start }) {
+function buildCodePayload({ client, code, byCode, detailsData, crossReferencesBySupplier, articlesEnriched, start }) {
   return {
     code,
     outcome: "found",
@@ -726,7 +724,7 @@ function markErroredCode(config, state, stats, code, err, byCode) {
 }
 
 async function processFetchItem(context, item) {
-  const { config, state, client, stats, byCode, disabledXrefVariants, recentDurationsMs, saver } = context;
+  const { state, stats } = context;
   const { code, idx } = item;
   state.uiState.idx = idx;
   state.uiState.code = code;
@@ -743,7 +741,7 @@ async function processFetchItem(context, item) {
 
 async function processFetchDetails(context, code, start) {
   const { config, state, client, stats, byCode, disabledXrefVariants } = context;
-  const { details } = await resolveDetails(client, code, { enableFallback: false });
+  const { details } = await resolveDetails(client, code);
   const detailsData = details.data;
   if (!details.ok || !hasArticles(detailsData)) return markNoArticles(config, state, stats, code, details, byCode);
   const articles = asListOfObjects(detailsData.articles);
@@ -751,7 +749,7 @@ async function processFetchDetails(context, code, start) {
   const lookupArticleNo = trimText(detailsData.articleNo) || code;
   const { crossReferencesBySupplier, bySupplier } = await fetchCrossReferences(config, client, stats, supplierNames, lookupArticleNo, disabledXrefVariants);
   const articlesEnriched = buildArticlesEnriched(config, articles, bySupplier);
-  const payload = buildCodePayload({ config, client, code, byCode, detailsData, crossReferencesBySupplier, articlesEnriched, start });
+  const payload = buildCodePayload({ client, code, byCode, detailsData, crossReferencesBySupplier, articlesEnriched, start });
   markCodeFound(config, state, stats, code, payload);
 }
 

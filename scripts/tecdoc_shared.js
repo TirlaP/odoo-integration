@@ -28,11 +28,6 @@ function parseCsvList(value) {
     .filter(Boolean);
 }
 
-function parseCsvSet(value, normalizer = (item) => item) {
-  const items = parseCsvList(value).map((item) => normalizer(item)).filter(Boolean);
-  return items.length ? new Set(items) : null;
-}
-
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -170,13 +165,13 @@ function requestResult(value) {
   return { retry: false, value };
 }
 
-function retryResult(backoffMs) {
-  return { retry: true, backoffMs };
+function retryResult(backoffMs, error = null) {
+  return { retry: true, backoffMs, error };
 }
 
-async function handleRetryDelay(waitMs, backoffMs) {
+async function handleRetryDelay(waitMs, backoffMs, error = null) {
   await sleep(waitMs);
-  return retryResult(nextBackoffMs(backoffMs));
+  return retryResult(nextBackoffMs(backoffMs), error);
 }
 
 function fetchResult({ ok, status, data, durationMs, attempt, error }) {
@@ -210,23 +205,23 @@ async function handleNotFoundResponse(_ctx, res, durationMs, attempt) {
 async function handleRateLimitedResponse(ctx, res, durationMs, attempt, backoffMs) {
   const waitMs = retryAfterMs(res, backoffMs);
   logFetchWarn(ctx.logger, "tecdoc_rate_limited", { url: ctx.url, attempt, status: res.status, waitMs, durationMs });
-  return handleRetryDelay(waitMs, backoffMs);
+  return handleRetryDelay(waitMs, backoffMs, `HTTP ${res.status}`);
 }
 
 async function handleServerErrorResponse(ctx, res, durationMs, attempt, backoffMs) {
   logFetchWarn(ctx.logger, "tecdoc_server_error", { url: ctx.url, attempt, status: res.status, durationMs });
-  return handleRetryDelay(backoffMs, backoffMs);
+  return handleRetryDelay(backoffMs, backoffMs, `HTTP ${res.status}`);
 }
 
 async function handleNotOkResponse(ctx, res, durationMs, attempt, backoffMs) {
   const error = `HTTP ${res.status}`;
   logFetchWarn(ctx.logger, "tecdoc_http_error", { url: ctx.url, attempt, status: res.status, durationMs });
   if (shouldReturnClientError(res.status)) return requestResult(fetchError(res.status, null, durationMs, attempt, error));
-  return handleRetryDelay(backoffMs, backoffMs);
+  return handleRetryDelay(backoffMs, backoffMs, error);
 }
 
 async function handleMaintenancePayload(ctx, res, data, durationMs, attempt, backoffMs) {
-  if (attempt < ctx.maxRetries) return handleRetryDelay(backoffMs, backoffMs);
+  if (attempt < ctx.maxRetries) return handleRetryDelay(backoffMs, backoffMs, "maintenance");
   return requestResult(fetchError(res.status, data, durationMs, attempt, "maintenance"));
 }
 
@@ -294,7 +289,7 @@ async function handleFetchError(ctx, attempt, durationMs, backoffMs) {
   const mode = timeoutErrorMode({ ...ctx, error: ctx.error });
   const action = timeoutAction(mode);
   if (action) return action(ctx, attempt, durationMs);
-  return handleRetryDelay(backoffMs, backoffMs);
+  return handleRetryDelay(backoffMs, backoffMs, error);
 }
 
 async function runFetchAttempt(ctx, url, options, attempt, backoffMs) {
@@ -330,7 +325,7 @@ function isFinalFetchResult(result) {
 }
 
 function nextLastFetchError(lastError, result) {
-  return result.value?.error || lastError;
+  return result.error || result.value?.error || lastError;
 }
 
 function dedupeKey(item) {
@@ -381,7 +376,6 @@ module.exports = {
   createProgressRenderer,
   crossReferencePath,
   dedupeCrossRefs,
-  extractInfoMessage,
   fetchTecDocJson,
   formatDurationSeconds,
   isMaintenanceOrRateLimitedPayload,
