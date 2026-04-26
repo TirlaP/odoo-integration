@@ -84,12 +84,11 @@
               parent="menu_automotive_root"
               sequence="20"/>
 
-    <record id="menu_automotive_order_create" model="ir.ui.menu">
-        <field name="name">Creează comandă</field>
-        <field name="parent_id" ref="menu_automotive_orders"/>
-        <field name="sequence">10</field>
-        <field name="active" eval="False"/>
-    </record>
+    <menuitem id="menu_automotive_order_create"
+              name="Creează comandă"
+              parent="menu_automotive_orders"
+              action="action_automotive_order_create"
+              sequence="10"/>
 
     <record id="menu_automotive_orders_done" model="ir.ui.menu">
         <field name="name">Comenzi finalizate</field>
@@ -102,7 +101,7 @@
               name="Istoric comenzi"
               parent="menu_automotive_orders"
               action="action_automotive_orders_open"
-              sequence="10"/>
+              sequence="20"/>
 
     <record id="menu_automotive_orders_cancelled" model="ir.ui.menu">
         <field name="name">Comenzi șterse</field>
