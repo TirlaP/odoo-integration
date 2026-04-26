@@ -71,6 +71,7 @@
         'views/stock_picking_views.xml',
         'views/anaf_invoice_wizard_views.xml',
         'views/invoice_ingest_views.xml',
+        'views/invoice_product_code_map_views.xml',
         'views/tecdoc_views.xml',
         'views/tecdoc_fast_views.xml',
         'views/automotive_async_job_views.xml',

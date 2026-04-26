@@ -119,6 +119,21 @@ def trimmed_code_variants(code):
     return variants
 
 
+def prefix_stripped_code_variants(code):
+    compact = compact_code(code)
+    if not compact:
+        return []
+
+    match = re.match(r'^([A-Z]{2,5})(\d[A-Z0-9]{3,})$', compact)
+    if not match:
+        return []
+
+    prefix, remainder = match.groups()
+    if not prefix or not remainder or not re.search(r'\d', remainder):
+        return []
+    return [remainder]
+
+
 def progressive_tail_trim_candidates(code):
     compact = compact_code(code)
     if not compact:

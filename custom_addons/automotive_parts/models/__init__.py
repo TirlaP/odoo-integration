@@ -22,6 +22,7 @@ from . import invoice_ingest_job_extract
 from . import invoice_ingest_job_match
 from . import invoice_ingest_job_receipt
 from . import invoice_ingest_line
+from . import invoice_product_code_map
 from . import invoice_ingest_upload_wizard
 from . import automotive_payment_allocation
 from . import mechanic_portal_request

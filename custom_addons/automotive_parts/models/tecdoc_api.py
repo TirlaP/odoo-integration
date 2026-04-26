@@ -1762,13 +1762,98 @@ class TecDocSync(models.TransientModel):
         help="Optional TecDoc supplierId filter. Leave empty/0 to search across all suppliers.",
     )
     candidates_info = fields.Text('Matches', readonly=True)
+    candidate_ids = fields.One2many('tecdoc.sync.wizard.candidate', 'wizard_id', string='Matches')
     invoice_ingest_line_id = fields.Many2one('invoice.ingest.job.line', string='Invoice Ingest Line')
+
+    def _candidate_key(self, article):
+        return (
+            article.get('supplierId') or article.get('supplier_id') or 0,
+            article.get('articleId') or article.get('article_id') or 0,
+            article.get('articleNo') or article.get('article_no') or self.article_number or '',
+        )
+
+    def _candidate_values(self, article):
+        self.ensure_one()
+        supplier_id = article.get('supplierId') or article.get('supplier_id') or 0
+        article_id = article.get('articleId') or article.get('article_id') or 0
+        article_no = article.get('articleNo') or article.get('article_no') or self.article_number
+        article_name = (
+            article.get('articleName')
+            or article.get('article_name')
+            or article.get('articleProductName')
+            or article.get('article_product_name')
+            or article.get('genericArticleName')
+            or article.get('generic_article_name')
+            or ''
+        )
+        supplier_name = (
+            article.get('supplierName')
+            or article.get('supplier_name')
+            or article.get('brandName')
+            or article.get('brand_name')
+            or ''
+        )
+        parts = []
+        if supplier_name:
+            parts.append(supplier_name)
+        if supplier_id:
+            parts.append(f"supplierId={supplier_id}")
+        if article_id:
+            parts.append(f"articleId={article_id}")
+        parts.append(f"articleNo={article_no}")
+        if article_name:
+            parts.append(article_name)
+        return {
+            'supplier_id': supplier_id,
+            'supplier_name': supplier_name,
+            'article_id': article_id,
+            'article_no': article_no,
+            'article_name': article_name,
+            'display_summary': " / ".join(parts),
+        }
+
+    def _fetch_candidate_articles(self):
+        self.ensure_one()
+        api = self.env['tecdoc.api']._get_default_api()
+        if not api:
+            raise UserError("Please configure TecDoc API first!")
+
+        supplier_id = self.supplier_id or None
+        if self.lookup_type == 'oem':
+            results = api.search_articles_by_oem_no(self.article_number)
+        elif self.lookup_type == 'ean':
+            results = api.search_articles_by_ean(self.article_number)
+        else:
+            results = (
+                api.search_article_by_number_and_supplier(self.article_number, supplier_id)
+                if supplier_id
+                else api.search_article_by_number(self.article_number)
+            )
+        candidates = api._extract_articles(results)
+        try:
+            if self.lookup_type == 'article_no':
+                alt = api.search_articles_by_article_no(self.article_number, article_type='ArticleNumber')
+                candidates.extend([a for a in api._extract_articles(alt) if a not in candidates])
+        except UserError:
+            pass
+
+        unique = []
+        seen = set()
+        for article in candidates:
+            if not isinstance(article, dict):
+                continue
+            key = self._candidate_key(article)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(article)
+        return unique
 
     def _product_variant_for_apply(self, product):
         product = product if product._name == 'product.product' else product.product_variant_id
         return product.exists() if product else product
 
-    def _apply_to_invoice_ingest_line(self, product):
+    def _apply_to_invoice_ingest_line(self, product, confirmation_source='tecdoc_sync'):
         self.ensure_one()
         line = self.invoice_ingest_line_id.exists()
         if not line:
@@ -1786,6 +1871,13 @@ class TecDocSync(models.TransientModel):
             'match_method': 'exact:tecdoc_sync',
             'match_confidence': 100.0,
         })
+        self.env['invoice.product.code.map'].create_or_update_from_line(
+            line,
+            product_variant,
+            normalized_code=self.article_number,
+            confirmation_source=confirmation_source,
+            tecdoc_supplier_id=self.supplier_id or product_variant.tecdoc_supplier_id or False,
+        )
         line.job_id._audit_log(
             action='custom',
             description=f'Invoice ingest line matched through TecDoc: {line.job_id.display_name} / line {line.sequence}',
@@ -1815,70 +1907,25 @@ class TecDocSync(models.TransientModel):
     def action_preview_candidates(self):
         """Preview potential matches so the user can pick a supplier_id when needed."""
         self.ensure_one()
-        api = self.env['tecdoc.api']._get_default_api()
-        if not api:
-            raise UserError("Please configure TecDoc API first!")
-
-        supplier_id = self.supplier_id or None
-        if self.lookup_type == 'oem':
-            results = api.search_articles_by_oem_no(self.article_number)
-        elif self.lookup_type == 'ean':
-            results = api.search_articles_by_ean(self.article_number)
-        else:
-            results = (
-                api.search_article_by_number_and_supplier(self.article_number, supplier_id)
-                if supplier_id
-                else api.search_article_by_number(self.article_number)
-            )
-        candidates = api._extract_articles(results)
-        try:
-            if self.lookup_type == 'article_no':
-                alt = api.search_articles_by_article_no(self.article_number, article_type='ArticleNumber')
-                candidates.extend([a for a in api._extract_articles(alt) if a not in candidates])
-        except UserError:
-            pass
+        candidates = self._fetch_candidate_articles()
+        self.candidate_ids.unlink()
+        self.write({
+            'candidate_ids': [
+                (0, 0, self._candidate_values(article))
+                for article in candidates[:20]
+            ],
+        })
 
         if not candidates:
             self.candidates_info = f"No matches found for: {self.article_number}"
         else:
             lines = [
-                "Tip: keep Supplier ID empty/0 unless you need to disambiguate multiple matches.",
+                "Pick a row with Use, or copy supplierId if you prefer manual entry.",
                 "",
-                "Matches (copy supplierId into the Supplier ID field if needed):",
+                "Matches:",
             ]
-            for article in candidates[:20]:
-                if not isinstance(article, dict):
-                    continue
-                sid = article.get('supplierId') or article.get('supplier_id')
-                aid = article.get('articleId') or article.get('article_id')
-                ano = article.get('articleNo') or article.get('article_no') or self.article_number
-                aname = (
-                    article.get('articleName')
-                    or article.get('article_name')
-                    or article.get('articleProductName')
-                    or article.get('article_product_name')
-                    or article.get('genericArticleName')
-                    or article.get('generic_article_name')
-                    or ''
-                )
-                sname = (
-                    article.get('supplierName')
-                    or article.get('supplier_name')
-                    or article.get('brandName')
-                    or article.get('brand_name')
-                    or ''
-                )
-                parts = []
-                if sid is not None:
-                    parts.append(f"supplierId={sid}")
-                if sname:
-                    parts.append(f"supplierName={sname}")
-                if aid is not None:
-                    parts.append(f"articleId={aid}")
-                parts.append(f"articleNo={ano}")
-                if aname:
-                    parts.append(f"name={aname}")
-                lines.append(" - " + ", ".join(parts))
+            for candidate in self.candidate_ids:
+                lines.append(" - " + candidate.display_summary)
             if len(candidates) > 20:
                 lines.append("")
                 lines.append(f"(showing first 20 of {len(candidates)} matches)")
@@ -1929,6 +1976,10 @@ class TecDocSync(models.TransientModel):
                 pass
             if not candidates:
                 raise UserError(f"No article found for: {self.article_number}")
+            if not supplier_id and len(candidates) > 1:
+                raise UserError(
+                    "Multiple TecDoc matches found. Click “Find Supplier IDs”, then use one candidate row."
+                )
 
             _logger.info(
                 "TecDoc: %s candidate(s) for article_no=%s; first keys=%s",
@@ -1987,9 +2038,51 @@ class TecDocSync(models.TransientModel):
         """Sync product from TecDoc"""
         product = self._sync_product_from_lookup()
         template = product.product_tmpl_id if product._name == 'product.product' else product
-        line_action = self._apply_to_invoice_ingest_line(product)
+        line_action = self._apply_to_invoice_ingest_line(product, confirmation_source='tecdoc_sync')
         if line_action:
             return line_action
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': 'product.template',
+            'res_id': template.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
+
+
+class TecDocSyncWizardCandidate(models.TransientModel):
+    _name = 'tecdoc.sync.wizard.candidate'
+    _description = 'TecDoc Sync Wizard Candidate'
+    _order = 'supplier_name, supplier_id, article_no'
+
+    wizard_id = fields.Many2one('tecdoc.sync.wizard', required=True, ondelete='cascade')
+    supplier_id = fields.Integer('Supplier ID', index=True)
+    supplier_name = fields.Char('Supplier')
+    article_id = fields.Integer('Article ID', index=True)
+    article_no = fields.Char('Article No')
+    article_name = fields.Char('Name')
+    display_summary = fields.Char('Summary')
+
+    def action_use_candidate(self):
+        self.ensure_one()
+        wizard = self.wizard_id
+        api = self.env['tecdoc.api']._get_default_api()
+        if not api:
+            raise UserError("Please configure TecDoc API first!")
+
+        wizard.write({
+            'supplier_id': self.supplier_id or 0,
+            'article_number': self.article_no or wizard.article_number,
+        })
+        product = api.sync_product_from_tecdoc(
+            article_id=self.article_id or None,
+            article_no=self.article_no or wizard.article_number,
+            supplier_id=self.supplier_id or None,
+        )
+        line_action = wizard._apply_to_invoice_ingest_line(product, confirmation_source='tecdoc_candidate')
+        if line_action:
+            return line_action
+        template = product.product_tmpl_id if product._name == 'product.product' else product
         return {
             'type': 'ir.actions.act_window',
             'res_model': 'product.template',

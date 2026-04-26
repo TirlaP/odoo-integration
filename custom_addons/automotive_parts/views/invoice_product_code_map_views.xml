@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_invoice_product_code_map_list" model="ir.ui.view">
+        <field name="name">invoice.product.code.map.list</field>
+        <field name="model">invoice.product.code.map</field>
+        <field name="arch" type="xml">
+            <list string="Learned Product Code Mappings" default_order="last_used_at desc, confirmed_at desc">
+                <field name="active" optional="hide"/>
+                <field name="invoice_supplier_id"/>
+                <field name="raw_code"/>
+                <field name="normalized_code"/>
+                <field name="prefix" optional="show"/>
+                <field name="supplier_brand" optional="show"/>
+                <field name="tecdoc_supplier_id" optional="show"/>
+                <field name="tecdoc_article_id" optional="hide"/>
+                <field name="product_id"/>
+                <field name="confirmation_source"/>
+                <field name="hit_count"/>
+                <field name="last_used_at"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_invoice_product_code_map_form" model="ir.ui.view">
+        <field name="name">invoice.product.code.map.form</field>
+        <field name="model">invoice.product.code.map</field>
+        <field name="arch" type="xml">
+            <form string="Learned Product Code Mapping">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="active"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                            <field name="invoice_supplier_id"/>
+                            <field name="raw_code"/>
+                            <field name="normalized_code"/>
+                            <field name="prefix"/>
+                            <field name="supplier_brand"/>
+                        </group>
+                        <group>
+                            <field name="product_id"/>
+                            <field name="tecdoc_supplier_id"/>
+                            <field name="tecdoc_article_id"/>
+                            <field name="confirmation_source"/>
+                            <field name="confirmed_by_id"/>
+                            <field name="confirmed_at"/>
+                            <field name="hit_count"/>
+                            <field name="last_used_at"/>
+                        </group>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_invoice_product_code_map_search" model="ir.ui.view">
+        <field name="name">invoice.product.code.map.search</field>
+        <field name="model">invoice.product.code.map</field>
+        <field name="arch" type="xml">
+            <search string="Learned Product Code Mappings">
+                <field name="invoice_supplier_id"/>
+                <field name="raw_code"/>
+                <field name="normalized_code"/>
+                <field name="prefix"/>
+                <field name="supplier_brand"/>
+                <field name="product_id"/>
+                <filter string="Active" name="active" domain="[('active', '=', True)]"/>
+                <filter string="Manual" name="manual" domain="[('confirmation_source', '=', 'manual')]"/>
+                <filter string="TecDoc" name="tecdoc" domain="[('confirmation_source', 'in', ['tecdoc_candidate', 'tecdoc_sync'])]"/>
+                <group expand="0" string="Group By">
+                    <filter string="Invoice Supplier" name="group_supplier" context="{'group_by': 'invoice_supplier_id'}"/>
+                    <filter string="Prefix" name="group_prefix" context="{'group_by': 'prefix'}"/>
+                    <filter string="Brand" name="group_brand" context="{'group_by': 'supplier_brand'}"/>
+                    <filter string="Source" name="group_source" context="{'group_by': 'confirmation_source'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_invoice_product_code_maps" model="ir.actions.act_window">
+        <field name="name">Learned Code Maps</field>
+        <field name="path">learned-code-maps</field>
+        <field name="res_model">invoice.product.code.map</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="view_invoice_product_code_map_search"/>
+        <field name="context">{'search_default_active': 1}</field>
+    </record>
+</odoo>

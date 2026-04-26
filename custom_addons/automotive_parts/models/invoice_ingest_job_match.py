@@ -17,6 +17,7 @@ from .invoice_ingest_code_utils import (
     is_supplier_token,
     normalize_code_value,
     parse_invoice_line_identity,
+    prefix_stripped_code_variants,
     progressive_tail_trim_candidates,
     trimmed_code_variants,
 )
@@ -137,6 +138,10 @@ class InvoiceIngestJobMatch(models.Model):
     @api.model
     def _progressive_tail_trim_candidates(self, code):
         return progressive_tail_trim_candidates(code)
+
+    @api.model
+    def _prefix_stripped_code_variants(self, code):
+        return prefix_stripped_code_variants(code)
 
     @api.model
     def _allow_progressive_tail_trim(self, supplier=None):
@@ -470,6 +475,9 @@ class InvoiceIngestJobMatch(models.Model):
         exact_code = self._normalize_code_value(product_code or raw_code)
         parsed_code = parsed_identity.get('product_code_primary') or exact_code
         parsed_supplier_brand = parsed_identity.get('supplier_brand') or supplier_brand
+        match_code = parsed_code
+        if exact_code and len(self._compact_code(exact_code)) > len(self._compact_code(parsed_code)):
+            match_code = exact_code
 
         use_trimmed_visible_code = self._allow_progressive_tail_trim(supplier)
         visible_code = parsed_code if prefer_parsed_code and parsed_code else (exact_code or parsed_code)
@@ -497,7 +505,7 @@ class InvoiceIngestJobMatch(models.Model):
             },
         )
         product, match_meta = self._match_product_with_meta(
-            parsed_code,
+            match_code,
             supplier=supplier,
             product_description=product_description,
             supplier_brand=parsed_supplier_brand,
@@ -573,6 +581,34 @@ class InvoiceIngestJobMatch(models.Model):
             supplier_domain=supplier_domain,
             supplier_brand_domain=supplier_brand_domain,
         )
+
+        learned_mapping = self.env['invoice.product.code.map']._find_for_line(
+            supplier,
+            raw_code or product_code,
+            supplier_brand=supplier_brand,
+        )
+        if learned_mapping and learned_mapping.product_id:
+            learned_mapping._record_usage()
+            match_meta = {
+                'method': 'learned:invoice_product_code_map',
+                'matched_code': learned_mapping.normalized_code or learned_mapping.raw_code,
+                'confidence': 100.0,
+            }
+            self._emit_match_runtime_event(
+                phase='matched',
+                detail='matched through learned invoice product code map',
+                line_index=line_index,
+                line_total=line_total,
+                raw_code=raw_code,
+                product_code=product_code,
+                product_description=product_description,
+                supplier=supplier,
+                supplier_brand=supplier_brand,
+                match_meta=match_meta,
+                matched_product=learned_mapping.product_id,
+                extra={'mapping_id': learned_mapping.id},
+            )
+            return learned_mapping.product_id, match_meta
 
         # 1) Strict exact matching by code fields; try constrained scopes first.
         # Prefer article-based matching first (TecDoc articleNo / internal references),
@@ -653,6 +689,79 @@ class InvoiceIngestJobMatch(models.Model):
                     matched_product=product,
                 )
                 return product, match_meta
+
+        # 2b) Prefix-strip pass for supplier-glued brand prefixes such as MON376025SP.
+        # Keep below auto-match threshold; human confirmation should create a learned map.
+        prefix_candidates = []
+        for code in [product_code, raw_code, *(extra_codes or [])]:
+            for candidate in self._prefix_stripped_code_variants(code):
+                if candidate not in prefix_candidates:
+                    prefix_candidates.append(candidate)
+        if prefix_candidates:
+            self._emit_match_runtime_event(
+                phase='prefix_strip_start',
+                detail='starting prefix-strip candidate matching',
+                line_index=line_index,
+                line_total=line_total,
+                raw_code=raw_code,
+                product_code=product_code,
+                product_description=product_description,
+                supplier=supplier,
+                supplier_brand=supplier_brand,
+                extra={'prefix_candidate_count': len(prefix_candidates)},
+            )
+            product, match_meta = self._search_code_fields_with_scopes(
+                codes=prefix_candidates,
+                field_names=('tecdoc_article_no', 'default_code', 'supplier_code', 'barcode_internal', 'barcode'),
+                scopes=scopes,
+                operator='=',
+                method_prefix='prefix_strip',
+                confidence_with_scope=86.0,
+                confidence_without_scope=78.0,
+            )
+            if product:
+                self._emit_match_runtime_event(
+                    phase='matched',
+                    detail=f"matched during {match_meta.get('method') or 'prefix strip'}",
+                    line_index=line_index,
+                    line_total=line_total,
+                    raw_code=raw_code,
+                    product_code=product_code,
+                    product_description=product_description,
+                    supplier=supplier,
+                    supplier_brand=supplier_brand,
+                    match_meta=match_meta,
+                    matched_product=product,
+                )
+                return product, match_meta
+
+            for code in prefix_candidates:
+                product, lookup_reason = self._match_by_catalog_lookup(
+                    code=code,
+                    supplier_domain=supplier_domain,
+                    supplier_brand_domain=supplier_brand_domain,
+                )
+                if product:
+                    confidence = 86.0 if 'supplier' in lookup_reason else 78.0
+                    match_meta = {
+                        'method': f'prefix_strip:{lookup_reason or "lookup"}',
+                        'matched_code': code,
+                        'confidence': confidence,
+                    }
+                    self._emit_match_runtime_event(
+                        phase='matched',
+                        detail=f"matched during {match_meta.get('method') or 'prefix strip lookup'}",
+                        line_index=line_index,
+                        line_total=line_total,
+                        raw_code=raw_code,
+                        product_code=product_code,
+                        product_description=product_description,
+                        supplier=supplier,
+                        supplier_brand=supplier_brand,
+                        match_meta=match_meta,
+                        matched_product=product,
+                    )
+                    return product, match_meta
 
         # 2b) Progressive tail-trim pass (only if strict candidates failed).
         trim_candidates = (

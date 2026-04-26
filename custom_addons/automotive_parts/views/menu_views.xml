@@ -20,6 +20,12 @@
               action="action_invoice_ingest_jobs"
               sequence="10"/>
 
+    <menuitem id="menu_invoice_ingest_line_review"
+              name="Linii de verificat"
+              parent="menu_automotive_root"
+              action="action_invoice_ingest_line_review"
+              sequence="11"/>
+
     <record id="action_automotive_order_create" model="ir.actions.act_window">
         <field name="name">Creează comandă</field>
         <field name="path">creeaza-comanda</field>
@@ -207,6 +213,12 @@
               parent="menu_configurare"
               action="action_tecdoc_fast_products"
               sequence="30"/>
+
+    <menuitem id="menu_invoice_product_code_maps"
+              name="Mapări coduri facturi"
+              parent="menu_configurare"
+              action="action_invoice_product_code_maps"
+              sequence="35"/>
 
     <menuitem id="menu_anaf_config"
               name="Configurare ANAF"
