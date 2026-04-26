@@ -6,6 +6,13 @@
         <field name="inherit_id" ref="sale.view_sales_order_filter"/>
         <field name="arch" type="xml">
             <filter name="order_month" position="after">
+                <filter string="Comenzi deschise" name="auto_orders_open"
+                        domain="[('state', '!=', 'cancel'), ('auto_state', 'not in', ['delivered', 'cancel'])]"/>
+                <filter string="Comenzi finalizate" name="auto_orders_done"
+                        domain="[('auto_state', '=', 'delivered')]"/>
+                <filter string="Comenzi șterse" name="auto_orders_cancelled"
+                        domain="['|', ('state', '=', 'cancel'), ('auto_state', '=', 'cancel')]"/>
+                <separator/>
                 <filter string="Stare comandă auto" name="group_auto_state" context="{'group_by': 'auto_state'}"/>
             </filter>
         </field>
