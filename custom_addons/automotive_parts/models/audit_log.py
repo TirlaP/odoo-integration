@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 import json
 import logging
@@ -38,6 +38,30 @@ class AutomotiveAuditLog(models.Model):
         ('unlink', 'Delete'),
         ('custom', 'Custom Action'),
     ], string='Action', required=True, index=True)
+    log_type = fields.Selection([
+        ('audit', 'Audit'),
+        ('runtime', 'Runtime'),
+    ], string='Type', required=True, default='audit', index=True)
+
+    level = fields.Selection([
+        ('debug', 'Debug'),
+        ('info', 'Info'),
+        ('warning', 'Warning'),
+        ('error', 'Error'),
+        ('critical', 'Critical'),
+    ], string='Level', index=True)
+    category = fields.Char('Category', index=True)
+    event = fields.Char('Event', index=True)
+    source = fields.Char('Source', index=True)
+    outcome = fields.Char('Outcome', index=True)
+    db_name = fields.Char('Database', index=True)
+    request_method = fields.Char('HTTP Method', index=True)
+    request_path = fields.Char('Request Path', index=True)
+    related_model = fields.Char('Related Model', index=True)
+    related_res_id = fields.Integer('Related Record ID', index=True)
+    message = fields.Text('Message')
+    payload_json = fields.Text('Payload JSON')
+    legacy_runtime_log_id = fields.Integer('Legacy Runtime Log ID', index=True, copy=False)
 
     model_name = fields.Char('Model', required=True, index=True)
     model_description = fields.Char('Model Label', readonly=True, index=True)
@@ -50,6 +74,22 @@ class AutomotiveAuditLog(models.Model):
     change_summary = fields.Text('Changes', compute='_compute_change_summary')
 
     create_date = fields.Datetime('Date & Time', readonly=True, index=True)
+
+    @api.model
+    def _runtime_int_or_false(self, value):
+        return int(value) if str(value).isdigit() else False
+
+    @api.model
+    def _runtime_model_description(self, model_name):
+        if not model_name:
+            return 'Runtime Log'
+        model = self.env['ir.model'].sudo().search([('model', '=', model_name)], limit=1)
+        return model.name if model else model_name
+
+    @api.model
+    def _runtime_level(self, value):
+        level = str(value or 'info').strip().lower()
+        return level if level in {'debug', 'info', 'warning', 'error', 'critical'} else 'info'
 
     @classmethod
     def _is_sensitive_key(cls, key):
@@ -205,11 +245,67 @@ class AutomotiveAuditLog(models.Model):
             )
             return self.browse()
 
+    @api.model
+    def create_runtime_event(self, event):
+        payload = dict(event or {})
+        user_id = self._runtime_int_or_false(payload.get('uid') or payload.get('user_id'))
+        related_res_id = self._runtime_int_or_false(payload.get('related_res_id'))
+        related_model = payload.get('related_model') or False
+        message = self._truncate_payload(
+            payload.get('message')
+            or payload.get('error_message')
+            or payload.get('description')
+            or ''
+        )
+        model_name = related_model or 'automotive.runtime.log'
+        values = {
+            'log_type': 'runtime',
+            'user_id': user_id or self.env.user.id,
+            'company_id': self.env.company.id if self.env.company else False,
+            'action': 'custom',
+            'model_name': model_name,
+            'model_description': self._runtime_model_description(model_name),
+            'record_id': related_res_id or False,
+            'record_display_name': payload.get('record_display_name') or payload.get('event') or model_name,
+            'description': message,
+            'level': self._runtime_level(payload.get('level')),
+            'category': payload.get('category'),
+            'event': payload.get('event') or 'runtime_event',
+            'source': payload.get('source'),
+            'outcome': payload.get('outcome'),
+            'db_name': payload.get('db') or payload.get('db_name'),
+            'request_method': payload.get('method') or payload.get('request_method'),
+            'request_path': payload.get('path') or payload.get('request_path'),
+            'related_model': related_model,
+            'related_res_id': related_res_id or False,
+            'message': message,
+            'payload_json': self._stringify_payload(payload),
+        }
+        return self.sudo().create(values)
+
+    @api.model
+    def cron_cleanup_runtime_logs(self):
+        days = int(self.env['ir.config_parameter'].sudo().get_param(
+            'automotive.runtime_log_retention_days', 30
+        ) or 30)
+        cutoff = fields.Datetime.now() - timedelta(days=max(days, 1))
+        stale_logs = self.sudo().search([
+            ('log_type', '=', 'runtime'),
+            ('create_date', '<', cutoff),
+        ])
+        if stale_logs:
+            stale_logs.unlink()
+        return len(stale_logs)
+
     def name_get(self):
         """Custom name display"""
         result = []
         for log in self:
-            name = f"{log.user_id.name} - {log.action} - {log.record_display_name or log.model_name}"
+            if log.log_type == 'runtime':
+                label = log.message or log.event or log.record_display_name or log.model_name
+                name = f"{log.user_id.name} - {log.level or 'info'} - {label}"
+            else:
+                name = f"{log.user_id.name} - {log.action} - {log.record_display_name or log.model_name}"
             result.append((log.id, name))
         return result
 
@@ -224,8 +320,14 @@ class AutomotiveAuditLog(models.Model):
             [('model_description', operator, name)],
             [('record_display_name', operator, name)],
             [('description', operator, name)],
+            [('level', operator, name)],
+            [('category', operator, name)],
+            [('event', operator, name)],
+            [('request_path', operator, name)],
+            [('message', operator, name)],
             [('old_values', operator, name)],
             [('new_values', operator, name)],
+            [('payload_json', operator, name)],
             [('user_id.name', operator, name)],
             [('company_id.name', operator, name)],
         ])

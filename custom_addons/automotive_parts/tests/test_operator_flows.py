@@ -641,8 +641,12 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             self.assertEqual(job.state, 'pending')
             self.assertFalse(job.error)
             self.assertIn('Missing OPENAI_API_KEY', async_job.last_error or '')
-            runtime_log = check_env['automotive.runtime.log'].search(
-                [('event', '=', 'automotive_async_job_failed'), ('related_res_id', '=', job.id)],
+            runtime_log = check_env['automotive.audit.log'].search(
+                [
+                    ('log_type', '=', 'runtime'),
+                    ('event', '=', 'automotive_async_job_failed'),
+                    ('related_res_id', '=', job.id),
+                ],
                 order='id desc',
                 limit=1,
             )
@@ -925,8 +929,12 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertEqual(async_job.last_error_type, 'RuntimeError')
         self.assertIn('post-process crash', async_job.last_error or '')
         self.assertEqual(job.state, 'pending')
-        runtime_log = self.env['automotive.runtime.log'].search(
-            [('event', '=', 'automotive_async_job_failed'), ('related_res_id', '=', job.id)],
+        runtime_log = self.env['automotive.audit.log'].search(
+            [
+                ('log_type', '=', 'runtime'),
+                ('event', '=', 'automotive_async_job_failed'),
+                ('related_res_id', '=', job.id),
+            ],
             order='id desc',
             limit=1,
         )
@@ -957,8 +965,12 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             self.assertEqual(async_job.last_error, False)
             self.assertEqual(async_job.last_error_type, False)
             self.assertEqual(async_job.progress_message, 'Cancelled because the target record was deleted.')
-            runtime_log = check_env['automotive.runtime.log'].search(
-                [('event', '=', 'automotive_async_job_failed'), ('related_res_id', '=', 999999)],
+            runtime_log = check_env['automotive.audit.log'].search(
+                [
+                    ('log_type', '=', 'runtime'),
+                    ('event', '=', 'automotive_async_job_failed'),
+                    ('related_res_id', '=', 999999),
+                ],
                 order='id desc',
                 limit=1,
             )
@@ -1116,8 +1128,12 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             )
 
         self.assertEqual(resolved['match_status'], 'matched')
-        runtime_logs = self.env['automotive.runtime.log'].search(
-            [('event', '=', 'invoice_ingest_match_trace'), ('related_res_id', '=', job.id)],
+        runtime_logs = self.env['automotive.audit.log'].search(
+            [
+                ('log_type', '=', 'runtime'),
+                ('event', '=', 'invoice_ingest_match_trace'),
+                ('related_res_id', '=', job.id),
+            ],
             order='id asc',
         )
         self.assertTrue(runtime_logs)

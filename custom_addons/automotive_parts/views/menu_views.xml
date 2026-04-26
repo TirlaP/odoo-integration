@@ -215,24 +215,25 @@
               sequence="40"/>
 
     <!-- Audit Log Menu -->
-    <record id="menu_audit_log" model="ir.ui.menu">
+    <menuitem id="menu_audit_log"
+              name="Audit Logs"
+              parent="menu_automotive_root"
+              action="action_audit_log"
+              sequence="90"/>
+
+    <record id="menu_business_audit_log" model="ir.ui.menu">
         <field name="name">Audit Logs</field>
-        <field name="parent_id" ref="menu_automotive_root"/>
-        <field name="sequence">90</field>
-        <field name="action" eval="False"/>
+        <field name="parent_id" ref="menu_audit_log"/>
+        <field name="sequence">10</field>
+        <field name="active" eval="False"/>
     </record>
 
-    <menuitem id="menu_business_audit_log"
-              name="Audit Logs"
-              parent="menu_audit_log"
-              action="action_audit_log"
-              sequence="10"/>
-
-    <menuitem id="menu_runtime_log"
-              name="Runtime Logs"
-              parent="menu_audit_log"
-              action="action_runtime_log"
-              sequence="20"/>
+    <record id="menu_runtime_log" model="ir.ui.menu">
+        <field name="name">Runtime Logs</field>
+        <field name="parent_id" ref="menu_audit_log"/>
+        <field name="sequence">20</field>
+        <field name="active" eval="False"/>
+    </record>
 
     <record id="menu_tecdoc" model="ir.ui.menu">
         <field name="name">TecDoc</field>

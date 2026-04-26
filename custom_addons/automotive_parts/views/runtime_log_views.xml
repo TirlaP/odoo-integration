@@ -83,10 +83,12 @@
     </record>
 
     <record id="action_runtime_log" model="ir.actions.act_window">
-        <field name="name">Runtime Logs</field>
+        <field name="name">Audit Logs</field>
         <field name="path">runtime-logs</field>
-        <field name="res_model">automotive.runtime.log</field>
+        <field name="res_model">automotive.audit.log</field>
         <field name="view_mode">list,form</field>
-        <field name="search_view_id" ref="view_runtime_log_search"/>
+        <field name="search_view_id" ref="view_audit_log_search"/>
+        <field name="domain">[('log_type', '=', 'runtime')]</field>
+        <field name="context">{'search_default_runtime': 1}</field>
     </record>
 </odoo>

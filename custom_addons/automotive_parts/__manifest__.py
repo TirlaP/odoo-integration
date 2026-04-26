@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 {
     'name': 'Automotive Parts Management',
-    'version': '1.0.0',
+    'version': '1.0.1',
     'category': 'Sales',
     'summary': 'Complete automotive parts management with TecDoc integration',
     'description': """

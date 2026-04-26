@@ -2,9 +2,9 @@
 <odoo>
     <record id="ir_cron_automotive_runtime_log_cleanup" model="ir.cron">
         <field name="name">Automotive Runtime Log Cleanup</field>
-        <field name="model_id" ref="model_automotive_runtime_log"/>
+        <field name="model_id" ref="model_automotive_audit_log"/>
         <field name="state">code</field>
-        <field name="code">model.cron_cleanup_old_logs()</field>
+        <field name="code">model.cron_cleanup_runtime_logs()</field>
         <field name="interval_number">1</field>
         <field name="interval_type">days</field>
         <field name="active">True</field>

@@ -393,13 +393,19 @@
         <field name="arch" type="xml">
             <list string="Audit Logs" create="false" delete="false">
                 <field name="create_date"/>
+                <field name="log_type"/>
+                <field name="level" optional="show"/>
+                <field name="category" optional="show"/>
+                <field name="event" optional="show"/>
                 <field name="company_id" optional="hide"/>
                 <field name="user_id"/>
                 <field name="action"/>
                 <field name="model_description"/>
                 <field name="record_display_name"/>
                 <field name="record_id"/>
+                <field name="request_path" optional="show"/>
                 <field name="description"/>
+                <field name="message" optional="hide"/>
             </list>
         </field>
     </record>
@@ -415,6 +421,7 @@
                         <group>
                             <field name="company_id"/>
                             <field name="user_id"/>
+                            <field name="log_type"/>
                             <field name="action"/>
                             <field name="model_name"/>
                             <field name="model_description"/>
@@ -429,6 +436,28 @@
                     <group string="Changes">
                         <field name="change_summary" widget="text" readonly="1" nolabel="1"/>
                     </group>
+                    <group string="Runtime Event" invisible="log_type != 'runtime'">
+                        <group>
+                            <field name="level"/>
+                            <field name="category"/>
+                            <field name="event"/>
+                            <field name="source"/>
+                            <field name="outcome"/>
+                        </group>
+                        <group>
+                            <field name="db_name"/>
+                            <field name="request_method"/>
+                            <field name="request_path"/>
+                            <field name="related_model"/>
+                            <field name="related_res_id"/>
+                        </group>
+                    </group>
+                    <group string="Message" invisible="log_type != 'runtime'">
+                        <field name="message" widget="text" readonly="1" nolabel="1"/>
+                    </group>
+                    <group string="Payload" invisible="log_type != 'runtime'">
+                        <field name="payload_json" widget="text" readonly="1" nolabel="1"/>
+                    </group>
                 </sheet>
             </form>
         </field>
@@ -442,23 +471,41 @@
                 <field name="create_date"/>
                 <field name="company_id"/>
                 <field name="user_id"/>
+                <field name="log_type"/>
                 <field name="action"/>
+                <field name="level"/>
+                <field name="category"/>
+                <field name="event"/>
                 <field name="model_name"/>
                 <field name="record_display_name"/>
+                <field name="request_path"/>
+                <field name="message"/>
+                <filter string="Business Audit" name="business_audit" domain="[('log_type', '=', 'audit')]"/>
+                <filter string="Runtime" name="runtime" domain="[('log_type', '=', 'runtime')]"/>
+                <separator/>
                 <filter string="Invoice Ingest" name="invoice_ingest"
                         domain="[('model_name', 'in', ['invoice.ingest.job', 'invoice.ingest.job.line'])]"/>
                 <filter string="Cereri mecanici" name="mechanic_requests"
                         domain="[('model_name', '=', 'mechanic.portal.request')]"/>
                 <filter string="ANAF" name="anaf"
                         domain="[('model_name', '=', 'anaf.efactura')]"/>
+                <filter string="Errors" name="runtime_errors" domain="[('log_type', '=', 'runtime'), ('level', 'in', ['error', 'critical'])]"/>
+                <filter string="HTTP" name="runtime_http" domain="[('log_type', '=', 'runtime'), ('category', '=', 'http')]"/>
+                <filter string="Browser" name="runtime_browser" domain="[('log_type', '=', 'runtime'), ('category', '=', 'browser')]"/>
+                <filter string="Async Jobs" name="runtime_async_jobs" domain="[('log_type', '=', 'runtime'), ('category', '=', 'async_job')]"/>
+                <separator/>
                 <filter string="Creates" name="creates" domain="[('action', '=', 'create')]"/>
                 <filter string="Changes" name="changes" domain="[('action', '=', 'write')]"/>
                 <filter string="Custom Actions" name="custom_actions" domain="[('action', '=', 'custom')]"/>
                 <group expand="0" string="Group By">
+                    <filter string="Type" name="group_log_type" context="{'group_by': 'log_type'}"/>
                     <filter string="Company" name="group_company" context="{'group_by': 'company_id'}"/>
                     <filter string="User" name="group_user" context="{'group_by': 'user_id'}"/>
                     <filter string="Model" name="group_model" context="{'group_by': 'model_name'}"/>
                     <filter string="Action" name="group_action" context="{'group_by': 'action'}"/>
+                    <filter string="Level" name="group_level" context="{'group_by': 'level'}"/>
+                    <filter string="Category" name="group_category" context="{'group_by': 'category'}"/>
+                    <filter string="Event" name="group_event" context="{'group_by': 'event'}"/>
                     <filter string="Date" name="group_date" context="{'group_by': 'create_date:day'}"/>
                 </group>
             </search>

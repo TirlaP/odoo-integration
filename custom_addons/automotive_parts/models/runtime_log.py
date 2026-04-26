@@ -1,7 +1,4 @@
 # -*- coding: utf-8 -*-
-import json
-from datetime import timedelta
-
 from odoo import api, fields, models
 
 
@@ -47,39 +44,8 @@ class AutomotiveRuntimeLog(models.Model):
 
     @api.model
     def create_from_event(self, event):
-        payload = dict(event or {})
-        user_id = payload.get("uid") or payload.get("user_id")
-        related_res_id = payload.get("related_res_id")
-        values = {
-            "level": str(payload.get("level") or "info").lower(),
-            "category": payload.get("category"),
-            "event": payload.get("event") or "runtime_event",
-            "source": payload.get("source"),
-            "outcome": payload.get("outcome"),
-            "db_name": payload.get("db") or payload.get("db_name"),
-            "user_id": int(user_id) if str(user_id).isdigit() else False,
-            "request_method": payload.get("method") or payload.get("request_method"),
-            "request_path": payload.get("path") or payload.get("request_path"),
-            "related_model": payload.get("related_model"),
-            "related_res_id": int(related_res_id) if str(related_res_id).isdigit() else False,
-            "message": self._truncate_payload(
-                payload.get("message")
-                or payload.get("error_message")
-                or payload.get("description")
-            ),
-            "payload_json": self._truncate_payload(
-                json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-            ),
-        }
-        return self.sudo().create(values)
+        return self.env["automotive.audit.log"].sudo().create_runtime_event(event)
 
     @api.model
     def cron_cleanup_old_logs(self):
-        days = int(self.env["ir.config_parameter"].sudo().get_param(
-            "automotive.runtime_log_retention_days", 30
-        ) or 30)
-        cutoff = fields.Datetime.now() - timedelta(days=max(days, 1))
-        stale_logs = self.sudo().search([("create_date", "<", cutoff)])
-        if stale_logs:
-            stale_logs.unlink()
-        return len(stale_logs)
+        return self.env["automotive.audit.log"].sudo().cron_cleanup_runtime_logs()
