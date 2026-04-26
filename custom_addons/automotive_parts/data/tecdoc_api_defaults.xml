@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <function model="tecdoc.api" name="_upgrade_default_provider_to_auto_parts_catalog"/>
+</odoo>

@@ -368,7 +368,7 @@ class ProductProduct(models.Model):
         if not (self.tecdoc_id or self.tecdoc_article_no or self.default_code):
             raise UserError('This product has no TecDoc ID or Article Number!')
 
-        api = self.env['tecdoc.api'].search([], limit=1)
+        api = self.env['tecdoc.api']._get_default_api()
 
         if not api:
             raise UserError('TecDoc API not configured!')

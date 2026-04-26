@@ -1079,6 +1079,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
                 (40.0, 'Running OCR fallback'),
                 (60.0, 'Calling OpenAI extraction'),
                 (80.0, 'Matching products and normalizing lines'),
+                (80.0, 'Matching products and normalizing lines (1/1)'),
                 (95.0, 'Saving extracted invoice lines'),
             ],
         )
@@ -1316,6 +1317,55 @@ Data sc:        06/05/2026
         self.assertEqual(matched_product, product)
         self.assertEqual(meta.get('method'), 'progressive_trim:default_code')
 
+    def test_invoice_catalog_lookup_uses_indexed_tecdoc_tables(self):
+        template = self.env['product.template'].create({
+            'name': 'Indexed TecDoc Lookup Product',
+        })
+        tecdoc_supplier = self.env['tecdoc.supplier'].create({
+            'supplier_id': 9001,
+            'name': 'Indexed Supplier',
+            'supplier_match_code': 'INDEXEDSUPPLIER',
+        })
+        variant = self.env['tecdoc.article.variant'].create({
+            'article_id': 990001,
+            'article_no': 'IDX-001',
+            'article_no_key': 'IDX001',
+            'supplier_id': tecdoc_supplier.id,
+            'supplier_name': tecdoc_supplier.name,
+            'supplier_external_id': tecdoc_supplier.supplier_id,
+            'product_tmpl_id': template.id,
+        })
+        ean = self.env['tecdoc.article.variant.ean'].create({
+            'variant_id': variant.id,
+            'ean': '5900000000011',
+            'ean_key': '5900000000011',
+        })
+        oem = self.env['tecdoc.oem.number'].create({
+            'brand': 'OEM Brand',
+            'display_no': 'OEM-INDEX-001',
+            'number_key': 'OEMINDEX001',
+        })
+        variant.oem_number_ids = [(4, oem.id)]
+        cross_number = self.env['tecdoc.cross.number'].create({
+            'manufacturer': 'Cross Brand',
+            'display_no': 'CROSS-INDEX-001',
+            'number_key': 'CROSSINDEX001',
+        })
+        self.env['tecdoc.article.variant.cross'].create({
+            'variant_id': variant.id,
+            'cross_number_id': cross_number.id,
+            'search_level': 'exact',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'Indexed Catalog Lookup',
+            'source': 'ocr',
+        })
+
+        for code in ('IDX-001', ean.ean, 'OEM-INDEX-001', 'CROSS-INDEX-001'):
+            product, reason = job._match_by_catalog_lookup(code)
+            self.assertEqual(product, template.product_variant_id)
+            self.assertEqual(reason, 'lookup')
+
     def test_non_auto_total_supplier_never_removes_spaced_suffix_letters(self):
         job = self.env['invoice.ingest.job'].create({
             'name': 'Spaced Suffix OCR',
@@ -1406,6 +1456,98 @@ Data sc:        06/05/2026
         self.assertEqual(line.product_id, self.product)
         self.assertEqual(line.match_method, 'exact:tecdoc_sync')
         self.assertEqual(line.match_confidence, 100.0)
+
+    def test_tecdoc_api_defaults_to_auto_parts_catalog_provider(self):
+        api = self.env['tecdoc.api'].create({
+            'api_key': 'test-key',
+        })
+
+        self.assertEqual(api.provider, 'auto_parts_catalog')
+        self.assertEqual(api.api_host, 'auto-parts-catalog.p.rapidapi.com')
+        self.assertEqual(api.base_url, 'https://auto-parts-catalog.p.rapidapi.com')
+        self.assertTrue(api.is_default)
+        self.assertEqual(self.env['tecdoc.api']._get_default_api(), api)
+
+    def test_tecdoc_default_api_uses_marked_provider(self):
+        legacy = self.env['tecdoc.api'].create({
+            'name': 'Legacy',
+            'api_key': 'legacy-key',
+            'provider': 'tecdoc_catalog',
+        })
+        active = self.env['tecdoc.api'].create({
+            'name': 'Current',
+            'api_key': 'current-key',
+            'provider': 'auto_parts_catalog',
+            'is_default': True,
+        })
+        legacy.invalidate_recordset(['is_default'])
+
+        self.assertFalse(legacy.is_default)
+        self.assertTrue(active.is_default)
+        self.assertEqual(self.env['tecdoc.api']._get_default_api(), active)
+
+    def test_tecdoc_upgrade_moves_legacy_host_to_auto_parts_catalog(self):
+        api = self.env['tecdoc.api'].create({
+            'name': 'Old Host',
+            'api_key': 'test-key',
+            'provider': 'tecdoc_catalog',
+            'api_host': 'tecdoc-catalog.p.rapidapi.com',
+            'base_url': 'https://tecdoc-catalog.p.rapidapi.com',
+        })
+
+        self.env['tecdoc.api']._upgrade_default_provider_to_auto_parts_catalog()
+        api.invalidate_recordset(['provider', 'api_host', 'base_url'])
+
+        self.assertEqual(api.provider, 'auto_parts_catalog')
+        self.assertEqual(api.api_host, 'auto-parts-catalog.p.rapidapi.com')
+        self.assertEqual(api.base_url, 'https://auto-parts-catalog.p.rapidapi.com')
+
+    def test_tecdoc_auto_parts_catalog_route_wrappers(self):
+        api = self.env['tecdoc.api'].create({
+            'name': 'Route Test',
+            'api_key': 'test-key',
+        })
+
+        captured = []
+        api_model = type(api)
+        original_make_request = api_model._make_request
+
+        def fake_make_request(self, endpoint, params=None, method='GET', json_data=None, form_data=None):
+            captured.append({
+                'endpoint': endpoint,
+                'method': method,
+                'params': params or {},
+                'json_data': json_data,
+                'form_data': dict(form_data or {}),
+            })
+            return {'ok': True}
+
+        api_model._make_request = fake_make_request
+        try:
+            api.parts_cross_reference_by_article_no('111455', article_type='OENumber')
+            api.get_model_details_by_model_lang(10)
+            api.get_article_details_by_id_lang(99)
+            api.cross_references_through_oem_numbers_supplier_id('111455', 123)
+            api.post_search_articles_by_number('111455', supplier_id=123)
+        finally:
+            api_model._make_request = original_make_request
+
+        self.assertEqual(
+            captured[0]['endpoint'],
+            '/artlookup/search-for-cross-numbers/lang-id/4/article-type/OENumber/article-no/111455',
+        )
+        self.assertEqual(
+            captured[1]['endpoint'],
+            '/models/type-id/1/model-id/10/lang-id/4/country-filter-id/63',
+        )
+        self.assertEqual(captured[2]['endpoint'], '/articles/details/article-id/99/lang-id/4')
+        self.assertEqual(
+            captured[3]['endpoint'],
+            '/artlookup/search-for-cross-references-through-oem-numbers/article-no/111455/supplierId/123',
+        )
+        self.assertEqual(captured[4]['method'], 'POST')
+        self.assertEqual(captured[4]['form_data']['articleNo'], '111455')
+        self.assertEqual(captured[4]['form_data']['supplierId'], 123)
 
     def test_tecdoc_sync_prefers_post_article_number_details_and_populates_variant_data(self):
         api = self.env['tecdoc.api'].create({

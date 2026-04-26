@@ -253,28 +253,76 @@ class InvoiceIngestJobMatch(models.Model):
         return Product, {}
 
     @api.model
+    def _product_from_template_candidates(self, template_ids, scopes):
+        Product = self.env['product.product']
+        template_ids = list(dict.fromkeys(template_ids or []))
+        if not template_ids:
+            return Product, ''
+        return self._search_product_with_scopes(
+            [('product_tmpl_id', 'in', template_ids)],
+            scopes,
+        )
+
+    @api.model
+    def _catalog_template_candidates_by_key(self, key):
+        ProductTemplate = self.env['product.template']
+        Variant = self.env['tecdoc.article.variant']
+        Ean = self.env['tecdoc.article.variant.ean']
+        Oem = self.env['tecdoc.oem.number']
+        CrossNumber = self.env['tecdoc.cross.number']
+        CrossLink = self.env['tecdoc.article.variant.cross']
+
+        direct_templates = ProductTemplate.search(
+            [('tecdoc_article_no_key', '=', key)],
+            limit=25,
+        )
+        if direct_templates:
+            yield direct_templates.ids
+
+        variants = Variant.search(
+            [('article_no_key', '=', key), ('product_tmpl_id', '!=', False)],
+            limit=25,
+        )
+        if variants:
+            yield variants.mapped('product_tmpl_id').ids
+
+        eans = Ean.search([('ean_key', '=', key)], limit=25)
+        if eans:
+            yield eans.mapped('variant_id.product_tmpl_id').ids
+
+        oem_numbers = Oem.search([('number_key', '=', key)], limit=25)
+        if oem_numbers:
+            variants = Variant.search(
+                [('oem_number_ids', 'in', oem_numbers.ids), ('product_tmpl_id', '!=', False)],
+                limit=50,
+            )
+            if variants:
+                yield variants.mapped('product_tmpl_id').ids
+
+        cross_numbers = CrossNumber.search([('number_key', '=', key)], limit=25)
+        if cross_numbers:
+            cross_links = CrossLink.search(
+                [('cross_number_id', 'in', cross_numbers.ids)],
+                limit=50,
+            )
+            if cross_links:
+                yield cross_links.mapped('variant_id.product_tmpl_id').ids
+
+    @api.model
     def _match_by_catalog_lookup(self, code, supplier_domain=None, supplier_brand_domain=None):
         Product = self.env['product.product']
         key = self._compact_code(code)
         if not key:
             return Product, ''
 
-        lookup_domain = [
-            '|', '|', '|',
-            ('product_tmpl_id.tecdoc_article_no_key', '=', key),
-            ('product_tmpl_id.tecdoc_variant_ids.oem_number_ids.number_key', '=', key),
-            ('product_tmpl_id.tecdoc_variant_ids.ean_ids.ean_key', '=', key),
-            ('product_tmpl_id.tecdoc_variant_ids.cross_link_ids.cross_number_id.number_key', '=', key),
-        ]
-        product, reason_suffix = self._search_product_with_scopes(
-            lookup_domain,
-            self._product_search_scopes(
-                supplier_domain=supplier_domain,
-                supplier_brand_domain=supplier_brand_domain,
-            ),
+        scopes = self._product_search_scopes(
+            supplier_domain=supplier_domain,
+            supplier_brand_domain=supplier_brand_domain,
         )
-        if product:
-            return product, f'lookup{reason_suffix}'
+        for template_ids in self._catalog_template_candidates_by_key(key):
+            product, reason_suffix = self._product_from_template_candidates(template_ids, scopes)
+            if product:
+                return product, f'lookup{reason_suffix}'
         return Product, ''
 
     def _match_product(self, product_code, supplier=None, product_description=None, supplier_brand=None, extra_codes=None):
@@ -350,7 +398,7 @@ class InvoiceIngestJobMatch(models.Model):
         if self.source != 'ocr':
             return self.env['product.product'], {}
 
-        api = self.env['tecdoc.api'].sudo().search([], limit=1)
+        api = self.env['tecdoc.api']._get_default_api()
         if not api:
             return self.env['product.product'], {}
 

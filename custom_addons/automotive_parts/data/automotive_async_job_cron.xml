@@ -9,4 +9,9 @@
         <field name="interval_type">minutes</field>
         <field name="active">True</field>
     </record>
+
+    <function model="ir.config_parameter" name="set_param">
+        <value>automotive.async_running_timeout_minutes</value>
+        <value>10</value>
+    </function>
 </odoo>

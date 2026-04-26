@@ -20,6 +20,10 @@ _logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 20
+TECDOC_CATALOG_HOST = 'tecdoc-catalog.p.rapidapi.com'
+TECDOC_CATALOG_BASE_URL = f'https://{TECDOC_CATALOG_HOST}'
+AUTO_PARTS_CATALOG_HOST = 'auto-parts-catalog.p.rapidapi.com'
+AUTO_PARTS_CATALOG_BASE_URL = f'https://{AUTO_PARTS_CATALOG_HOST}'
 
 
 class TecDocAPI(models.Model):
@@ -27,10 +31,24 @@ class TecDocAPI(models.Model):
     _name = 'tecdoc.api'
     _description = 'TecDoc API Integration'
 
-    name = fields.Char('Name', default='TecDoc API')
+    name = fields.Char('Name', default='Auto Parts Catalog API')
+    provider = fields.Selection(
+        [
+            ('auto_parts_catalog', 'Auto Parts Catalog (RapidAPI)'),
+            ('tecdoc_catalog', 'TecDoc Catalog (legacy RapidAPI)'),
+            ('custom', 'Custom RapidAPI host'),
+        ],
+        string='Provider',
+        default='auto_parts_catalog',
+    )
+    is_default = fields.Boolean(
+        'Use for Lookups',
+        default=True,
+        help='Use this configuration for invoice ingest, product sync, and order-line TecDoc lookup.',
+    )
     api_key = fields.Char('RapidAPI Key', required=True)
-    api_host = fields.Char('API Host', default='tecdoc-catalog.p.rapidapi.com')
-    base_url = fields.Char('Base URL', default='https://tecdoc-catalog.p.rapidapi.com')
+    api_host = fields.Char('API Host', default=AUTO_PARTS_CATALOG_HOST)
+    base_url = fields.Char('Base URL', default=AUTO_PARTS_CATALOG_BASE_URL)
     # RapidAPI TecDoc Catalog uses numeric IDs for language and country filter.
     # The provider examples commonly use lang_id=4 and country_filter_id=63; adjust as needed in UI.
     lang_id = fields.Integer('Language ID', default=4)
@@ -42,6 +60,120 @@ class TecDocAPI(models.Model):
 
     download_images = fields.Boolean('Download Images', default=False)
     overwrite_images = fields.Boolean('Overwrite Existing Images', default=False)
+
+    @api.model
+    def _provider_defaults(self, provider):
+        defaults = {
+            'auto_parts_catalog': {
+                'name': 'Auto Parts Catalog API',
+                'api_host': AUTO_PARTS_CATALOG_HOST,
+                'base_url': AUTO_PARTS_CATALOG_BASE_URL,
+            },
+            'tecdoc_catalog': {
+                'name': 'TecDoc Catalog API',
+                'api_host': TECDOC_CATALOG_HOST,
+                'base_url': TECDOC_CATALOG_BASE_URL,
+            },
+        }
+        return defaults.get(provider or 'auto_parts_catalog', {})
+
+    @api.onchange('provider')
+    def _onchange_provider(self):
+        for rec in self:
+            defaults = rec._provider_defaults(rec.provider)
+            if defaults:
+                rec.name = defaults['name']
+                rec.api_host = defaults['api_host']
+                rec.base_url = defaults['base_url']
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            provider = vals.get('provider') or 'auto_parts_catalog'
+            defaults = self._provider_defaults(provider)
+            if defaults:
+                vals.setdefault('api_host', defaults['api_host'])
+                vals.setdefault('base_url', defaults['base_url'])
+                vals.setdefault('name', defaults['name'])
+            if 'is_default' not in vals and self.search_count([]):
+                vals['is_default'] = False
+        records = super().create(vals_list)
+        records._normalize_default_flags()
+        return records
+
+    def write(self, vals):
+        if vals.get('provider') and vals['provider'] != 'custom':
+            defaults = self._provider_defaults(vals['provider'])
+            vals = dict(vals)
+            vals.setdefault('api_host', defaults.get('api_host'))
+            vals.setdefault('base_url', defaults.get('base_url'))
+            vals.setdefault('name', defaults.get('name'))
+        result = super().write(vals)
+        if vals.get('is_default'):
+            self._normalize_default_flags()
+        return result
+
+    def _normalize_default_flags(self):
+        default_records = self.filtered('is_default')
+        if not default_records:
+            return
+        keep = default_records[:1]
+        (self.search([('is_default', '=', True), ('id', 'not in', keep.ids)])).write({'is_default': False})
+
+    @api.model
+    def _get_default_api(self):
+        api = self.sudo().search([('is_default', '=', True)], order='id', limit=1)
+        if api:
+            return api
+        return self.sudo().search([], order='id', limit=1)
+
+    @api.model
+    def _upgrade_default_provider_to_auto_parts_catalog(self):
+        """Move legacy RapidAPI TecDoc Catalog configs to the current provider host."""
+        legacy_records = self.sudo().search([
+            '|',
+            ('api_host', '=', TECDOC_CATALOG_HOST),
+            ('base_url', '=', TECDOC_CATALOG_BASE_URL),
+        ])
+        for rec in legacy_records:
+            rec.write({
+                'provider': 'auto_parts_catalog',
+                'api_host': AUTO_PARTS_CATALOG_HOST,
+                'base_url': AUTO_PARTS_CATALOG_BASE_URL,
+                'name': rec.name or 'Auto Parts Catalog API',
+            })
+        auto_records = self.sudo().search([
+            ('provider', 'in', [False, 'custom']),
+            '|',
+            ('api_host', '=', AUTO_PARTS_CATALOG_HOST),
+            ('base_url', '=', AUTO_PARTS_CATALOG_BASE_URL),
+        ])
+        for rec in auto_records:
+            rec.write({'provider': 'auto_parts_catalog'})
+        if not self.sudo().search([('is_default', '=', True)], limit=1):
+            first = self.sudo().search([], order='id', limit=1)
+            if first:
+                first.write({'is_default': True})
+        return True
+
+    def action_use_auto_parts_catalog(self):
+        self.ensure_one()
+        self.write({
+            'provider': 'auto_parts_catalog',
+            'api_host': AUTO_PARTS_CATALOG_HOST,
+            'base_url': AUTO_PARTS_CATALOG_BASE_URL,
+            'is_default': True,
+        })
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'TecDoc',
+                'message': 'Auto Parts Catalog is now the default lookup provider.',
+                'type': 'success',
+                'sticky': False,
+            },
+        }
 
     @staticmethod
     def _path(value):
@@ -613,10 +745,23 @@ class TecDocAPI(models.Model):
         )
         return self._make_request(endpoint)
 
+    def get_article_details_by_id_lang(self, article_id, lang_id=None):
+        """Get article details by article id and language id."""
+        lang_id = lang_id or self.lang_id
+        endpoint = f"/articles/details/article-id/{self._path(article_id)}/lang-id/{lang_id}"
+        return self._make_request(endpoint)
+
     def post_article_id_complete_details(self, payload):
         """POST article id complete details (payload as provided by RapidAPI docs)"""
         endpoint = "/articles/article-id-complete-details"
         return self._make_request(endpoint, method='POST', json_data=payload)
+
+    def post_article_details_by_article_id_lang(self, article_id, lang_id=None):
+        """POST article details by article id and language id."""
+        lang_id = lang_id or self.lang_id
+        endpoint = "/articles/details"
+        form_payload = {'articleId': article_id, 'langId': lang_id}
+        return self._make_request(endpoint, method='POST', form_data=form_payload)
 
     def post_article_details(self, form_payload):
         """POST /articles/details (form payload)"""
@@ -631,6 +776,27 @@ class TecDocAPI(models.Model):
             f"/articles/selection-of-all-specifications-criterias-for-the-article/article-id/{article_id}"
             f"/lang-id/{lang_id}/country-filter-id/{country_filter_id}"
         )
+        return self._make_request(endpoint)
+
+    def get_article_specifications_by_article_ids(self, article_ids, lang_id=None):
+        """Get specifications by article ids list."""
+        lang_id = lang_id or self.lang_id
+        ids = ','.join(str(article_id) for article_id in (article_ids if isinstance(article_ids, (list, tuple, set)) else [article_ids]))
+        endpoint = f"/articles/get-article-specifications-list-of-articles-ids/lang-id/{lang_id}/articles-ids/{self._path(ids)}"
+        return self._make_request(endpoint)
+
+    def post_article_specifications_by_article_ids(self, article_ids, lang_id=None):
+        """POST specifications by article ids list."""
+        lang_id = lang_id or self.lang_id
+        endpoint = "/articles/get-article-specifications-list-of-articles-ids"
+        form_payload = {'langId': lang_id, 'articlesIds': article_ids}
+        return self._make_request(endpoint, method='POST', form_data=form_payload)
+
+    def get_oems_by_article_ids(self, article_ids, lang_id=None):
+        """Get OEM numbers by article ids list."""
+        lang_id = lang_id or self.lang_id
+        ids = ','.join(str(article_id) for article_id in (article_ids if isinstance(article_ids, (list, tuple, set)) else [article_ids]))
+        endpoint = f"/articles/get-oems-by-list-of-articles-ids/lang-id/{lang_id}/articles-ids/{self._path(ids)}"
         return self._make_request(endpoint)
 
     def list_articles_by_vehicle_and_category_typed(self, vehicle_id, category_id, type_id=1, lang_id=None):
@@ -664,6 +830,11 @@ class TecDocAPI(models.Model):
         """POST /articles/get-compatible-cars-by-article-number (json payload)"""
         endpoint = "/articles/get-compatible-cars-by-article-number"
         return self._make_request(endpoint, method='POST', json_data=payload)
+
+    def post_compatible_cars_by_article_number_form(self, form_payload):
+        """POST compatible cars by article number using form payload."""
+        endpoint = "/articles/get-compatible-cars-by-article-number"
+        return self._make_request(endpoint, method='POST', form_data=form_payload)
 
     def search_articles_by_oem(self, oem_number):
         """Search articles by OEM number"""
@@ -707,6 +878,10 @@ class TecDocAPI(models.Model):
         endpoint = "/types/list-vehicles-type"
         return self._make_request(endpoint)
 
+    def list_type_ids(self):
+        """List vehicle type ids."""
+        return self.list_vehicle_types()
+
     def get_vehicles_by_manufacturer(self, manufacturer_id, type_id=1):
         """Get vehicles by manufacturer"""
         endpoint = f"/models/list/manufacturer-id/{manufacturer_id}/lang-id/{self.lang_id}/country-filter-id/{self.country_filter_id}/type-id/{type_id}"
@@ -737,6 +912,18 @@ class TecDocAPI(models.Model):
     def get_model_details_by_model(self, model_id, type_id=1):
         """Get model details by model id"""
         endpoint = f"/models/type-id/{type_id}/model-id/{model_id}"
+        return self._make_request(endpoint)
+
+    def get_model_details_by_model_lang(self, model_id, type_id=1, lang_id=None, country_filter_id=None):
+        """Get model details by model id with language/country filter."""
+        lang_id = lang_id or self.lang_id
+        country_filter_id = country_filter_id or self.country_filter_id
+        endpoint = f"/models/type-id/{type_id}/model-id/{model_id}/lang-id/{lang_id}/country-filter-id/{country_filter_id}"
+        return self._make_request(endpoint)
+
+    def get_model_image(self, model_id):
+        """Get model image by model id."""
+        endpoint = f"/models/model-image/model-id/{model_id}"
         return self._make_request(endpoint)
 
     def decode_vin(self, vin_number):
@@ -1010,6 +1197,12 @@ class TecDocAPI(models.Model):
         endpoint = f"/articles/get-article-category/article-id/{article_id}/lang-id/{lang_id}"
         return self._make_request(endpoint)
 
+    def list_categories_by_article_id(self, article_id, lang_id=None):
+        """List categories by article id (plural endpoint shape)."""
+        lang_id = lang_id or self.lang_id
+        endpoint = f"/articles/get-article-categories/article-id/{article_id}/lang-id/{lang_id}"
+        return self._make_request(endpoint)
+
     def post_quick_article_search(self, form_payload):
         """POST quick article search (form payload)"""
         endpoint = "/articles/quick-article-search"
@@ -1020,6 +1213,15 @@ class TecDocAPI(models.Model):
         lang_id = lang_id or self.lang_id
         endpoint = f"/articles/search-by-articles-no-supplier-id/lang-id/{lang_id}/supplier-id/{supplier_id}/article-no/{article_no}"
         return self._make_request(endpoint)
+
+    def post_search_articles_by_number(self, article_no, supplier_id=None, article_type='ArticleNumber', lang_id=None):
+        """POST search articles by article number and optional supplier id."""
+        lang_id = lang_id or self.lang_id
+        endpoint = "/artlookup/search-articles-by-article-no"
+        form_payload = {'langId': lang_id, 'articleNo': article_no, 'articleType': article_type}
+        if supplier_id:
+            form_payload['supplierId'] = supplier_id
+        return self._make_request(endpoint, method='POST', form_data=form_payload)
 
     def search_oem_by_article_oem_no(self, article_oem_no, lang_id=None):
         """Search articles by OEM number (alt endpoint)"""
@@ -1032,6 +1234,18 @@ class TecDocAPI(models.Model):
         endpoint = "/articles-oem/article-oem-search-no"
         return self._make_request(endpoint, method='POST', form_data=form_payload)
 
+    def get_oem_by_article_id(self, article_id, lang_id=None):
+        """Get OEM numbers by article id."""
+        lang_id = lang_id or self.lang_id
+        endpoint = f"/articles-oem/get-oem-by-article-id/article-id/{self._path(article_id)}/lang-id/{lang_id}"
+        return self._make_request(endpoint)
+
+    def post_get_oem_by_article_id(self, article_id, lang_id=None):
+        """POST OEM lookup by article id."""
+        lang_id = lang_id or self.lang_id
+        endpoint = "/articles-oem/get-oem-by-article-id"
+        return self._make_request(endpoint, method='POST', form_data={'articleId': article_id, 'langId': lang_id})
+
     # ===== CROSS REFERENCES / OEM EQUIVALENTS =====
 
     def cross_references_through_oem_numbers(self, article_no, supplier_name):
@@ -1039,10 +1253,38 @@ class TecDocAPI(models.Model):
         endpoint = f"/artlookup/search-for-cross-references-through-oem-numbers/article-no/{article_no}/supplierName/{supplier_name}"
         return self._make_request(endpoint)
 
+    def cross_references_through_oem_numbers_supplier_id(self, article_no, supplier_id):
+        """Cross-references through OEM numbers (by article no + supplier id)."""
+        endpoint = (
+            f"/artlookup/search-for-cross-references-through-oem-numbers/"
+            f"article-no/{self._path(article_no)}/supplierId/{self._path(supplier_id)}"
+        )
+        return self._make_request(endpoint)
+
+    def post_cross_references_through_oem_numbers(self, form_payload):
+        """POST search for cross-references through OEM numbers."""
+        endpoint = "/artlookup/search-for-cross-references-through-oem-numbers"
+        return self._make_request(endpoint, method='POST', form_data=form_payload)
+
+    def cross_references_through_oem_numbers_by_article_id(self, article_id, lang_id=None):
+        """Cross-references through OEM numbers by article id."""
+        lang_id = lang_id or self.lang_id
+        endpoint = (
+            f"/artlookup/search-for-cross-references-through-oem-numbers-by-article-id/"
+            f"article-id/{self._path(article_id)}/lang-id/{lang_id}"
+        )
+        return self._make_request(endpoint)
+
     def cross_references_by_article_id(self, article_id, lang_id=None):
         """Cross-references by article id"""
         lang_id = lang_id or self.lang_id
         endpoint = f"/artlookup/select-article-cross-references/article-id/{article_id}/lang-id/{lang_id}"
+        return self._make_request(endpoint)
+
+    def cross_references_by_article_id_partial_match(self, article_id, lang_id=None):
+        """Cross-references by article id, partial-match variant."""
+        lang_id = lang_id or self.lang_id
+        endpoint = f"/artlookup/select-article-cross-references-partial-match/article-id/{article_id}/lang-id/{lang_id}"
         return self._make_request(endpoint)
 
     def oem_oem_cross_reference_through_aftermarket(self, article_oem_no):
@@ -1066,8 +1308,13 @@ class TecDocAPI(models.Model):
     def parts_cross_reference_by_article_no(self, article_no, article_type='IAMNumber', lang_id=None):
         """Parts cross-reference by article no"""
         lang_id = lang_id or self.lang_id
-        endpoint = f"/artlookup/search-for-cross-numbers/lang-id/{lang_id}/article-type/{article_type}/article-no/{article_no}"
+        endpoint = f"/artlookup/search-for-cross-numbers/lang-id/{lang_id}/article-type/{self._path(article_type)}/article-no/{self._path(article_no)}"
         return self._make_request(endpoint)
+
+    def post_search_for_cross_numbers(self, form_payload):
+        """POST search for cross-numbers."""
+        endpoint = "/artlookup/search-for-cross-numbers"
+        return self._make_request(endpoint, method='POST', form_data=form_payload)
 
     def search_articles_by_article_no(self, article_no, article_type='ArticleNumber', lang_id=None):
         """Search articles by article no (artlookup endpoint)"""
@@ -1112,7 +1359,10 @@ class TecDocAPI(models.Model):
         try:
             return self.search_articles_by_article_no(ean, article_type='EANNumber', lang_id=lang_id)
         except UserError:
-            return self.search_article_by_number(ean)
+            try:
+                return self.search_articles_by_article_no(ean, article_type='EAN', lang_id=lang_id)
+            except UserError:
+                return self.search_article_by_number(ean)
 
     def search_articles_by_oem_no(self, oem_no, lang_id=None):
         """Search by OEM number (wrapper around the provider's OEM endpoints)."""
@@ -1124,6 +1374,14 @@ class TecDocAPI(models.Model):
             return self.search_oem_by_article_oem_no(oem_no, lang_id=lang_id)
         except UserError:
             return self.search_articles_by_oem(oem_no)
+
+    def search_articles_by_iam_no(self, iam_no, lang_id=None):
+        """Search by IAM number."""
+        return self.search_articles_by_article_no(iam_no, article_type='IAMNumber', lang_id=lang_id or self.lang_id)
+
+    def search_articles_by_trade_no(self, trade_no, lang_id=None):
+        """Search by trade number."""
+        return self.search_articles_by_article_no(trade_no, article_type='TradeNumber', lang_id=lang_id or self.lang_id)
 
     # ===== VEHICLES: SPARE PART CRITERIA =====
 
@@ -1181,6 +1439,22 @@ class TecDocAPI(models.Model):
         endpoint = (
             f"/types/searching-the-passenger-car-by-ltn-number/lang-id/{lang_id}"
             f"/country-filter-id/{country_filter_id}/ltn-number/{ltn_number}/number-type/{number_type}"
+        )
+        return self._make_request(endpoint)
+
+    def vehicles_by_kba_number(self, kba_number, lang_id=None, country_filter_id=None):
+        """Find vehicles by Germany KBA number."""
+        return self.find_vehicle_by_ltn_number(kba_number, 'KBA', lang_id=lang_id, country_filter_id=country_filter_id)
+
+    def vehicles_by_kenteken(self, license_plate, lang_id=None, country_filter_id=None):
+        """Find vehicles by Netherlands Kenteken license plate."""
+        return self.find_vehicle_by_ltn_number(license_plate, 'Kenteken', lang_id=lang_id, country_filter_id=country_filter_id)
+
+    def get_type_id_by_vehicle_and_manufacturer(self, vehicle_id, manufacturer_id, type_id=1):
+        """Get typeId by vehicleId and manufacturerId."""
+        endpoint = (
+            f"/types/get-typeid-by-vehicleid/type-id/{type_id}"
+            f"/vehicle-id/{self._path(vehicle_id)}/manufacturer-id/{self._path(manufacturer_id)}"
         )
         return self._make_request(endpoint)
 
@@ -1541,7 +1815,7 @@ class TecDocSync(models.TransientModel):
     def action_preview_candidates(self):
         """Preview potential matches so the user can pick a supplier_id when needed."""
         self.ensure_one()
-        api = self.env['tecdoc.api'].search([], limit=1)
+        api = self.env['tecdoc.api']._get_default_api()
         if not api:
             raise UserError("Please configure TecDoc API first!")
 
@@ -1621,7 +1895,7 @@ class TecDocSync(models.TransientModel):
     def _sync_product_from_lookup(self):
         """Return a synced product for the wizard lookup settings."""
         self.ensure_one()
-        api = self.env['tecdoc.api'].search([], limit=1)
+        api = self.env['tecdoc.api']._get_default_api()
 
         if not api:
             raise UserError("Please configure TecDoc API first!")

@@ -609,6 +609,16 @@ class InvoiceIngestJobExtract(models.Model):
             normalized_lines = []
             for line_index, line in enumerate(lines, start=1):
                 job._ensure_async_not_cancelled()
+                line_progress = 80.0
+                if total_lines:
+                    line_progress += min(14.0, (line_index - 1) * 14.0 / total_lines)
+                job._report_async_progress(
+                    line_progress,
+                    _('Matching products and normalizing lines (%(current)s/%(total)s)') % {
+                        'current': line_index,
+                        'total': total_lines,
+                    },
+                )
                 normalized_line = job.with_context(
                     invoice_ingest_match_line_index=line_index,
                     invoice_ingest_match_line_total=total_lines,

@@ -454,7 +454,7 @@ class TecDocFastImportRun(models.Model):
     def _maybe_sync_product_image(self, product, image_url):
         if not product or not image_url:
             return
-        api = self.env['tecdoc.api'].sudo().search([], limit=1)
+        api = self.env['tecdoc.api']._get_default_api()
         if not api:
             return
         should_download = api.download_images and (api.overwrite_images or not product.image_1920)
