@@ -1489,6 +1489,13 @@ class TecDocSync(models.TransientModel):
     )
     candidates_info = fields.Text('Matches', readonly=True)
     invoice_ingest_line_id = fields.Many2one('invoice.ingest.job.line', string='Invoice Ingest Line')
+    sale_order_id = fields.Many2one('sale.order', string='Sale Order')
+    product_uom_qty = fields.Float('Quantity', default=1.0)
+    price_unit = fields.Float('Unit Price')
+
+    def _product_variant_for_apply(self, product):
+        product = product if product._name == 'product.product' else product.product_variant_id
+        return product.exists() if product else product
 
     def _apply_to_invoice_ingest_line(self, product):
         self.ensure_one()
@@ -1496,7 +1503,7 @@ class TecDocSync(models.TransientModel):
         if not line:
             return False
 
-        product_variant = product if product._name == 'product.product' else product.product_variant_id
+        product_variant = self._product_variant_for_apply(product)
         if not product_variant:
             return False
 
@@ -1528,6 +1535,50 @@ class TecDocSync(models.TransientModel):
             'params': {
                 'title': 'TecDoc Match',
                 'message': 'Product created from TecDoc and linked to the invoice line.',
+                'type': 'success',
+                'sticky': False,
+                'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
+            },
+        }
+
+    def _apply_to_sale_order(self, product):
+        self.ensure_one()
+        order = self.sale_order_id.exists()
+        if not order:
+            return False
+
+        product_variant = self._product_variant_for_apply(product)
+        if not product_variant:
+            return False
+
+        line_vals = {
+            'order_id': order.id,
+            'product_id': product_variant.id,
+            'product_uom_qty': self.product_uom_qty or 1.0,
+        }
+        if self.price_unit:
+            line_vals['price_unit'] = self.price_unit
+        self.env['sale.order.line'].create(line_vals)
+
+        self.env['automotive.audit.log'].log_change(
+            action='custom',
+            record=order,
+            description=f'Sale order line added through TecDoc: {order.display_name}',
+            new_values={
+                'sale_order_id': order.id,
+                'product_id': product_variant.id,
+                'tecdoc_lookup_type': self.lookup_type,
+                'tecdoc_search_value': self.article_number,
+                'tecdoc_supplier_id': self.supplier_id or False,
+                'quantity': self.product_uom_qty or 1.0,
+            },
+        )
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'TecDoc',
+                'message': 'Product synced from TecDoc and added to the order.',
                 'type': 'success',
                 'sticky': False,
                 'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
@@ -1684,7 +1735,7 @@ class TecDocSync(models.TransientModel):
                     raise last_error
 
         template = product.product_tmpl_id if product._name == 'product.product' else product
-        line_action = self._apply_to_invoice_ingest_line(product)
+        line_action = self._apply_to_invoice_ingest_line(product) or self._apply_to_sale_order(product)
         if line_action:
             return line_action
         return {

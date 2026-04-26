@@ -276,6 +276,9 @@
                     <field name="article_number" placeholder="Introdu codul articolului..."/>
                     <field name="supplier_id"/>
                     <field name="invoice_ingest_line_id" invisible="1"/>
+                    <field name="sale_order_id" readonly="1" invisible="not sale_order_id"/>
+                    <field name="product_uom_qty" invisible="not sale_order_id"/>
+                    <field name="price_unit" invisible="not sale_order_id"/>
                 </group>
                 <group>
                     <field name="candidates_info" widget="text" readonly="1" placeholder="Apasă „Găsește furnizori” pentru a previzualiza potrivirile."/>

@@ -18,6 +18,103 @@
         </field>
     </record>
 
+    <record id="view_order_form_automotive_simple_create" model="ir.ui.view">
+        <field name="name">sale.order.form.automotive.simple.create</field>
+        <field name="model">sale.order</field>
+        <field name="arch" type="xml">
+            <form string="Creează comandă">
+                <header>
+                    <button name="action_confirm" string="Confirmă comanda" type="object" class="btn-primary"
+                            invisible="state not in ('draft', 'sent')"/>
+                    <button name="action_cancel" string="Anulează" type="object" class="btn-secondary"
+                            invisible="state in ('cancel', 'done')"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,sent,sale"/>
+                </header>
+                <sheet>
+                    <field name="company_id" invisible="1"/>
+                    <field name="currency_id" invisible="1"/>
+                    <field name="pricelist_id" invisible="1"/>
+                    <field name="payment_term_id" invisible="1"/>
+                    <field name="tax_country_id" invisible="1"/>
+                    <field name="company_price_include" invisible="1"/>
+                    <group>
+                        <group string="Client">
+                            <field name="partner_id" required="1" placeholder="Alege clientul..."/>
+                            <field name="mechanic_partner_id" options="{'no_open': False}"
+                                   context="{'default_client_type': 'mechanic'}"/>
+                            <field name="order_type" invisible="1"/>
+                        </group>
+                        <group string="Comandă">
+                            <field name="auto_state" widget="statusbar"
+                                   statusbar_visible="draft,waiting_supply,partial_received,fully_received,ready_prep,delivered,cancel"/>
+                            <field name="estimated_delivery_date"/>
+                            <field name="stock_status" widget="badge"
+                                   decoration-success="stock_status == 'full'"
+                                   decoration-warning="stock_status == 'partial'"
+                                   decoration-danger="stock_status == 'none'"/>
+                        </group>
+                    </group>
+
+                    <notebook>
+                        <page string="Piese" name="automotive_order_lines">
+                            <button name="action_open_tecdoc_add_line" string="Caută TecDoc" type="object"
+                                    class="btn-secondary mb-2"/>
+                            <field name="order_line" mode="list">
+                                <list string="Piese comandă" editable="bottom">
+                                    <field name="display_type" column_invisible="True"/>
+                                    <field name="product_uom_category_id" column_invisible="True"/>
+                                    <field name="product_type" column_invisible="True"/>
+                                    <field name="product_updatable" column_invisible="True"/>
+                                    <field name="is_downpayment" column_invisible="True"/>
+                                    <field name="state" column_invisible="True"/>
+                                    <field name="currency_id" column_invisible="True"/>
+                                    <field name="company_id" column_invisible="True"/>
+                                    <field name="product_id"
+                                           string="Produs"
+                                           required="not display_type and not is_downpayment"
+                                           readonly="not product_updatable"
+                                           force_save="1"
+                                           context="{
+                                               'partner_id': parent.partner_id,
+                                               'quantity': product_uom_qty,
+                                               'pricelist': parent.pricelist_id,
+                                               'uom': product_uom,
+                                               'company_id': parent.company_id,
+                                               'default_lst_price': price_unit,
+                                               'default_uom_id': product_uom,
+                                           }"
+                                           options="{'no_open': True}"
+                                           domain="[('sale_ok', '=', True)]"
+                                           widget="sol_product_many2one"
+                                           placeholder="Caută produs local..."/>
+                                    <field name="name" string="Descriere" optional="hide"/>
+                                    <field name="product_uom_qty" string="Cantitate"/>
+                                    <field name="product_uom" string="UM" groups="uom.group_uom"
+                                           options="{'no_open': True}" optional="show"/>
+                                    <field name="price_unit" string="Preț"/>
+                                    <field name="tax_id" widget="many2many_tags"
+                                           options="{'no_create': True}"
+                                           domain="[('type_tax_use', '=', 'sale'), ('company_id', 'parent_of', parent.company_id), ('country_id', '=', parent.tax_country_id)]"
+                                           optional="hide"/>
+                                    <field name="price_subtotal" string="Total" readonly="1"/>
+                                </list>
+                            </field>
+                            <group class="oe_subtotal_footer">
+                                <field name="amount_untaxed" readonly="1"/>
+                                <field name="amount_tax" readonly="1"/>
+                                <field name="amount_total" readonly="1"/>
+                            </group>
+                        </page>
+                        <page string="Observații" name="automotive_observations">
+                            <field name="observations" placeholder="Observații interne pentru comandă..."/>
+                        </page>
+                    </notebook>
+                </sheet>
+                <chatter/>
+            </form>
+        </field>
+    </record>
+
     <!-- Extended Sale Order Form View -->
     <record id="view_order_form_automotive" model="ir.ui.view">
         <field name="name">sale.order.form.automotive</field>
