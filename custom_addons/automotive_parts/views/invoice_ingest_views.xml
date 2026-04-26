@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
+    <record id="action_invoice_ingest_upload_wizard" model="ir.actions.act_window">
+        <field name="name">Importă AI</field>
+        <field name="path">import-ai-facturi</field>
+        <field name="res_model">invoice.ingest.upload.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
     <record id="view_invoice_ingest_job_tree" model="ir.ui.view">
         <field name="name">invoice.ingest.job.tree</field>
         <field name="model">invoice.ingest.job</field>
@@ -167,11 +175,4 @@
         </field>
     </record>
 
-    <record id="action_invoice_ingest_upload_wizard" model="ir.actions.act_window">
-        <field name="name">Importă AI</field>
-        <field name="path">import-facturi</field>
-        <field name="res_model">invoice.ingest.upload.wizard</field>
-        <field name="view_mode">form</field>
-        <field name="target">new</field>
-    </record>
 </odoo>

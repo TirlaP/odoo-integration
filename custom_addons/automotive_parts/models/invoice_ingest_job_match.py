@@ -411,7 +411,7 @@ class InvoiceIngestJobMatch(models.Model):
                 continue
             attempted.add(compact_code)
             try:
-                product = api.with_context(tecdoc_single_attempt=True).sync_product_from_tecdoc(
+                product = api.sync_product_from_tecdoc(
                     article_no=normalized_code,
                     supplier_id=supplier_id or None,
                 )
@@ -802,6 +802,47 @@ class InvoiceIngestJobMatch(models.Model):
                     matched_product=product,
                 )
                 return product, match_meta
+
+        if codes:
+            self._emit_match_runtime_event(
+                phase='tecdoc_auto_start',
+                detail='starting TecDoc live lookup',
+                line_index=line_index,
+                line_total=line_total,
+                raw_code=raw_code,
+                product_code=product_code,
+                product_description=product_description,
+                supplier=supplier,
+                supplier_brand=supplier_brand,
+                extra={'candidate_code_count': len(codes)},
+            )
+            product, match_meta = self._match_or_create_from_tecdoc(codes, supplier_brand=supplier_brand)
+            if product:
+                self._emit_match_runtime_event(
+                    phase='matched',
+                    detail=f"matched during {match_meta.get('method') or 'TecDoc live lookup'}",
+                    line_index=line_index,
+                    line_total=line_total,
+                    raw_code=raw_code,
+                    product_code=product_code,
+                    product_description=product_description,
+                    supplier=supplier,
+                    supplier_brand=supplier_brand,
+                    match_meta=match_meta,
+                    matched_product=product,
+                )
+                return product, match_meta
+            self._emit_match_runtime_event(
+                phase='tecdoc_auto_miss',
+                detail='no TecDoc live match found',
+                line_index=line_index,
+                line_total=line_total,
+                raw_code=raw_code,
+                product_code=product_code,
+                product_description=product_description,
+                supplier=supplier,
+                supplier_brand=supplier_brand,
+            )
 
         match_meta = {
             'method': 'not_found',

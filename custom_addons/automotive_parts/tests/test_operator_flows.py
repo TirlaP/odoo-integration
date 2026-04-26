@@ -1629,7 +1629,7 @@ Data sc:        06/05/2026
         self.assertEqual(template.tecdoc_variant_ids[:1].ean_ids[:1].ean, '5900427194311')
         self.assertTrue(template.tecdoc_variant_ids[:1].vehicle_ids)
 
-    def test_invoice_ingest_does_not_auto_sync_tecdoc_when_local_match_misses(self):
+    def test_invoice_ingest_auto_syncs_tecdoc_when_local_match_misses(self):
         api = self.env['tecdoc.api'].create({
             'name': 'TecDoc Test API Auto Match',
             'api_key': 'test-key',
@@ -1644,12 +1644,17 @@ Data sc:        06/05/2026
 
         api_model = type(api)
         original_sync = api_model.sync_product_from_tecdoc
+        captured = {}
 
         def fake_sync_product_from_tecdoc(self, article_id=None, article_no=None, supplier_id=None):
-            raise AssertionError('invoice ingest should not auto-sync TecDoc during OCR matching')
+            captured['article_no'] = article_no
+            captured['supplier_id'] = supplier_id
+            captured['single_attempt'] = bool(self.env.context.get('tecdoc_single_attempt'))
+            return self.env['product.product'].browse(captured['product_id'])
 
         api_model.sync_product_from_tecdoc = fake_sync_product_from_tecdoc
         try:
+            captured['product_id'] = self.product.id
             normalized = job._normalize_payload_line({
                 'product_code_raw': 'C2W029ABE',
                 'product_code': 'C2W029ABE',
@@ -1659,8 +1664,11 @@ Data sc:        06/05/2026
         finally:
             api_model.sync_product_from_tecdoc = original_sync
 
-        self.assertFalse(normalized['matched_product_id'])
-        self.assertFalse(normalized['match_method'])
+        self.assertEqual(captured['article_no'], 'C2W029ABE')
+        self.assertFalse(captured['single_attempt'])
+        self.assertEqual(normalized['matched_product_id'], self.product.id)
+        self.assertEqual(normalized['match_method'], 'exact:tecdoc_auto_sync')
+        self.assertEqual(normalized['match_confidence'], 94.0)
         self.assertEqual(normalized['supplier_brand'], 'ABE')
 
     def test_tecdoc_sync_does_not_create_product_for_explicit_empty_article_response(self):
@@ -1734,7 +1742,7 @@ Data sc:        06/05/2026
             api_model.sync_product_from_tecdoc = original_sync
 
         self.assertFalse(normalized['matched_product_id'])
-        self.assertFalse(normalized.get('match_method'))
+        self.assertEqual(normalized.get('match_method'), 'not_found')
         self.assertEqual(
             self.env['product.template'].search_count([('tecdoc_article_no', '=', 'ATAS2102')]),
             existing_templates,
