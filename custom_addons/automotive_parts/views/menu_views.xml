@@ -19,10 +19,115 @@
               action="action_invoice_ingest_jobs"
               sequence="10"/>
 
+    <record id="action_automotive_order_create" model="ir.actions.act_window">
+        <field name="name">Creează comandă</field>
+        <field name="path">creeaza-comanda</field>
+        <field name="res_model">sale.order</field>
+        <field name="view_id" ref="sale.view_order_form"/>
+        <field name="view_mode">form,list</field>
+        <field name="context">{'default_order_type': 'external'}</field>
+    </record>
+
+    <record id="action_automotive_orders_open" model="ir.actions.act_window">
+        <field name="name">Comenzi deschise</field>
+        <field name="path">comenzi-deschise</field>
+        <field name="res_model">sale.order</field>
+        <field name="view_mode">list,kanban,form,calendar,pivot,graph,activity</field>
+        <field name="search_view_id" ref="sale.sale_order_view_search_inherit_sale"/>
+        <field name="domain">[('state', '!=', 'cancel'), ('auto_state', 'not in', ['delivered', 'cancel'])]</field>
+        <field name="context">{'search_default_group_auto_state': 1}</field>
+    </record>
+
+    <record id="action_automotive_orders_done" model="ir.actions.act_window">
+        <field name="name">Comenzi finalizate</field>
+        <field name="path">comenzi-finalizate</field>
+        <field name="res_model">sale.order</field>
+        <field name="view_mode">list,kanban,form,calendar,pivot,graph,activity</field>
+        <field name="search_view_id" ref="sale.sale_order_view_search_inherit_sale"/>
+        <field name="domain">[('auto_state', '=', 'delivered')]</field>
+        <field name="context">{}</field>
+    </record>
+
+    <record id="action_automotive_orders_cancelled" model="ir.actions.act_window">
+        <field name="name">Comenzi șterse</field>
+        <field name="path">comenzi-sterse</field>
+        <field name="res_model">sale.order</field>
+        <field name="view_mode">list,kanban,form,calendar,pivot,graph,activity</field>
+        <field name="search_view_id" ref="sale.sale_order_view_search_inherit_sale"/>
+        <field name="domain">['|', ('state', '=', 'cancel'), ('auto_state', '=', 'cancel')]</field>
+        <field name="context">{}</field>
+    </record>
+
+    <record id="action_automotive_sales_history" model="ir.actions.act_window">
+        <field name="name">Istoric vânzări</field>
+        <field name="path">istoric-vanzari</field>
+        <field name="res_model">sale.order</field>
+        <field name="view_mode">list,kanban,form,calendar,pivot,graph,activity</field>
+        <field name="search_view_id" ref="sale.sale_order_view_search_inherit_sale"/>
+        <field name="domain">[('state', 'in', ['sale', 'done'])]</field>
+        <field name="context">{'search_default_group_auto_state': 1}</field>
+    </record>
+
+    <record id="action_automotive_sell" model="ir.actions.act_window">
+        <field name="name">Vinde</field>
+        <field name="path">vinde</field>
+        <field name="res_model">sale.order</field>
+        <field name="view_id" ref="sale.view_quotation_tree_with_onboarding"/>
+        <field name="view_mode">list,kanban,form,calendar,pivot,graph,activity</field>
+        <field name="search_view_id" ref="sale.sale_order_view_search_inherit_quotation"/>
+        <field name="context">{'search_default_my_quotation': 1, 'default_order_type': 'external'}</field>
+    </record>
+
+    <menuitem id="menu_automotive_orders"
+              name="Comenzi"
+              parent="menu_automotive_root"
+              sequence="20"/>
+
+    <menuitem id="menu_automotive_order_create"
+              name="Creează comandă"
+              parent="menu_automotive_orders"
+              action="action_automotive_order_create"
+              sequence="10"/>
+
+    <menuitem id="menu_automotive_orders_done"
+              name="Comenzi finalizate"
+              parent="menu_automotive_orders"
+              action="action_automotive_orders_done"
+              sequence="20"/>
+
+    <menuitem id="menu_automotive_orders_open"
+              name="Comenzi deschise"
+              parent="menu_automotive_orders"
+              action="action_automotive_orders_open"
+              sequence="30"/>
+
+    <menuitem id="menu_automotive_orders_cancelled"
+              name="Comenzi șterse"
+              parent="menu_automotive_orders"
+              action="action_automotive_orders_cancelled"
+              sequence="40"/>
+
+    <menuitem id="menu_automotive_sales"
+              name="Vânzări"
+              parent="menu_automotive_root"
+              sequence="30"/>
+
+    <menuitem id="menu_automotive_sales_history"
+              name="Istoric vânzări"
+              parent="menu_automotive_sales"
+              action="action_automotive_sales_history"
+              sequence="10"/>
+
+    <menuitem id="menu_automotive_sell"
+              name="Vinde"
+              parent="menu_automotive_sales"
+              action="action_automotive_sell"
+              sequence="20"/>
+
     <menuitem id="menu_stock_workspace"
               name="Stocuri"
               parent="menu_automotive_root"
-              sequence="30"/>
+              sequence="40"/>
 
     <menuitem id="menu_stock_workspace_overview"
               name="Panou stoc"
@@ -63,7 +168,7 @@
     <menuitem id="menu_commercial_documents"
               name="Documente comerciale"
               parent="menu_automotive_root"
-              sequence="40"/>
+              sequence="50"/>
 
     <menuitem id="menu_commercial_documents_vendor_bills"
               name="Facturi furnizor"
