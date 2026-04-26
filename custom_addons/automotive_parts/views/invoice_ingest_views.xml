@@ -4,11 +4,11 @@
         <field name="name">invoice.ingest.job.tree</field>
         <field name="model">invoice.ingest.job</field>
         <field name="arch" type="xml">
-            <list string="Importuri facturi" default_order="create_date desc">
+            <list string="Importuri facturi" default_order="create_date desc" create="0">
                 <header>
                     <button name="%(action_invoice_ingest_upload_wizard)d"
                             type="action"
-                            string="Importă facturi"
+                            string="Importă AI"
                             class="btn-primary"
                             display="always"/>
                 </header>
@@ -57,10 +57,10 @@
         <field name="name">invoice.ingest.job.form</field>
         <field name="model">invoice.ingest.job</field>
         <field name="arch" type="xml">
-            <form string="Invoice Ingest Job">
+            <form string="Invoice Ingest Job" create="0">
                 <header>
                     <button name="action_open_upload_wizard" type="object" class="btn-primary"
-                            string="Importă facturi"/>
+                            string="Importă AI"/>
                     <button name="action_reprocess" type="object" class="btn-secondary"
                             string="Reprocesează"
                             invisible="source != 'ocr' or not attachment_id or state == 'running' or receipt_sync_state == 'synced'"/>
@@ -144,7 +144,7 @@
         <field name="name">invoice.ingest.upload.wizard.form</field>
         <field name="model">invoice.ingest.upload.wizard</field>
         <field name="arch" type="xml">
-            <form string="Importă facturi (PDF/Imagine)">
+            <form string="Importă AI (PDF/Imagine)">
                 <sheet>
                     <group>
                         <field name="upload_attachment_ids" widget="many2many_binary"
@@ -168,7 +168,7 @@
     </record>
 
     <record id="action_invoice_ingest_upload_wizard" model="ir.actions.act_window">
-        <field name="name">Importă facturi</field>
+        <field name="name">Importă AI</field>
         <field name="path">import-facturi</field>
         <field name="res_model">invoice.ingest.upload.wizard</field>
         <field name="view_mode">form</field>

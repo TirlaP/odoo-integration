@@ -8,7 +8,7 @@
               web_icon="automotive_parts,static/description/icon.png"/>
 
     <record id="menu_invoice_ingest_upload_wizard" model="ir.ui.menu">
-        <field name="name">Importă facturi</field>
+        <field name="name">Importă AI</field>
         <field name="parent_id" ref="menu_automotive_root"/>
         <field name="sequence">20</field>
         <field name="active" eval="False"/>
