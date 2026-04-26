@@ -1489,9 +1489,6 @@ class TecDocSync(models.TransientModel):
     )
     candidates_info = fields.Text('Matches', readonly=True)
     invoice_ingest_line_id = fields.Many2one('invoice.ingest.job.line', string='Invoice Ingest Line')
-    sale_order_id = fields.Many2one('sale.order', string='Sale Order')
-    product_uom_qty = fields.Float('Quantity', default=1.0)
-    price_unit = fields.Float('Unit Price')
 
     def _product_variant_for_apply(self, product):
         product = product if product._name == 'product.product' else product.product_variant_id
@@ -1535,50 +1532,6 @@ class TecDocSync(models.TransientModel):
             'params': {
                 'title': 'TecDoc Match',
                 'message': 'Product created from TecDoc and linked to the invoice line.',
-                'type': 'success',
-                'sticky': False,
-                'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
-            },
-        }
-
-    def _apply_to_sale_order(self, product):
-        self.ensure_one()
-        order = self.sale_order_id.exists()
-        if not order:
-            return False
-
-        product_variant = self._product_variant_for_apply(product)
-        if not product_variant:
-            return False
-
-        line_vals = {
-            'order_id': order.id,
-            'product_id': product_variant.id,
-            'product_uom_qty': self.product_uom_qty or 1.0,
-        }
-        if self.price_unit:
-            line_vals['price_unit'] = self.price_unit
-        self.env['sale.order.line'].create(line_vals)
-
-        self.env['automotive.audit.log'].log_change(
-            action='custom',
-            record=order,
-            description=f'Sale order line added through TecDoc: {order.display_name}',
-            new_values={
-                'sale_order_id': order.id,
-                'product_id': product_variant.id,
-                'tecdoc_lookup_type': self.lookup_type,
-                'tecdoc_search_value': self.article_number,
-                'tecdoc_supplier_id': self.supplier_id or False,
-                'quantity': self.product_uom_qty or 1.0,
-            },
-        )
-        return {
-            'type': 'ir.actions.client',
-            'tag': 'display_notification',
-            'params': {
-                'title': 'TecDoc',
-                'message': 'Product synced from TecDoc and added to the order.',
                 'type': 'success',
                 'sticky': False,
                 'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
@@ -1665,8 +1618,9 @@ class TecDocSync(models.TransientModel):
             'target': 'new',
         }
 
-    def action_sync(self):
-        """Sync product from TecDoc"""
+    def _sync_product_from_lookup(self):
+        """Return a synced product for the wizard lookup settings."""
+        self.ensure_one()
         api = self.env['tecdoc.api'].search([], limit=1)
 
         if not api:
@@ -1734,8 +1688,32 @@ class TecDocSync(models.TransientModel):
                 else:
                     raise last_error
 
+        return product
+
+    @api.model
+    def sync_product_for_lookup(self, lookup_type='article_no', article_number=None, supplier_id=False):
+        """Sync a TecDoc product and return a many2one-friendly product value."""
+        article_number = (article_number or '').strip()
+        if not article_number:
+            raise UserError("Enter an article number first.")
+
+        wizard = self.create({
+            'lookup_type': lookup_type or 'article_no',
+            'article_number': article_number,
+            'supplier_id': supplier_id or False,
+        })
+        product = wizard._sync_product_from_lookup()
+        variant = product if product._name == 'product.product' else product.product_variant_id
+        return {
+            'id': variant.id,
+            'display_name': variant.display_name,
+        }
+
+    def action_sync(self):
+        """Sync product from TecDoc"""
+        product = self._sync_product_from_lookup()
         template = product.product_tmpl_id if product._name == 'product.product' else product
-        line_action = self._apply_to_invoice_ingest_line(product) or self._apply_to_sale_order(product)
+        line_action = self._apply_to_invoice_ingest_line(product)
         if line_action:
             return line_action
         return {

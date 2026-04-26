@@ -621,24 +621,6 @@ class SaleOrder(models.Model):
             order.with_context(skip_edit_restriction=True).action_cancel()
             order._log_auto_state_transition(previous_state, 'cancel', origin='manual')
 
-    def action_open_tecdoc_add_line(self):
-        self.ensure_one()
-        if not self.id or not isinstance(self.id, int):
-            raise UserError('Salvează comanda înainte de căutare TecDoc.')
-        wizard = self.env['tecdoc.sync.wizard'].create({
-            'lookup_type': 'article_no',
-            'sale_order_id': self.id,
-            'product_uom_qty': 1.0,
-        })
-        return {
-            'type': 'ir.actions.act_window',
-            'name': 'Caută TecDoc',
-            'res_model': 'tecdoc.sync.wizard',
-            'res_id': wizard.id,
-            'view_mode': 'form',
-            'target': 'new',
-        }
-
     def unlink(self):
         activity_model = self.env['mail.activity'].sudo()
         message_model = self.env['mail.message'].sudo()

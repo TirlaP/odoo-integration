@@ -57,8 +57,6 @@
 
                     <notebook>
                         <page string="Piese" name="automotive_order_lines">
-                            <button name="action_open_tecdoc_add_line" string="Caută TecDoc" type="object"
-                                    class="btn-secondary mb-2"/>
                             <field name="order_line" mode="list">
                                 <list string="Piese comandă" editable="bottom">
                                     <field name="display_type" column_invisible="True"/>
@@ -82,6 +80,7 @@
                                                'company_id': parent.company_id,
                                                'default_lst_price': price_unit,
                                                'default_uom_id': product_uom,
+                                               'automotive_tecdoc_dropdown': True,
                                            }"
                                            options="{'no_open': True}"
                                            domain="[('sale_ok', '=', True)]"
