@@ -97,6 +97,14 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             worker_cr.commit()
             return processed
 
+    def _run_async_cron_in_committed_cursor(self, limit=None):
+        with self.registry.cursor() as worker_cr:
+            worker_env = api.Environment(worker_cr, self.env.uid, {})
+            kwargs = {'limit': limit} if limit is not None else {}
+            processed = worker_env['automotive.async.job'].cron_process_jobs(**kwargs)
+            worker_cr.commit()
+            return processed
+
     def test_key_backend_actions_have_paths_and_names(self):
         expectations = {
             'sale.product_template_action': 'sale-products',
@@ -541,7 +549,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             'Empty manual jobs should not be sent to the async OCR queue.',
         )
 
-    def test_invoice_ingest_cron_processes_async_queue_as_fallback(self):
+    def test_invoice_ingest_cron_only_enqueues_pending_ocr_jobs(self):
         job_id = self._create_committed_ocr_job(
             name='OCR Fallback Queue',
             external_id='fallback-queue-checksum',
@@ -551,19 +559,9 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             },
         )
 
-        def fake_process(recordset, raise_on_error=False):
-            recordset.write({
-                'state': 'needs_review',
-                'started_at': fields.Datetime.now(),
-                'finished_at': fields.Datetime.now(),
-                'error': False,
-            })
-            return True
+        queued = self._run_invoice_ingest_cron_in_committed_cursor()
 
-        with patch.object(type(self.env['invoice.ingest.job']), '_process_ingest_job', fake_process):
-            processed = self._run_invoice_ingest_cron_in_committed_cursor()
-
-        self.assertGreaterEqual(processed, 1)
+        self.assertEqual(queued, 1)
         with self.registry.cursor() as check_cr:
             check_env = api.Environment(check_cr, self.env.uid, {})
             async_job = check_env['automotive.async.job'].search(
@@ -577,8 +575,8 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             )
             job = check_env['invoice.ingest.job'].browse(job_id)
             self.assertTrue(async_job, 'Invoice ingest cron should enqueue an async job for OCR imports.')
-            self.assertEqual(async_job.state, 'done')
-            self.assertEqual(job.state, 'needs_review')
+            self.assertEqual(async_job.state, 'queued')
+            self.assertEqual(job.state, 'pending')
 
     def test_invoice_ingest_cron_processes_existing_queued_async_job(self):
         job_id, async_job_id = self._create_committed_ocr_async_job(
@@ -600,7 +598,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             return True
 
         with patch.object(type(self.env['invoice.ingest.job']), '_process_ingest_job', fake_process):
-            processed = self._run_invoice_ingest_cron_in_committed_cursor()
+            processed = self._run_async_cron_in_committed_cursor()
 
         self.assertGreaterEqual(processed, 1)
         with self.registry.cursor() as check_cr:
@@ -745,7 +743,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             return True
 
         with patch.object(type(self.env['invoice.ingest.job']), '_process_ingest_job', fake_process):
-            processed = self._run_invoice_ingest_cron_in_committed_cursor()
+            processed = self._run_async_cron_in_committed_cursor(limit=2)
 
         self.assertGreaterEqual(processed, 2)
         self.assertEqual(observed.get('second_job_state'), 'pending')
@@ -884,6 +882,62 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertIn('done_write', events)
         self.assertLess(events.index('extract'), events.index('done_write'))
         self.assertLess(events.index('commit', events.index('extract')), events.index('done_write'))
+
+    def test_completed_invoice_hides_stale_running_async_overlay(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Completed With Stale Worker',
+            'source': 'ocr',
+            'state': 'needs_review',
+            'finished_at': fields.Datetime.now(),
+        })
+        async_job = self.env['automotive.async.job'].enqueue_job(
+            'invoice_ingest',
+            name='Stale Running Overlay',
+            payload={'invoice_ingest_job_id': job.id},
+            source=job,
+            target_model='invoice.ingest.job',
+            target_method='_process_ingest_job',
+            target_res_id=job.id,
+        )
+        async_job.write({
+            'state': 'running',
+            'progress': 87.0,
+            'progress_message': 'Matching products and normalizing lines (2/2)',
+        })
+
+        job.invalidate_recordset()
+
+        self.assertFalse(job.active_async_job_id)
+        self.assertFalse(job.async_progress_message)
+
+    def test_running_async_job_reconciles_completed_invoice(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Reconcile Completed',
+            'source': 'ocr',
+            'state': 'needs_review',
+            'finished_at': fields.Datetime.now(),
+        })
+        async_job = self.env['automotive.async.job'].enqueue_job(
+            'invoice_ingest',
+            name='Reconcile Completed',
+            payload={'invoice_ingest_job_id': job.id},
+            source=job,
+            target_model='invoice.ingest.job',
+            target_method='_process_ingest_job',
+            target_res_id=job.id,
+        )
+        async_job.write({
+            'state': 'running',
+            'attempt_count': 1,
+            'progress': 87.0,
+            'progress_message': 'Matching products and normalizing lines (2/2)',
+        })
+        async_job._reconcile_target_terminal_state()
+        async_job.invalidate_recordset()
+
+        self.assertEqual(async_job.state, 'done')
+        self.assertEqual(async_job.progress, 100.0)
+        self.assertEqual(async_job.progress_message, 'Done')
 
     def test_stale_running_async_job_requeues_back_to_pending(self):
         attachment = self.env['ir.attachment'].create({
@@ -1441,6 +1495,26 @@ class TestAutomotiveOperatorFlows(TransactionCase):
 
         self.assertFalse(product)
         self.assertEqual(reason, '')
+
+    def test_background_invoice_matching_skips_heavy_enrichment_by_default(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Background Local Only',
+            'source': 'ocr',
+        })
+        empty_product = self.env['product.product']
+
+        with patch.object(type(job), '_search_code_fields_with_scopes', return_value=(empty_product, {})), \
+             patch.object(type(job), '_match_by_catalog_lookup') as catalog_lookup, \
+             patch.object(type(job), '_match_or_create_from_tecdoc') as tecdoc_lookup:
+            product, meta = job.with_context(automotive_async_processing=True)._match_product_with_meta(
+                'SLOW-CATALOG-001',
+                product_description='Slow lookup product',
+            )
+
+        self.assertFalse(product)
+        self.assertEqual(meta.get('method'), 'not_found')
+        catalog_lookup.assert_not_called()
+        tecdoc_lookup.assert_not_called()
 
     def test_replace_lines_from_normalized_reuses_precomputed_match_data(self):
         job = self.env['invoice.ingest.job'].create({

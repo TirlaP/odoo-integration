@@ -721,6 +721,13 @@ class AutomotiveAsyncJob(models.Model):
         # error when this transaction tries to update the same row after those
         # progress commits.
         self.env.cr.commit()
+        self.report_progress(
+            self.id,
+            progress=100.0,
+            progress_message=_('Done'),
+            state='done',
+        )
+        self.invalidate_recordset()
         self.write({
             'state': 'done',
             'finished_at': fields.Datetime.now(),
@@ -815,6 +822,43 @@ class AutomotiveAsyncJob(models.Model):
         self.env.invalidate_all()
         return False
 
+    def _reconcile_target_terminal_state(self):
+        reconciled = self.env[self._name]
+        for job in self:
+            if job.state != 'running':
+                continue
+            target = job._get_target_recordset()
+            if not target:
+                continue
+            reconcile = getattr(target, '_automotive_async_reconcile_job_state', None)
+            if not reconcile:
+                continue
+            values = reconcile(job) or {}
+            if not values:
+                continue
+            job.write(values)
+            emit_runtime_event(
+                {
+                    'event': 'automotive_async_job_reconciled',
+                    'category': 'async_job',
+                    'source': 'automotive.async.job',
+                    'level': 'warning',
+                    'outcome': values.get('state') or 'reconciled',
+                    'db': job.env.cr.dbname,
+                    'uid': job.env.uid,
+                    'message': _('Reconciled stale async job from target record state.'),
+                    'job_id': job.id,
+                    'job_type': job.job_type,
+                    'related_model': job.target_model or job.source_model,
+                    'related_res_id': job.target_res_id or job.source_res_id,
+                    'progress': values.get('progress', job.progress),
+                    'progress_message': values.get('progress_message', job.progress_message),
+                },
+                persist_db=True,
+            )
+            reconciled |= job
+        return reconciled
+
     @api.model
     def _requeue_stale_running_jobs(self, timeout_minutes=30):
         cutoff = fields.Datetime.now() - timedelta(minutes=max(int(timeout_minutes or 30), 1))
@@ -823,6 +867,8 @@ class AutomotiveAsyncJob(models.Model):
             ('write_date', '<', cutoff),
         ])
         stale_jobs.invalidate_recordset()
+        reconciled_jobs = stale_jobs._reconcile_target_terminal_state()
+        stale_jobs -= reconciled_jobs
         retryable_jobs = stale_jobs.filtered(lambda job: job.attempt_count < job._effective_max_attempts())
         exhausted_jobs = stale_jobs - retryable_jobs
         if exhausted_jobs:
@@ -834,9 +880,36 @@ class AutomotiveAsyncJob(models.Model):
                 'last_error': _('Job timed out while running and retry budget is exhausted.'),
                 'last_error_type': 'Timeout',
             })
+            for job in exhausted_jobs:
+                emit_runtime_event(
+                    {
+                        'event': 'automotive_async_job_stale_failed',
+                        'category': 'async_job',
+                        'source': 'automotive.async.job',
+                        'level': 'error',
+                        'outcome': 'failed',
+                        'db': job.env.cr.dbname,
+                        'uid': job.env.uid,
+                        'message': _('Running async job timed out and retry budget is exhausted.'),
+                        'job_id': job.id,
+                        'job_type': job.job_type,
+                        'related_model': job.target_model or job.source_model,
+                        'related_res_id': job.target_res_id or job.source_res_id,
+                        'progress': job.progress,
+                        'progress_message': job.progress_message,
+                    },
+                    persist_db=True,
+                )
             exhausted_jobs._call_target_progress_hook('_automotive_async_on_failed')
             exhausted_jobs.filtered('batch_id').mapped('batch_id')._sync_state_from_jobs()
         if retryable_jobs:
+            stale_progress = {
+                job.id: {
+                    'progress': job.progress,
+                    'progress_message': job.progress_message,
+                }
+                for job in retryable_jobs
+            }
             retryable_jobs.write({
                 'state': 'queued',
                 'progress': 0.0,
@@ -847,6 +920,27 @@ class AutomotiveAsyncJob(models.Model):
                 'last_error_type': False,
                 'next_retry_at': fields.Datetime.now(),
             })
+            for job in retryable_jobs:
+                previous = stale_progress.get(job.id, {})
+                emit_runtime_event(
+                    {
+                        'event': 'automotive_async_job_stale_requeued',
+                        'category': 'async_job',
+                        'source': 'automotive.async.job',
+                        'level': 'warning',
+                        'outcome': 'requeued',
+                        'db': job.env.cr.dbname,
+                        'uid': job.env.uid,
+                        'message': _('Running async job heartbeat expired; requeued for retry.'),
+                        'job_id': job.id,
+                        'job_type': job.job_type,
+                        'related_model': job.target_model or job.source_model,
+                        'related_res_id': job.target_res_id or job.source_res_id,
+                        'stale_progress': previous.get('progress'),
+                        'stale_progress_message': previous.get('progress_message'),
+                    },
+                    persist_db=True,
+                )
             retryable_jobs._call_target_progress_hook('_automotive_async_on_requeue')
             retryable_jobs.filtered('batch_id').mapped('batch_id')._sync_state_from_jobs()
         return stale_jobs
@@ -910,7 +1004,7 @@ class AutomotiveAsyncJob(models.Model):
     def cron_process_jobs(self, limit=None):
         icp = self.env['ir.config_parameter'].sudo()
         limit = int(limit or icp.get_param('automotive.async_jobs_per_run') or 20)
-        stale_timeout = int(icp.get_param('automotive.async_running_timeout_minutes') or 30)
+        stale_timeout = int(icp.get_param('automotive.async_running_timeout_minutes') or 3)
         self._requeue_stale_running_jobs(timeout_minutes=stale_timeout)
         self._fail_exhausted_queued_jobs()
 

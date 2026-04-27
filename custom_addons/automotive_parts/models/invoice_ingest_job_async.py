@@ -201,6 +201,9 @@ class InvoiceIngestJobAsync(models.Model):
             order='id desc',
         )
         for async_job in async_jobs:
+            target_state = self.browse(async_job.target_res_id).state
+            if target_state not in {'pending', 'running'} and async_job.state in {'queued', 'running', 'done', 'cancelled'}:
+                continue
             current = job_map.get(async_job.target_res_id)
             current_priority = priority_by_state.get(current.state, 0) if current else 0
             candidate_priority = priority_by_state.get(async_job.state, 0)
@@ -272,6 +275,29 @@ class InvoiceIngestJobAsync(models.Model):
                 values['finished_at'] = fields.Datetime.now()
             if values:
                 job.write(values)
+
+    def _automotive_async_reconcile_job_state(self, async_job):
+        self.ensure_one()
+        if self.state in {'needs_review', 'done'}:
+            return {
+                'state': 'done',
+                'finished_at': fields.Datetime.now(),
+                'progress': 100.0,
+                'progress_message': _('Done'),
+                'last_error': False,
+                'last_error_type': False,
+                'next_retry_at': False,
+            }
+        if self.state == 'failed':
+            return {
+                'state': 'failed',
+                'finished_at': fields.Datetime.now(),
+                'progress_message': _('Failed'),
+                'last_error': self.error or async_job.last_error or _('Invoice import failed.'),
+                'last_error_type': async_job.last_error_type or 'InvoiceIngestFailed',
+                'next_retry_at': False,
+            }
+        return False
 
     def _enqueue_async_processing(self, batch=False, batch_uid=None, batch_name=None, force=False, priority=80, display_state='pending'):
         self.ensure_one()
@@ -410,8 +436,7 @@ class InvoiceIngestJobAsync(models.Model):
                     continue
                 job._enqueue_async_processing(priority=90)
                 queued += 1
-        processed = self.env['automotive.async.job'].cron_process_jobs(limit=10)
-        return queued + processed
+        return queued
 
     @api.model
     def _default_ai_model(self):

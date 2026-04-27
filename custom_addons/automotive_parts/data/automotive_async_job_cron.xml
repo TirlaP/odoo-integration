@@ -12,6 +12,11 @@
 
     <function model="ir.config_parameter" name="set_param">
         <value>automotive.async_running_timeout_minutes</value>
-        <value>10</value>
+        <value>3</value>
+    </function>
+
+    <function model="ir.config_parameter" name="set_param">
+        <value>automotive.invoice_background_enrichment_enabled</value>
+        <value>0</value>
     </function>
 </odoo>

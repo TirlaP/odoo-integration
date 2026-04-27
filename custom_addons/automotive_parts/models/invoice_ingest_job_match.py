@@ -144,6 +144,20 @@ class InvoiceIngestJobMatch(models.Model):
         return prefix_stripped_code_variants(code)
 
     @api.model
+    def _is_truthy_config_param(self, key, default='0'):
+        value = self.env['ir.config_parameter'].sudo().get_param(key, default)
+        return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    @api.model
+    def _background_enrichment_enabled(self):
+        if not self.env.context.get('automotive_async_processing'):
+            return True
+        return self._is_truthy_config_param(
+            'automotive.invoice_background_enrichment_enabled',
+            '0',
+        )
+
+    @api.model
     def _allow_progressive_tail_trim(self, supplier=None):
         supplier_rec = supplier
         if isinstance(supplier_rec, str):
@@ -672,6 +686,39 @@ class InvoiceIngestJobMatch(models.Model):
                 matched_product=product,
             )
             return product, match_meta
+
+        if not self._background_enrichment_enabled():
+            match_meta = {
+                'method': 'not_found',
+                'matched_code': '',
+                'confidence': 0.0,
+            }
+            self._emit_match_runtime_event(
+                phase='background_enrichment_skip',
+                detail='skipping catalog, relaxed, and TecDoc live matching during background import',
+                line_index=line_index,
+                line_total=line_total,
+                raw_code=raw_code,
+                product_code=product_code,
+                product_description=product_description,
+                supplier=supplier,
+                supplier_brand=supplier_brand,
+                match_meta=match_meta,
+                extra={'candidate_code_count': len(codes)},
+            )
+            self._emit_match_runtime_event(
+                phase='not_found',
+                detail='no local exact product match found',
+                line_index=line_index,
+                line_total=line_total,
+                raw_code=raw_code,
+                product_code=product_code,
+                product_description=product_description,
+                supplier=supplier,
+                supplier_brand=supplier_brand,
+                match_meta=match_meta,
+            )
+            return Product, match_meta
 
         # 2) Exact TecDoc lookup through variant/oem/ean/cross relations.
         self._emit_match_runtime_event(
