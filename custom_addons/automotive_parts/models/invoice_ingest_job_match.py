@@ -269,6 +269,17 @@ class InvoiceIngestJobMatch(models.Model):
         )
 
     @api.model
+    def _catalog_lookup_timeout_ms(self):
+        raw_value = self.env['ir.config_parameter'].sudo().get_param(
+            'automotive.invoice_catalog_lookup_timeout_ms',
+            '1500',
+        )
+        try:
+            return max(int(raw_value or 1500), 250)
+        except (TypeError, ValueError):
+            return 1500
+
+    @api.model
     def _catalog_template_candidates_by_key(self, key):
         ProductTemplate = self.env['product.template']
         Variant = self.env['tecdoc.article.variant']
@@ -324,10 +335,22 @@ class InvoiceIngestJobMatch(models.Model):
             supplier_domain=supplier_domain,
             supplier_brand_domain=supplier_brand_domain,
         )
-        for template_ids in self._catalog_template_candidates_by_key(key):
-            product, reason_suffix = self._product_from_template_candidates(template_ids, scopes)
-            if product:
-                return product, f'lookup{reason_suffix}'
+        try:
+            with self.env.cr.savepoint():
+                self.env.cr.execute(
+                    "SET LOCAL statement_timeout = %s",
+                    [self._catalog_lookup_timeout_ms()],
+                )
+                for template_ids in self._catalog_template_candidates_by_key(key):
+                    product, reason_suffix = self._product_from_template_candidates(template_ids, scopes)
+                    if product:
+                        return product, f'lookup{reason_suffix}'
+        except Exception as exc:
+            _logger.warning(
+                "Invoice ingest catalog lookup skipped for code=%s after database timeout/error: %s",
+                code,
+                exc,
+            )
         return Product, ''
 
     def _match_product(self, product_code, supplier=None, product_description=None, supplier_brand=None, extra_codes=None):

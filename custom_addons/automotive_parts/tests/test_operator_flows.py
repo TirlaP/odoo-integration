@@ -1426,6 +1426,22 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             ['line_start', 'exact_start', 'lookup_start', 'trim_start', 'ilike_start', 'matched', 'line_complete'],
         )
 
+    def test_catalog_lookup_timeout_does_not_block_line_matching(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Catalog Timeout',
+            'source': 'ocr',
+        })
+
+        with patch.object(type(job), '_catalog_template_candidates_by_key', side_effect=Exception('catalog lookup timeout')):
+            product, reason = job._match_by_catalog_lookup(
+                code='SLOW-CATALOG-001',
+                supplier_domain=[],
+                supplier_brand_domain=[],
+            )
+
+        self.assertFalse(product)
+        self.assertEqual(reason, '')
+
     def test_replace_lines_from_normalized_reuses_precomputed_match_data(self):
         job = self.env['invoice.ingest.job'].create({
             'name': 'OCR Reuse Normalized Matches',
