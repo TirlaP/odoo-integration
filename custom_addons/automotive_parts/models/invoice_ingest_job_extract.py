@@ -460,6 +460,7 @@ class InvoiceIngestJobExtract(models.Model):
         return bool(
             fallback_lines
             and len(fallback_lines) >= 3
+            and self._safe_float(pdf_totals.get('amount_total')) > 0.0
             and pdf_header.get('invoice_number')
             and pdf_header.get('supplier_name')
         )
@@ -545,7 +546,10 @@ class InvoiceIngestJobExtract(models.Model):
             api_key = job._get_openai_api_key()
             parsed = {}
             openai_error = False
+            parsed_source = False
+            openai_attempted = False
             if job._should_use_pdf_parser_without_openai(pdf_header, pdf_totals, fallback_lines):
+                parsed_source = 'pdf_parser_skipped_openai'
                 parsed = {
                     'supplier_name': pdf_header.get('supplier_name') or '',
                     'invoice_number': pdf_header.get('invoice_number') or '',
@@ -561,6 +565,7 @@ class InvoiceIngestJobExtract(models.Model):
                     ],
                 }
             elif api_key:
+                openai_attempted = True
                 job._report_async_progress(60.0, _('Calling OpenAI extraction'))
                 body = {
                     'model': job.ai_model or job._default_ai_model(),
@@ -600,6 +605,7 @@ class InvoiceIngestJobExtract(models.Model):
                     parsed = json.loads(content)
                     if not isinstance(parsed, dict):
                         raise UserError('OpenAI response is not a JSON object.')
+                    parsed_source = 'openai'
                 except (requests.exceptions.RequestException, ValueError, UserError) as exc:
                     openai_error = str(exc) or repr(exc)
                     parsed = {}
@@ -609,12 +615,20 @@ class InvoiceIngestJobExtract(models.Model):
                     'Missing OPENAI_API_KEY. Set env var OPENAI_API_KEY or config parameter automotive.openai_api_key.'
                 )
 
+            parsed_vat_rate = self._safe_float(parsed.get('vat_rate')) if parsed else 0.0
+            if parsed and fallback_lines and not pdf_totals.get('vat_rate') and parsed_vat_rate > 0.0:
+                fallback_lines = job._extract_invoice_lines_from_text(
+                    text,
+                    default_vat_rate=parsed_vat_rate,
+                )
+
             if not parsed:
                 if not fallback_lines:
                     raise UserError(
                         '%s PDF parser also found no invoice lines.'
                         % (openai_error or 'OpenAI extraction returned no usable data.')
                     )
+                parsed_source = 'pdf_parser_after_openai_error' if openai_error else 'pdf_parser'
                 parsed = {
                     'supplier_name': pdf_header.get('supplier_name') or '',
                     'invoice_number': pdf_header.get('invoice_number') or '',
@@ -632,8 +646,10 @@ class InvoiceIngestJobExtract(models.Model):
                 if openai_error:
                     parsed['warnings'].append(openai_error)
 
-            ai_lines = parsed.get('invoice_lines') or []
-            lines = ai_lines
+            parsed_lines = parsed.get('invoice_lines') or []
+            used_pdf_parser_lines = parsed_source != 'openai'
+            ai_lines = parsed_lines if parsed_source == 'openai' else []
+            lines = fallback_lines if used_pdf_parser_lines else ai_lines
             warnings = parsed.get('warnings') if isinstance(parsed.get('warnings'), list) else []
             supplier_name = (parsed.get('supplier_name') or pdf_header.get('supplier_name') or '').strip()
             invoice_number = self._normalize_invoice_number(
@@ -684,8 +700,9 @@ class InvoiceIngestJobExtract(models.Model):
                 duplicate_of_id = duplicate.id
                 duplicate_warning = f'Duplicate supplier invoice already exists: {duplicate.display_name}'
                 warnings.append(duplicate_warning)
-            if len(fallback_lines) > len(ai_lines):
+            if not used_pdf_parser_lines and len(fallback_lines) > len(ai_lines):
                 lines = fallback_lines
+                used_pdf_parser_lines = True
                 warnings.append(
                     f'AI extracted {len(ai_lines)} lines; PDF parser found {len(fallback_lines)} lines. Using PDF parser lines.'
                 )
@@ -760,6 +777,10 @@ class InvoiceIngestJobExtract(models.Model):
                     'amount_total': pdf_totals.get('amount_total'),
                     'fallback_line_count': len(fallback_lines),
                     'ai_line_count': len(ai_lines),
+                    'used_pdf_parser_lines': used_pdf_parser_lines,
+                    'parsed_source': parsed_source,
+                    'openai_attempted': openai_attempted,
+                    'openai_failed': bool(openai_error),
                 },
             }
             if duplicate_of_id:
@@ -793,7 +814,9 @@ class InvoiceIngestJobExtract(models.Model):
                     'ai_confidence': job.ai_confidence,
                     'partner_id': supplier.id if supplier else False,
                     'document_type': job.document_type,
-                    'used_pdf_fallback_lines': len(fallback_lines) > len(ai_lines),
+                    'used_pdf_fallback_lines': used_pdf_parser_lines,
+                    'used_pdf_parser_lines': used_pdf_parser_lines,
+                    'parsed_source': parsed_source,
                     'warning_count': len(warnings),
                     'warnings': warnings,
                     'duplicate_of_job_id': duplicate_of_id or False,

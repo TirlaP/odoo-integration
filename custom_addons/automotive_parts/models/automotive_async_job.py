@@ -801,7 +801,10 @@ class AutomotiveAsyncJob(models.Model):
         with self.pool.cursor() as recovery_cr:
             recovery_env = api.Environment(recovery_cr, self.env.uid, dict(self.env.context))
             job = recovery_env[self._name].browse(job_id).exists()
-            if not job or job.state in {'done', 'cancelled'}:
+            if job and job.state in {'done', 'cancelled'}:
+                self.env.invalidate_all()
+                return False
+            if not job:
                 current_job = self.browse(job_id).exists()
                 if current_job and current_job.state not in {'done', 'cancelled'}:
                     apply_recovery(current_job, persist_runtime_in_job_env=True)

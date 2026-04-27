@@ -588,7 +588,6 @@ class InvoiceIngestJobMatch(models.Model):
             supplier_brand=supplier_brand,
         )
         if learned_mapping and learned_mapping.product_id:
-            learned_mapping._record_usage()
             match_meta = {
                 'method': 'learned:invoice_product_code_map',
                 'matched_code': learned_mapping.normalized_code or learned_mapping.raw_code,
@@ -608,6 +607,7 @@ class InvoiceIngestJobMatch(models.Model):
                 matched_product=learned_mapping.product_id,
                 extra={'mapping_id': learned_mapping.id},
             )
+            learned_mapping._record_usage()
             return learned_mapping.product_id, match_meta
 
         # 1) Strict exact matching by code fields; try constrained scopes first.

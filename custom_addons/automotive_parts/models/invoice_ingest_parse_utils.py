@@ -112,7 +112,7 @@ def extract_invoice_header_from_text(text, filename=None):
             same_line = re.search(r'\bFurnizor\s*:?\s*(.+?)(?:\s{2,}|$)', line, re.IGNORECASE)
             if same_line:
                 supplier_name = same_line.group(1).strip()
-                if supplier_name:
+                if supplier_name and not re.fullmatch(r'(?i)(cumparator|client|beneficiar)', supplier_name):
                     out['supplier_name'] = supplier_name
                     break
             for candidate in non_empty_lines[idx + 1:idx + 5]:

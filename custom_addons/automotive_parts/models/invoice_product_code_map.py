@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
+import logging
+
 from odoo import api, fields, models
 
 from .invoice_ingest_code_utils import compact_code, normalize_code_value, prefix_stripped_code_variants
+
+
+_logger = logging.getLogger(__name__)
 
 
 class InvoiceProductCodeMap(models.Model):
@@ -158,10 +163,19 @@ class InvoiceProductCodeMap(models.Model):
     def _record_usage(self):
         now = fields.Datetime.now()
         for rec in self:
-            rec.sudo().write({
-                'hit_count': (rec.hit_count or 0) + 1,
-                'last_used_at': now,
-            })
+            try:
+                with rec.env.cr.savepoint():
+                    rec.env.cr.execute("SET LOCAL lock_timeout = '500ms'")
+                    rec.sudo().write({
+                        'hit_count': (rec.hit_count or 0) + 1,
+                        'last_used_at': now,
+                    })
+                    rec.env.cr.execute("SET LOCAL lock_timeout = 0")
+            except Exception:
+                _logger.info(
+                    "Skipped invoice product code map usage update for mapping %s due to lock contention",
+                    rec.id,
+                )
 
     @api.model
     def create_or_update_from_line(

@@ -977,6 +977,49 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertTrue(runtime_log)
         self.assertIn('post-process crash', runtime_log.message or '')
 
+    def test_async_job_recovery_keeps_committed_terminal_state(self):
+        _job_id, async_job_id = self._create_committed_ocr_async_job(
+            name='OCR Recovery Terminal',
+            external_id='recovery-terminal-checksum',
+            attachment_values={'datas': base64.b64encode(b'%PDF-1.4\n% terminal recovery\n')},
+        )
+        with self.registry.cursor() as running_cr:
+            running_env = api.Environment(running_cr, self.env.uid, {})
+            running_env['automotive.async.job'].browse(async_job_id).write({
+                'state': 'running',
+                'progress': 75.0,
+                'progress_message': 'Cached running state',
+            })
+            running_cr.commit()
+
+        with self.registry.cursor() as stale_cr:
+            stale_env = api.Environment(stale_cr, self.env.uid, {})
+            stale_job = stale_env['automotive.async.job'].browse(async_job_id)
+            self.assertEqual(stale_job.state, 'running')
+
+            with self.registry.cursor() as terminal_cr:
+                terminal_env = api.Environment(terminal_cr, self.env.uid, {})
+                terminal_job = terminal_env['automotive.async.job'].browse(async_job_id)
+                terminal_job.write({
+                    'state': 'done',
+                    'progress': 100.0,
+                    'progress_message': 'Done',
+                    'finished_at': fields.Datetime.now(),
+                })
+                terminal_cr.commit()
+
+            stale_env['automotive.async.job']._recover_unexpected_job_crash(
+                async_job_id,
+                RuntimeError('late outer crash'),
+            )
+            stale_cr.commit()
+
+        with self.registry.cursor() as check_cr:
+            check_env = api.Environment(check_cr, self.env.uid, {})
+            async_job = check_env['automotive.async.job'].browse(async_job_id)
+            self.assertEqual(async_job.state, 'done')
+            self.assertEqual(async_job.progress, 100.0)
+
     def test_async_job_cancels_missing_invoice_ingest_target_instead_of_failing(self):
         with self.registry.cursor() as setup_cr:
             setup_env = api.Environment(setup_cr, self.env.uid, {})
@@ -1184,6 +1227,144 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertEqual(len(job.line_ids), 1)
         self.assertEqual(job.line_ids.product_id, self.product)
         self.assertIn('OpenAI extraction failed; used PDF text parser instead', job.error or '')
+        payload = job._get_payload_dict()['openai']
+        self.assertEqual(payload['pdf_reconciliation']['ai_line_count'], 0)
+        self.assertEqual(payload['pdf_reconciliation']['fallback_line_count'], 1)
+        self.assertTrue(payload['pdf_reconciliation']['used_pdf_parser_lines'])
+        self.assertEqual(payload['pdf_reconciliation']['parsed_source'], 'pdf_parser_after_openai_error')
+
+    def test_pdf_parser_skip_requires_positive_total(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Parser Skip Guard',
+            'source': 'ocr',
+        })
+        header = {
+            'supplier_name': self.supplier.name,
+            'invoice_number': 'INV-PARSER-GUARD',
+        }
+        fallback_lines = [
+            {'product_code': 'A', 'product_description': 'A'},
+            {'product_code': 'B', 'product_description': 'B'},
+            {'product_code': 'C', 'product_description': 'C'},
+        ]
+
+        self.assertFalse(job._should_use_pdf_parser_without_openai(
+            header,
+            {'amount_total': 0.0, 'vat_rate': 19.0},
+            fallback_lines,
+        ))
+        self.assertTrue(job._should_use_pdf_parser_without_openai(
+            header,
+            {'amount_total': 119.0, 'vat_rate': 19.0},
+            fallback_lines,
+        ))
+
+    def test_pdf_fallback_lines_use_openai_vat_when_pdf_vat_missing(self):
+        attachment = self.env['ir.attachment'].create({
+            'name': 'openai_vat_fallback.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% openai vat fallback\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR OpenAI VAT Fallback',
+            'source': 'ocr',
+            'state': 'running',
+            'attachment_id': attachment.id,
+            'external_id': 'openai-vat-fallback-checksum',
+        })
+
+        def fallback_lines(vat_rate):
+            return [
+                {
+                    'quantity': 1,
+                    'product_code_raw': 'AUTO-TEST-001',
+                    'product_code': 'AUTO-TEST-001',
+                    'supplier_brand': 'TEST',
+                    'product_description': 'Test Automotive Product',
+                    'unit_price': 50.0,
+                    'vat_rate': vat_rate,
+                },
+                {
+                    'quantity': 1,
+                    'product_code_raw': 'AUTO-TEST-002',
+                    'product_code': 'AUTO-TEST-002',
+                    'supplier_brand': 'TEST',
+                    'product_description': 'Second Automotive Product',
+                    'unit_price': 50.0,
+                    'vat_rate': vat_rate,
+                },
+            ]
+
+        def fake_extract_lines(_recordset, _text, default_vat_rate=0.0):
+            return fallback_lines(default_vat_rate or 0.0)
+
+        def fake_resolve(
+            _recordset,
+            raw_code='',
+            product_code='',
+            product_description='',
+            supplier=None,
+            supplier_brand='',
+            extra_codes=None,
+            line_index=None,
+            line_total=None,
+        ):
+            return {
+                'product_code_raw': raw_code or product_code,
+                'product_code': product_code,
+                'supplier_brand': supplier_brand,
+                'supplier_brand_id': False,
+                'matched_product_id': self.product.id,
+                'matched_product_name': self.product.display_name,
+                'match_status': 'matched',
+                'match_method': 'exact:default_code',
+                'match_confidence': 100.0,
+            }
+
+        class FakeResponse:
+            status_code = 200
+            text = '{}'
+
+            def json(self):
+                return {
+                    'choices': [{
+                        'message': {
+                            'content': json.dumps({
+                                'supplier_name': self.supplier.name,
+                                'invoice_number': 'INV-OPENAI-VAT',
+                                'invoice_date': '2026-04-08',
+                                'invoice_currency': self.env.company.currency_id.name,
+                                'vat_rate': 19.0,
+                                'amount_total': 119.0,
+                                'confidence': 80,
+                                'invoice_lines': [fallback_lines(19.0)[0]],
+                            })
+                        }
+                    }]
+                }
+
+        fake_response = FakeResponse()
+        fake_response.supplier = self.supplier
+        fake_response.env = self.env
+
+        with patch.object(type(job), '_get_openai_api_key', return_value='test-key'), \
+             patch.object(type(job), '_extract_pdf_text', return_value='Furnizor Test Supplier\nFactura INV-OPENAI-VAT\nTotal de plata 119.00'), \
+             patch.object(type(job), '_extract_invoice_totals_from_text', return_value={'amount_total': 119.0, 'vat_rate': 0.0}), \
+             patch.object(type(job), '_extract_invoice_header_from_text', return_value={'supplier_name': self.supplier.name, 'invoice_number': 'INV-OPENAI-VAT', 'invoice_date': '2026-04-08'}), \
+             patch.object(type(job), '_extract_invoice_lines_from_text', autospec=True, side_effect=fake_extract_lines), \
+             patch.object(type(job), '_get_or_create_supplier_partner', return_value=self.supplier), \
+             patch.object(type(job), '_resolve_line_match_data', autospec=True, side_effect=fake_resolve), \
+             patch('odoo.addons.automotive_parts.models.invoice_ingest_job_extract.requests.post', return_value=fake_response):
+            job.action_extract_with_openai()
+
+        self.assertEqual(len(job.line_ids), 2)
+        self.assertEqual(set(job.line_ids.mapped('vat_rate')), {19.0})
+        payload = job._get_payload_dict()['openai']
+        self.assertEqual(payload['pdf_reconciliation']['ai_line_count'], 1)
+        self.assertEqual(payload['pdf_reconciliation']['fallback_line_count'], 2)
+        self.assertTrue(payload['pdf_reconciliation']['used_pdf_parser_lines'])
 
     def test_invoice_match_runtime_logs_capture_80_percent_phases(self):
         attachment = self.env['ir.attachment'].create({
@@ -1298,6 +1479,19 @@ Data sc:        06/05/2026
         self.assertEqual(lines[1]['product_code'], 'C32191')
         self.assertEqual(lines[2]['quantity'], 10.0)
         self.assertIn('SUSPENSIE STABILIZATOR MOOG', lines[2]['product_description'])
+
+    def test_invoice_header_parser_ignores_supplier_buyer_column_header(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Header Parser',
+            'source': 'ocr',
+        })
+        header = job._extract_invoice_header_from_text("""
+Furnizor        Cumparator
+S.C. AD AUTO TOTAL S.R.L.        ILIVAS COM SRL
+Nr.facturii                      22603059654
+""")
+
+        self.assertEqual(header.get('supplier_name'), 'S.C. AD AUTO TOTAL S.R.L.')
 
     def test_invoice_ingest_shows_message_when_no_lines_extracted(self):
         job = self.env['invoice.ingest.job'].create({
