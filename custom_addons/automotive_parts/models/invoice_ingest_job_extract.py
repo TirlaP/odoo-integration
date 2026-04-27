@@ -412,6 +412,51 @@ class InvoiceIngestJobExtract(models.Model):
         return safe_date(value)
 
     @api.model
+    def _missing_runtime_schema_items(self):
+        checks = [
+            ('invoice_product_code_map', None),
+            ('invoice_ingest_job_line', 'match_review_bucket'),
+            ('tecdoc_article_variant', 'identity_key'),
+            ('tecdoc_article_variant', 'is_reference_only'),
+            ('tecdoc_article_variant', 'last_enriched_at'),
+        ]
+        missing = []
+        for table, column in checks:
+            self.env.cr.execute('SELECT to_regclass(%s)', (table,))
+            row = self.env.cr.fetchone()
+            if not row or not row[0]:
+                missing.append(table)
+                continue
+            if not column:
+                continue
+            self.env.cr.execute(
+                """
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_schema = current_schema()
+                   AND table_name = %s
+                   AND column_name = %s
+                 LIMIT 1
+                """,
+                (table, column),
+            )
+            if not self.env.cr.fetchone():
+                missing.append(f'{table}.{column}')
+        return missing
+
+    @api.model
+    def _ensure_runtime_schema_ready(self):
+        missing = self._missing_runtime_schema_items()
+        if missing:
+            raise UserError(
+                _(
+                    'Database schema is not upgraded for automotive_parts. '
+                    'Missing: %(missing)s. Run module upgrade (-u automotive_parts) before processing invoices.'
+                ) % {'missing': ', '.join(missing)}
+            )
+        return True
+
+    @api.model
     def _extract_invoice_number_from_filename(self, filename):
         return extract_invoice_number_from_filename(filename)
 
@@ -468,6 +513,7 @@ class InvoiceIngestJobExtract(models.Model):
         return True
 
     def action_extract_with_openai(self):
+        self._ensure_runtime_schema_ready()
         api_key = self._get_openai_api_key()
         if not api_key:
             raise UserError(
