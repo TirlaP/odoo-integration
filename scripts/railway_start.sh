@@ -124,7 +124,7 @@ if [[ "${ODOO_INIT_DB:-}" == "1" || "${ODOO_INIT_DB:-}" == "true" ]]; then
   fi
 fi
 
-AUTO_UPDATE_MODULES="${ODOO_AUTO_UPDATE_MODULES:-true}"
+AUTO_UPDATE_MODULES="${ODOO_AUTO_UPDATE_MODULES:-false}"
 if [[ "${AUTO_UPDATE_MODULES}" == "1" || "${AUTO_UPDATE_MODULES}" == "true" ]]; then
   if [[ -z "${DB_NAME}" ]]; then
     echo "ODOO_AUTO_UPDATE_MODULES is enabled but ODOO_DB_NAME/PGDATABASE is missing." >&2
