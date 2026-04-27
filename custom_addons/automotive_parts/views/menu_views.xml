@@ -146,6 +146,22 @@
               action="action_automotive_stock_workspace"
               sequence="10"/>
 
+    <record id="action_stock_workspace_products" model="ir.actions.act_window">
+        <field name="name">Produse</field>
+        <field name="path">produse-stoc</field>
+        <field name="res_model">product.template</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="view_product_template_search_tecdoc_fast"/>
+        <field name="domain">[]</field>
+        <field name="context">{}</field>
+    </record>
+
+    <menuitem id="menu_stock_workspace_products"
+              name="Produse"
+              parent="menu_stock_workspace"
+              action="action_stock_workspace_products"
+              sequence="15"/>
+
     <menuitem id="menu_stock_workspace_receptions"
               name="Recepții / NIR"
               parent="menu_stock_workspace"
