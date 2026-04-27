@@ -455,6 +455,22 @@ class ProductProduct(models.Model):
             'context': {'group_by': 'manufacturer_name'},
         }
 
+    def action_open_fast_vehicles(self):
+        self.ensure_one()
+        return self.product_tmpl_id.action_open_fast_vehicles()
+
+    def action_open_fast_oem_numbers(self):
+        self.ensure_one()
+        return self.product_tmpl_id.action_open_fast_oem_numbers()
+
+    def action_open_fast_cross_numbers(self):
+        self.ensure_one()
+        return self.product_tmpl_id.action_open_fast_cross_numbers()
+
+    def action_open_fast_specs(self):
+        self.ensure_one()
+        return self.product_tmpl_id.action_open_fast_specs()
+
     def action_generate_label(self):
         """Generate a printable product label PDF."""
         self.ensure_one()
@@ -693,6 +709,22 @@ class ProductTemplate(models.Model):
     def action_view_compatible_vehicles(self):
         self.ensure_one()
         return self.product_variant_id.action_view_compatible_vehicles()
+
+    def action_open_fast_vehicles(self):
+        self.ensure_one()
+        return self.product_variant_id.action_open_fast_vehicles()
+
+    def action_open_fast_oem_numbers(self):
+        self.ensure_one()
+        return self.product_variant_id.action_open_fast_oem_numbers()
+
+    def action_open_fast_cross_numbers(self):
+        self.ensure_one()
+        return self.product_variant_id.action_open_fast_cross_numbers()
+
+    def action_open_fast_specs(self):
+        self.ensure_one()
+        return self.product_variant_id.action_open_fast_specs()
 
     def action_generate_label(self):
         self.ensure_one()

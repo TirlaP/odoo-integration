@@ -120,7 +120,18 @@ class InvoiceProductCodeMap(models.Model):
         return super().write(vals)
 
     @api.model
+    def _storage_ready(self):
+        """Return False when deployed code was loaded before module upgrade created the table."""
+        self.env.cr.execute('SELECT to_regclass(%s)', (self._table,))
+        row = self.env.cr.fetchone()
+        return bool(row and row[0])
+
+    @api.model
     def _find_for_line(self, invoice_supplier, raw_code, supplier_brand=''):
+        if not self._storage_ready():
+            return self.browse()
+
+        Mapping = self.sudo()
         supplier = invoice_supplier[:1] if invoice_supplier else self.env['res.partner']
         raw_key = compact_code(raw_code)
         if not supplier or not raw_key:
@@ -134,12 +145,12 @@ class InvoiceProductCodeMap(models.Model):
             ('raw_code_key', '=', raw_key),
         ]
         if brand_key:
-            mapping = self.search(domain + [('supplier_brand_key', '=', brand_key)], limit=1)
+            mapping = Mapping.search(domain + [('supplier_brand_key', '=', brand_key)], limit=1)
             if mapping:
                 return mapping
-            return self.search(domain + [('supplier_brand_key', '=', '')], limit=1)
+            return Mapping.search(domain + [('supplier_brand_key', '=', '')], limit=1)
 
-        mappings = self.search(domain, limit=2)
+        mappings = Mapping.search(domain, limit=2)
         if len(mappings) == 1:
             return mappings
         return self.browse()
@@ -147,7 +158,7 @@ class InvoiceProductCodeMap(models.Model):
     def _record_usage(self):
         now = fields.Datetime.now()
         for rec in self:
-            rec.write({
+            rec.sudo().write({
                 'hit_count': (rec.hit_count or 0) + 1,
                 'last_used_at': now,
             })
@@ -162,6 +173,9 @@ class InvoiceProductCodeMap(models.Model):
         tecdoc_supplier_id=False,
         tecdoc_article_id=False,
     ):
+        if not self._storage_ready():
+            return self.browse()
+
         line = line.exists()[:1]
         product = product.exists()[:1]
         if not line or not product or not line.job_id.partner_id:
@@ -183,9 +197,11 @@ class InvoiceProductCodeMap(models.Model):
             'tecdoc_article_id': resolved_article_id,
             'product_id': product.id,
             'confirmation_source': confirmation_source,
+            'confirmed_by_id': self.env.user.id,
         }
         vals = self._keys_from_values(vals)
-        mapping = self.search([
+        Mapping = self.sudo()
+        mapping = Mapping.search([
             ('company_id', '=', vals['company_id']),
             ('invoice_supplier_id', '=', vals['invoice_supplier_id']),
             ('raw_code_key', '=', vals['raw_code_key']),
@@ -204,4 +220,4 @@ class InvoiceProductCodeMap(models.Model):
                 'active': True,
             })
             return mapping
-        return self.create(vals)
+        return Mapping.create(vals)
