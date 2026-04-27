@@ -6,6 +6,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import requests
 from odoo import api, fields
 from odoo.tests.common import TransactionCase, tagged
 from odoo.exceptions import UserError, ValidationError
@@ -640,7 +641,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             self.assertEqual(async_job.last_error_type, 'UserError')
             self.assertEqual(job.state, 'pending')
             self.assertFalse(job.error)
-            self.assertIn('Missing OPENAI_API_KEY', async_job.last_error or '')
+            self.assertIn('attached PDF/image file is no longer available', async_job.last_error or '')
             runtime_log = check_env['automotive.audit.log'].search(
                 [
                     ('log_type', '=', 'runtime'),
@@ -652,7 +653,7 @@ class TestAutomotiveOperatorFlows(TransactionCase):
             )
             self.assertTrue(runtime_log)
             self.assertEqual(runtime_log.category, 'async_job')
-            self.assertIn('Missing OPENAI_API_KEY', runtime_log.message or '')
+            self.assertIn('attached PDF/image file is no longer available', runtime_log.message or '')
 
     def test_async_ocr_processing_commits_running_state_before_extraction(self):
         job_id, async_job_id = self._create_committed_ocr_async_job(
@@ -714,6 +715,41 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         self.assertEqual(job.active_async_job_id, async_job)
         self.assertEqual(job.async_progress_message, 'Worker claimed, starting import')
         self.assertGreaterEqual(job.async_progress_percent, 1.0)
+
+    def test_async_cron_only_marks_current_invoice_running(self):
+        first_job_id, _first_async_job_id = self._create_committed_ocr_async_job(
+            name='OCR First Claim',
+            external_id='first-claim-checksum',
+            attachment_values={'datas': base64.b64encode(b'%PDF-1.4\n% first claim\n')},
+        )
+        second_job_id, second_async_job_id = self._create_committed_ocr_async_job(
+            name='OCR Second Waits Queued',
+            external_id='second-waits-checksum',
+            attachment_values={'datas': base64.b64encode(b'%PDF-1.4\n% second waits\n')},
+        )
+        observed = {}
+
+        def fake_process(recordset, raise_on_error=False):
+            if recordset.id == first_job_id:
+                with self.registry.cursor() as check_cr:
+                    check_env = api.Environment(check_cr, self.env.uid, {})
+                    second_job = check_env['invoice.ingest.job'].browse(second_job_id)
+                    second_async_job = check_env['automotive.async.job'].browse(second_async_job_id)
+                    observed['second_job_state'] = second_job.state
+                    observed['second_async_state'] = second_async_job.state
+            recordset.write({
+                'state': 'needs_review',
+                'finished_at': fields.Datetime.now(),
+                'error': False,
+            })
+            return True
+
+        with patch.object(type(self.env['invoice.ingest.job']), '_process_ingest_job', fake_process):
+            processed = self._run_invoice_ingest_cron_in_committed_cursor()
+
+        self.assertGreaterEqual(processed, 2)
+        self.assertEqual(observed.get('second_job_state'), 'pending')
+        self.assertEqual(observed.get('second_async_state'), 'queued')
 
     def test_async_progress_update_works_for_non_admin_run_user(self):
         with self.registry.cursor() as setup_cr:
@@ -1061,14 +1097,14 @@ class TestAutomotiveOperatorFlows(TransactionCase):
              patch.object(type(job), '_detect_attachment_kind', return_value='pdf'), \
              patch.object(type(job), '_get_attachment_binary', return_value=b'%PDF-1.4\n% milestone progress\n'), \
              patch.object(type(job), '_extract_pdf_text_with_pdftotext', return_value=''), \
-             patch('odoo.addons.automotive_parts.models.invoice_ingest.PdfReader', FakePdfReader), \
+             patch('odoo.addons.automotive_parts.models.invoice_ingest_job_extract.PdfReader', FakePdfReader), \
              patch.object(type(job), '_extract_pdf_text_with_ocr', return_value='Furnizor  Test Supplier\nFactura INV-2026-001\nTotal de plata 119.00'), \
              patch.object(type(job), '_extract_invoice_totals_from_text', return_value={'amount_total': 119.0, 'vat_rate': 19.0}), \
              patch.object(type(job), '_extract_invoice_header_from_text', return_value={'supplier_name': self.supplier.name, 'invoice_number': 'INV-2026-001', 'invoice_date': '2026-04-08'}), \
              patch.object(type(job), '_extract_invoice_lines_from_text', return_value=[]), \
              patch.object(type(job), '_get_or_create_supplier_partner', return_value=self.supplier), \
              patch.object(type(job), '_resolve_line_match_data', autospec=True, side_effect=fake_resolve), \
-             patch('odoo.addons.automotive_parts.models.invoice_ingest.requests.post', return_value=FakeResponse()):
+             patch('odoo.addons.automotive_parts.models.invoice_ingest_job_extract.requests.post', return_value=FakeResponse()):
             job.action_extract_with_openai()
 
         self.assertEqual(
@@ -1083,6 +1119,71 @@ class TestAutomotiveOperatorFlows(TransactionCase):
                 (95.0, 'Saving extracted invoice lines'),
             ],
         )
+
+    def test_invoice_extract_saves_pdf_parser_lines_when_openai_times_out(self):
+        attachment = self.env['ir.attachment'].create({
+            'name': 'openai_timeout.pdf',
+            'datas': base64.b64encode(b'%PDF-1.4\n% openai timeout\n'),
+            'res_model': 'invoice.ingest.job',
+            'type': 'binary',
+            'mimetype': 'application/pdf',
+        })
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR OpenAI Timeout Fallback',
+            'source': 'ocr',
+            'state': 'running',
+            'attachment_id': attachment.id,
+            'external_id': 'openai-timeout-fallback-checksum',
+        })
+        fallback_lines = [{
+            'quantity': 2,
+            'product_code_raw': 'AUTO-TEST-001',
+            'product_code': 'AUTO-TEST-001',
+            'supplier_brand': 'TEST',
+            'product_description': 'Test Automotive Product',
+            'unit_price': 50.0,
+            'vat_rate': 19.0,
+        }]
+
+        def fake_resolve(
+            _recordset,
+            raw_code='',
+            product_code='',
+            product_description='',
+            supplier=None,
+            supplier_brand='',
+            extra_codes=None,
+            line_index=None,
+            line_total=None,
+        ):
+            return {
+                'product_code_raw': raw_code or product_code,
+                'product_code': product_code,
+                'supplier_brand': supplier_brand,
+                'supplier_brand_id': False,
+                'matched_product_id': self.product.id,
+                'matched_product_name': self.product.display_name,
+                'match_status': 'matched',
+                'match_method': 'exact:default_code',
+                'match_confidence': 100.0,
+            }
+
+        with patch.object(type(job), '_get_openai_api_key', return_value='test-key'), \
+             patch.object(type(job), '_extract_pdf_text', return_value='Furnizor Test Supplier\nFactura INV-OPENAI-TIMEOUT\nTotal de plata 119.00'), \
+             patch.object(type(job), '_extract_invoice_totals_from_text', return_value={'amount_total': 119.0, 'vat_rate': 19.0}), \
+             patch.object(type(job), '_extract_invoice_header_from_text', return_value={'supplier_name': self.supplier.name, 'invoice_number': 'INV-OPENAI-TIMEOUT', 'invoice_date': '2026-04-08'}), \
+             patch.object(type(job), '_extract_invoice_lines_from_text', return_value=fallback_lines), \
+             patch.object(type(job), '_get_or_create_supplier_partner', return_value=self.supplier), \
+             patch.object(type(job), '_resolve_line_match_data', autospec=True, side_effect=fake_resolve), \
+             patch('odoo.addons.automotive_parts.models.invoice_ingest_job_extract.requests.post', side_effect=requests.exceptions.Timeout('OpenAI timed out')):
+            job.action_extract_with_openai()
+
+        self.assertEqual(job.state, 'needs_review')
+        self.assertEqual(job.partner_id, self.supplier)
+        self.assertEqual(job.invoice_number, 'INV-OPENAI-TIMEOUT')
+        self.assertEqual(len(job.line_ids), 1)
+        self.assertEqual(job.line_ids.product_id, self.product)
+        self.assertIn('OpenAI extraction failed; used PDF text parser instead', job.error or '')
 
     def test_invoice_match_runtime_logs_capture_80_percent_phases(self):
         attachment = self.env['ir.attachment'].create({

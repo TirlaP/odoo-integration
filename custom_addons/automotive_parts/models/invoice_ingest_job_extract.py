@@ -352,7 +352,7 @@ class InvoiceIngestJobExtract(models.Model):
                 vat_rate=vat_rate,
                 resolved={
                     'product_code_raw': parsed.get('product_code_raw') or description,
-                    'product_code': parsed.get('product_code_primary') or False,
+                    'product_code': self._compact_code(parsed.get('product_code_primary')) or False,
                     'supplier_brand': parsed.get('supplier_brand') or '',
                 },
             ))
@@ -456,6 +456,15 @@ class InvoiceIngestJobExtract(models.Model):
         return True
 
     @api.model
+    def _should_use_pdf_parser_without_openai(self, pdf_header, pdf_totals, fallback_lines):
+        return bool(
+            fallback_lines
+            and len(fallback_lines) >= 3
+            and pdf_header.get('invoice_number')
+            and pdf_header.get('supplier_name')
+        )
+
+    @api.model
     def _extract_invoice_number_from_filename(self, filename):
         return extract_invoice_number_from_filename(filename)
 
@@ -499,9 +508,7 @@ class InvoiceIngestJobExtract(models.Model):
                     continue
                 if latest:
                     try:
-                        latest.with_context(skip_audit_log=True).write(
-                            latest._build_failed_state_values(error_message)
-                        )
+                        latest.write(latest._build_failed_state_values(error_message))
                     except Exception:
                         _logger.exception(
                             'Failed to persist invoice ingest failure state for job %s',
@@ -513,11 +520,6 @@ class InvoiceIngestJobExtract(models.Model):
 
     def action_extract_with_openai(self):
         self._ensure_runtime_schema_ready()
-        api_key = self._get_openai_api_key()
-        if not api_key:
-            raise UserError(
-                'Missing OPENAI_API_KEY. Set env var OPENAI_API_KEY or config parameter automotive.openai_api_key.'
-            )
 
         for job in self:
             job._ensure_async_not_cancelled()
@@ -532,55 +534,105 @@ class InvoiceIngestJobExtract(models.Model):
                 text,
                 filename=job.attachment_id.name if job.attachment_id else job.name,
             )
+            fallback_lines = job._extract_invoice_lines_from_text(
+                text,
+                default_vat_rate=pdf_totals.get('vat_rate') or 0.0,
+            )
 
             prompt = job._build_openai_extraction_prompt(
                 supplier_name_hint=pdf_header.get('supplier_name') or '',
             )
-            job._report_async_progress(60.0, _('Calling OpenAI extraction'))
-            body = {
-                'model': job.ai_model or job._default_ai_model(),
-                'response_format': {'type': 'json_object'},
-                'messages': [
-                    {'role': 'system', 'content': 'You are a strict invoice extraction engine. Output valid JSON only.'},
-                    {
-                        'role': 'user',
-                        'content': (
-                            f'{prompt}\n\n'
-                            f'FILENAME: {(job.attachment_id.name if job.attachment_id else job.name) or ""}\n\n'
-                            f'INVOICE_TEXT:\n{text[:120000]}'
-                        ),
-                    },
-                ],
-            }
-            response = requests.post(
-                'https://api.openai.com/v1/chat/completions',
-                headers={
-                    'Authorization': f'Bearer {api_key}',
-                    'Content-Type': 'application/json',
-                },
-                json=body,
-                timeout=120,
-            )
-            job._ensure_async_not_cancelled()
-            if response.status_code >= 400:
-                raise UserError(f'OpenAI extraction failed: {response.text}')
-            result = response.json()
-            content = (
-                result.get('choices', [{}])[0]
-                .get('message', {})
-                .get('content')
-            )
-            if not content:
-                raise UserError('OpenAI returned empty content.')
-            parsed = json.loads(content)
-            if not isinstance(parsed, dict):
-                raise UserError('OpenAI response is not a JSON object.')
+            api_key = job._get_openai_api_key()
+            parsed = {}
+            openai_error = False
+            if job._should_use_pdf_parser_without_openai(pdf_header, pdf_totals, fallback_lines):
+                parsed = {
+                    'supplier_name': pdf_header.get('supplier_name') or '',
+                    'invoice_number': pdf_header.get('invoice_number') or '',
+                    'invoice_date': pdf_header.get('invoice_date') or False,
+                    'invoice_due_date': pdf_header.get('invoice_due_date') or False,
+                    'invoice_currency': self.env.company.currency_id.name,
+                    'vat_rate': pdf_totals.get('vat_rate') or 0.0,
+                    'amount_total': pdf_totals.get('amount_total') or 0.0,
+                    'confidence': 0.0,
+                    'invoice_lines': fallback_lines,
+                    'warnings': [
+                        'Used deterministic PDF text parser; OpenAI extraction was skipped.',
+                    ],
+                }
+            elif api_key:
+                job._report_async_progress(60.0, _('Calling OpenAI extraction'))
+                body = {
+                    'model': job.ai_model or job._default_ai_model(),
+                    'response_format': {'type': 'json_object'},
+                    'messages': [
+                        {'role': 'system', 'content': 'You are a strict invoice extraction engine. Output valid JSON only.'},
+                        {
+                            'role': 'user',
+                            'content': (
+                                f'{prompt}\n\n'
+                                f'FILENAME: {(job.attachment_id.name if job.attachment_id else job.name) or ""}\n\n'
+                                f'INVOICE_TEXT:\n{text[:120000]}'
+                            ),
+                        },
+                    ],
+                }
+                try:
+                    response = requests.post(
+                        'https://api.openai.com/v1/chat/completions',
+                        headers={
+                            'Authorization': f'Bearer {api_key}',
+                            'Content-Type': 'application/json',
+                        },
+                        json=body,
+                        timeout=120,
+                    )
+                    if response.status_code >= 400:
+                        raise UserError(f'OpenAI extraction failed: {response.text}')
+                    result = response.json()
+                    content = (
+                        result.get('choices', [{}])[0]
+                        .get('message', {})
+                        .get('content')
+                    )
+                    if not content:
+                        raise UserError('OpenAI returned empty content.')
+                    parsed = json.loads(content)
+                    if not isinstance(parsed, dict):
+                        raise UserError('OpenAI response is not a JSON object.')
+                except (requests.exceptions.RequestException, ValueError, UserError) as exc:
+                    openai_error = str(exc) or repr(exc)
+                    parsed = {}
+                job._ensure_async_not_cancelled()
+            else:
+                openai_error = (
+                    'Missing OPENAI_API_KEY. Set env var OPENAI_API_KEY or config parameter automotive.openai_api_key.'
+                )
+
+            if not parsed:
+                if not fallback_lines:
+                    raise UserError(
+                        '%s PDF parser also found no invoice lines.'
+                        % (openai_error or 'OpenAI extraction returned no usable data.')
+                    )
+                parsed = {
+                    'supplier_name': pdf_header.get('supplier_name') or '',
+                    'invoice_number': pdf_header.get('invoice_number') or '',
+                    'invoice_date': pdf_header.get('invoice_date') or False,
+                    'invoice_due_date': pdf_header.get('invoice_due_date') or False,
+                    'invoice_currency': self.env.company.currency_id.name,
+                    'vat_rate': pdf_totals.get('vat_rate') or 0.0,
+                    'amount_total': pdf_totals.get('amount_total') or 0.0,
+                    'confidence': 0.0,
+                    'invoice_lines': fallback_lines,
+                    'warnings': [
+                        'OpenAI extraction failed; used deterministic PDF text parser lines instead.',
+                    ],
+                }
+                if openai_error:
+                    parsed['warnings'].append(openai_error)
 
             ai_lines = parsed.get('invoice_lines') or []
-            fallback_lines = job._extract_invoice_lines_from_text(
-                text,
-                default_vat_rate=pdf_totals.get('vat_rate') or self._safe_float(parsed.get('vat_rate')),
-            )
             lines = ai_lines
             warnings = parsed.get('warnings') if isinstance(parsed.get('warnings'), list) else []
             supplier_name = (parsed.get('supplier_name') or pdf_header.get('supplier_name') or '').strip()
@@ -722,7 +774,11 @@ class InvoiceIngestJobExtract(models.Model):
                 'currency_id': currency.id,
                 'document_type': document_type or 'invoice',
                 'ai_confidence': self._safe_float(parsed.get('confidence')),
-                'error': duplicate_warning or False,
+                'error': duplicate_warning or (
+                    f'OpenAI extraction failed; used PDF text parser instead: {openai_error}'
+                    if openai_error and fallback_lines
+                    else False
+                ),
             }
             job._ensure_async_not_cancelled()
             job._report_async_progress(95.0, _('Saving extracted invoice lines'))

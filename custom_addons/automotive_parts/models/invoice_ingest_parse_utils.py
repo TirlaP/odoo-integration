@@ -109,6 +109,12 @@ def extract_invoice_header_from_text(text, filename=None):
 
     for idx, line in enumerate(non_empty_lines):
         if re.search(r'\bFurnizor\b', line, re.IGNORECASE):
+            same_line = re.search(r'\bFurnizor\s*:?\s*(.+?)(?:\s{2,}|$)', line, re.IGNORECASE)
+            if same_line:
+                supplier_name = same_line.group(1).strip()
+                if supplier_name:
+                    out['supplier_name'] = supplier_name
+                    break
             for candidate in non_empty_lines[idx + 1:idx + 5]:
                 parts = [part.strip() for part in re.split(r'\s{2,}', candidate) if part.strip()]
                 if parts:

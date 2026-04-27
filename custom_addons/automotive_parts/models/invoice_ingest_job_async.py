@@ -271,7 +271,7 @@ class InvoiceIngestJobAsync(models.Model):
             if not job.finished_at:
                 values['finished_at'] = fields.Datetime.now()
             if values:
-                job.with_context(skip_audit_log=True).write(values)
+                job.write(values)
 
     def _enqueue_async_processing(self, batch=False, batch_uid=None, batch_name=None, force=False, priority=80, display_state='pending'):
         self.ensure_one()
@@ -310,7 +310,7 @@ class InvoiceIngestJobAsync(models.Model):
             target_model=self._name,
             target_method=INVOICE_INGEST_ASYNC_TARGET_METHOD,
             target_res_id=self.id,
-            max_attempts=1,
+            max_attempts=3,
         )
         async_job.sudo().write({
             'progress': 0.0,
