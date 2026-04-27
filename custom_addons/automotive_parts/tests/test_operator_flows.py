@@ -1516,6 +1516,71 @@ class TestAutomotiveOperatorFlows(TransactionCase):
         catalog_lookup.assert_not_called()
         tecdoc_lookup.assert_not_called()
 
+    def test_invoice_lines_enqueue_separate_tecdoc_enrichment_jobs(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR Needs TecDoc Enrichment',
+            'source': 'ocr',
+            'state': 'needs_review',
+        })
+        line = self.env['invoice.ingest.job.line'].create({
+            'job_id': job.id,
+            'sequence': 1,
+            'product_code': 'TD-ASYNC-001',
+            'product_description': 'TecDoc async line',
+        })
+
+        with patch.object(type(job), '_trigger_async_job_processor', return_value=True):
+            queued = job._enqueue_line_tecdoc_enrichment_jobs()
+
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued.target_model, 'invoice.ingest.job.line')
+        self.assertEqual(queued.target_method, '_process_tecdoc_enrichment_job')
+        self.assertEqual(queued.target_res_id, line.id)
+        self.assertEqual(queued.state, 'queued')
+
+        with patch.object(type(job), '_trigger_async_job_processor', return_value=True):
+            queued_again = job._enqueue_line_tecdoc_enrichment_jobs()
+
+        self.assertFalse(queued_again)
+
+    def test_tecdoc_enrichment_line_job_runs_full_match_and_updates_line(self):
+        job = self.env['invoice.ingest.job'].create({
+            'name': 'OCR TecDoc Line Job',
+            'source': 'ocr',
+            'state': 'needs_review',
+            'partner_id': self.supplier.id,
+        })
+        line = self.env['invoice.ingest.job.line'].create({
+            'job_id': job.id,
+            'sequence': 1,
+            'product_code': 'TD-LINE-001',
+            'product_description': 'TecDoc line job product',
+        })
+        observed = {}
+
+        def fake_resolve(recordset, **kwargs):
+            observed['invoice_tecdoc_enrichment_job'] = recordset.env.context.get('invoice_tecdoc_enrichment_job')
+            observed['automotive_async_processing'] = recordset.env.context.get('automotive_async_processing')
+            return {
+                'product_code_raw': kwargs.get('raw_code'),
+                'product_code': kwargs.get('product_code'),
+                'supplier_brand': 'TEST',
+                'supplier_brand_id': False,
+                'matched_product_id': self.product.id,
+                'matched_product_name': self.product.display_name,
+                'match_method': 'exact:tecdoc_auto_sync',
+                'match_confidence': 94.0,
+            }
+
+        with patch.object(type(job), '_resolve_line_match_data', fake_resolve):
+            result = line.with_context(automotive_async_processing=True)._process_tecdoc_enrichment_job()
+
+        self.assertTrue(result['matched'])
+        self.assertEqual(line.product_id, self.product)
+        self.assertEqual(line.match_method, 'exact:tecdoc_auto_sync')
+        self.assertTrue(observed.get('invoice_tecdoc_enrichment_job'))
+        self.assertTrue(observed.get('automotive_async_processing'))
+
     def test_replace_lines_from_normalized_reuses_precomputed_match_data(self):
         job = self.env['invoice.ingest.job'].create({
             'name': 'OCR Reuse Normalized Matches',

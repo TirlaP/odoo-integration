@@ -806,6 +806,7 @@ class InvoiceIngestJobExtract(models.Model):
             job.write(vals)
             job._set_payload_dict(payload)
             job._replace_lines_from_normalized(normalized_lines)
+            job._enqueue_line_tecdoc_enrichment_jobs()
             job._audit_log(
                 action='custom',
                 description=f'Invoice OCR extraction completed: {job.display_name}',

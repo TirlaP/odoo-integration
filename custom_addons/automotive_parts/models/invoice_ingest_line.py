@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 import os
 from math import ceil
 
-from odoo import api, fields, models
+from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 
 from .invoice_ingest_shared import snapshot_record
@@ -347,6 +346,61 @@ class InvoiceIngestJobLine(models.Model):
                 },
             )
         return True
+
+    def _process_tecdoc_enrichment_job(self):
+        self.ensure_one()
+        if self.product_id or not self.job_id:
+            return {'matched': bool(self.product_id), 'skipped': True}
+
+        async_job_id = self.env.context.get('automotive_async_job_id')
+        if async_job_id:
+            self.env['automotive.async.job'].report_progress(
+                async_job_id,
+                progress=10.0,
+                progress_message=_('Starting TecDoc line enrichment'),
+                state='running',
+            )
+
+        resolved = self.job_id.with_context(invoice_tecdoc_enrichment_job=True)._resolve_line_match_data(
+            raw_code=self.product_code or self.product_code_raw,
+            product_code=self.product_code,
+            product_description=self.product_description,
+            supplier=self.job_id.partner_id,
+            supplier_brand=self.supplier_brand,
+            prefer_parsed_code=True,
+        )
+        values = self._prepare_match_write_values(resolved)
+        self.write(values)
+        matched = bool(self.product_id)
+
+        if async_job_id:
+            self.env['automotive.async.job'].report_progress(
+                async_job_id,
+                progress=100.0,
+                progress_message=_('TecDoc line enrichment complete') if matched else _('TecDoc line enrichment found no match'),
+                state='running',
+            )
+
+        self.job_id._audit_log(
+            action='custom',
+            description=f'Invoice ingest line TecDoc enrichment completed: {self.job_id.display_name} / line {self.sequence}',
+            new_values={
+                'line_id': self.id,
+                'sequence': self.sequence,
+                'product_code': self.product_code,
+                'supplier_brand': self.supplier_brand,
+                'product_id': self.product_id.id if self.product_id else False,
+                'match_method': self.match_method,
+                'match_confidence': self.match_confidence,
+                'match_status': self.match_status,
+            },
+        )
+        return {
+            'matched': matched,
+            'product_id': self.product_id.id if self.product_id else False,
+            'match_method': self.match_method,
+            'match_confidence': self.match_confidence,
+        }
 
     def action_open_tecdoc_match(self):
         self.ensure_one()

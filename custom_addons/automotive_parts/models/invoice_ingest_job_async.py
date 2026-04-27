@@ -299,6 +299,46 @@ class InvoiceIngestJobAsync(models.Model):
             }
         return False
 
+    def _enqueue_line_tecdoc_enrichment_jobs(self):
+        AsyncJob = self.env['automotive.async.job'].sudo()
+        queued = AsyncJob
+        for job in self:
+            if job.source != 'ocr':
+                continue
+            for line in job.line_ids.filtered(lambda line: not line.product_id and (line.product_code or line.product_code_raw)):
+                existing = AsyncJob.search([
+                    ('job_type', '=', 'invoice_line_tecdoc_enrichment'),
+                    ('target_model', '=', 'invoice.ingest.job.line'),
+                    ('target_method', '=', '_process_tecdoc_enrichment_job'),
+                    ('target_res_id', '=', line.id),
+                    ('state', 'in', ['queued', 'running']),
+                ], limit=1)
+                if existing:
+                    continue
+                async_job = AsyncJob.enqueue_job(
+                    'invoice_line_tecdoc_enrichment',
+                    name=_('TecDoc match %s line %s') % (job.display_name, line.sequence),
+                    payload={
+                        'invoice_ingest_job_id': job.id,
+                        'invoice_ingest_line_id': line.id,
+                        'line_sequence': line.sequence,
+                    },
+                    source=line,
+                    priority=120,
+                    target_model='invoice.ingest.job.line',
+                    target_method='_process_tecdoc_enrichment_job',
+                    target_res_id=line.id,
+                    max_attempts=2,
+                )
+                async_job.write({
+                    'progress': 0.0,
+                    'progress_message': _('Queued TecDoc enrichment'),
+                })
+                queued |= async_job
+        if queued:
+            self._trigger_async_job_processor()
+        return queued
+
     def _enqueue_async_processing(self, batch=False, batch_uid=None, batch_name=None, force=False, priority=80, display_state='pending'):
         self.ensure_one()
         existing_job = self._get_async_processing_job()

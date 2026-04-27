@@ -236,6 +236,7 @@ class AutomotiveAsyncJob(models.Model):
     ]
     _ALLOWED_TARGETS = {
         (INVOICE_INGEST_ASYNC_TARGET_MODEL, INVOICE_INGEST_ASYNC_TARGET_METHOD),
+        ('invoice.ingest.job.line', '_process_tecdoc_enrichment_job'),
         ('ir.actions.report', '_run_automotive_async_label_job'),
     }
 

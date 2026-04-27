@@ -150,6 +150,8 @@ class InvoiceIngestJobMatch(models.Model):
 
     @api.model
     def _background_enrichment_enabled(self):
+        if self.env.context.get('invoice_tecdoc_enrichment_job'):
+            return True
         if not self.env.context.get('automotive_async_processing'):
             return True
         return self._is_truthy_config_param(
