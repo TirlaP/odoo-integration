@@ -5,7 +5,6 @@ from math import ceil
 from odoo import api, fields, models
 from odoo.exceptions import UserError
 
-from .invoice_ingest_code_utils import compact_code, prefix_stripped_code_variants
 from .invoice_ingest_shared import snapshot_record
 
 
@@ -126,20 +125,6 @@ class InvoiceIngestJobLine(models.Model):
         compute='_compute_match_status',
         store=True,
     )
-    match_review_bucket = fields.Selection(
-        [
-            ('safe_exact', 'Safe Exact'),
-            ('learned', 'Learned'),
-            ('possible_prefix_alias', 'Possible Prefix Alias'),
-            ('bad_parse', 'Bad Parse'),
-            ('manual_review', 'Manual Review'),
-            ('no_match', 'No Match'),
-        ],
-        string='Review Bucket',
-        compute='_compute_match_review_bucket',
-        store=True,
-        index=True,
-    )
 
     def _audit_snapshot(self, field_names=None):
         return snapshot_record(self, field_names or self._AUDIT_FIELDS)
@@ -231,33 +216,6 @@ class InvoiceIngestJobLine(models.Model):
                     line.match_status = 'manual'
             else:
                 line.match_status = 'not_found'
-
-    @api.depends('product_id', 'match_method', 'match_confidence', 'product_code', 'product_code_raw', 'match_status')
-    def _compute_match_review_bucket(self):
-        for line in self:
-            method = (line.match_method or '').lower()
-            confidence = line.match_confidence or 0.0
-            raw_code = line.product_code_raw or line.product_code or ''
-            visible_code = line.product_code or ''
-            raw_key = compact_code(raw_code)
-            visible_key = compact_code(visible_code)
-
-            if method.startswith('learned:'):
-                line.match_review_bucket = 'learned'
-            elif line.product_id and confidence >= 88.0 and (
-                method.startswith('exact:')
-                or method.startswith('lookup')
-                or method == 'exact:tecdoc_sync'
-            ):
-                line.match_review_bucket = 'safe_exact'
-            elif raw_key and visible_key and raw_key != visible_key and len(visible_key) < len(raw_key):
-                line.match_review_bucket = 'bad_parse'
-            elif prefix_stripped_code_variants(raw_code):
-                line.match_review_bucket = 'possible_prefix_alias'
-            elif line.product_id:
-                line.match_review_bucket = 'manual_review'
-            else:
-                line.match_review_bucket = 'no_match'
 
     @api.depends(
         'product_id',

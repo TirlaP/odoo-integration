@@ -52,63 +52,10 @@
                 <filter string="Needs Review" name="needs_review" domain="[('state', '=', 'needs_review')]"/>
                 <filter string="Done" name="done" domain="[('state', '=', 'done')]"/>
                 <filter string="Failed" name="failed" domain="[('state', '=', 'failed')]"/>
-                <filter string="Lines: Prefix Alias" name="line_prefix_alias" domain="[('line_ids.match_review_bucket', '=', 'possible_prefix_alias')]"/>
-                <filter string="Lines: Bad Parse" name="line_bad_parse" domain="[('line_ids.match_review_bucket', '=', 'bad_parse')]"/>
-                <filter string="Lines: No Match" name="line_no_match" domain="[('line_ids.match_review_bucket', '=', 'no_match')]"/>
                 <group expand="0" string="Group By">
                     <filter string="State" name="group_state" context="{'group_by': 'state'}"/>
                     <filter string="Source" name="group_source" context="{'group_by': 'source'}"/>
                     <filter string="Supplier" name="group_partner" context="{'group_by': 'partner_id'}"/>
-                </group>
-            </search>
-        </field>
-    </record>
-
-    <record id="view_invoice_ingest_job_line_review_list" model="ir.ui.view">
-        <field name="name">invoice.ingest.job.line.review.list</field>
-        <field name="model">invoice.ingest.job.line</field>
-        <field name="arch" type="xml">
-            <list string="Invoice Lines Review" default_order="write_date desc, job_id desc, sequence">
-                <field name="job_id"/>
-                <field name="sequence"/>
-                <field name="product_code_raw"/>
-                <field name="product_code"/>
-                <field name="supplier_brand"/>
-                <field name="product_description"/>
-                <field name="product_id"/>
-                <field name="match_status"/>
-                <field name="match_review_bucket"/>
-                <field name="match_method"/>
-                <field name="match_confidence"/>
-                <button name="action_try_match" type="object" icon="fa-search" string="" title="Try match"/>
-                <button name="action_open_tecdoc_match" type="object" icon="fa-database" string="" title="Match TecDoc" invisible="product_id"/>
-                <button name="action_learn_mapping" type="object" icon="fa-link" string="" title="Save learned mapping" invisible="not product_id"/>
-            </list>
-        </field>
-    </record>
-
-    <record id="view_invoice_ingest_job_line_review_search" model="ir.ui.view">
-        <field name="name">invoice.ingest.job.line.review.search</field>
-        <field name="model">invoice.ingest.job.line</field>
-        <field name="arch" type="xml">
-            <search string="Invoice Lines Review">
-                <field name="job_id"/>
-                <field name="product_code_raw"/>
-                <field name="product_code"/>
-                <field name="supplier_brand"/>
-                <field name="product_description"/>
-                <field name="product_id"/>
-                <field name="match_review_bucket"/>
-                <filter string="Prefix Alias" name="possible_prefix_alias" domain="[('match_review_bucket', '=', 'possible_prefix_alias')]"/>
-                <filter string="Bad Parse" name="bad_parse" domain="[('match_review_bucket', '=', 'bad_parse')]"/>
-                <filter string="Manual Review" name="manual_review" domain="[('match_review_bucket', '=', 'manual_review')]"/>
-                <filter string="No Match" name="no_match" domain="[('match_review_bucket', '=', 'no_match')]"/>
-                <filter string="Learned" name="learned" domain="[('match_review_bucket', '=', 'learned')]"/>
-                <group expand="0" string="Group By">
-                    <filter string="Bucket" name="group_bucket" context="{'group_by': 'match_review_bucket'}"/>
-                    <filter string="Job" name="group_job" context="{'group_by': 'job_id'}"/>
-                    <filter string="Brand" name="group_brand" context="{'group_by': 'supplier_brand'}"/>
-                    <filter string="Product" name="group_product" context="{'group_by': 'product_id'}"/>
                 </group>
             </search>
         </field>
@@ -181,7 +128,6 @@
                                 <field name="unit_price_incl_vat" readonly="1"/>
                                 <field name="product_id"/>
                                 <field name="match_status" readonly="1"/>
-                                <field name="match_review_bucket" readonly="1" optional="show"/>
                                 <button name="action_try_match" type="object" icon="fa-search" string="" title="Try match"/>
                                 <button name="action_open_tecdoc_match" type="object" icon="fa-database" string="" title="Match TecDoc" invisible="product_id"/>
                                 <button name="action_learn_mapping" type="object" icon="fa-link" string="" title="Save learned mapping" invisible="not product_id"/>
@@ -201,16 +147,6 @@
         <field name="res_model">invoice.ingest.job</field>
         <field name="view_mode">list,form</field>
         <field name="search_view_id" ref="view_invoice_ingest_job_search"/>
-    </record>
-
-    <record id="action_invoice_ingest_line_review" model="ir.actions.act_window">
-        <field name="name">Linii de verificat</field>
-        <field name="path">linii-facturi-review</field>
-        <field name="res_model">invoice.ingest.job.line</field>
-        <field name="view_mode">list</field>
-        <field name="domain">[('match_review_bucket', 'in', ['possible_prefix_alias', 'bad_parse', 'manual_review', 'no_match'])]</field>
-        <field name="context">{'search_default_group_bucket': 1}</field>
-        <field name="search_view_id" ref="view_invoice_ingest_job_line_review_search"/>
     </record>
 
     <record id="view_invoice_ingest_upload_wizard_form" model="ir.ui.view">

@@ -20,11 +20,13 @@
               action="action_invoice_ingest_jobs"
               sequence="10"/>
 
-    <menuitem id="menu_invoice_ingest_line_review"
-              name="Linii de verificat"
-              parent="menu_automotive_root"
-              action="action_invoice_ingest_line_review"
-              sequence="11"/>
+    <record id="menu_invoice_ingest_line_review" model="ir.ui.menu">
+        <field name="name">Deprecated invoice line review</field>
+        <field name="parent_id" ref="menu_automotive_root"/>
+        <field name="sequence">11</field>
+        <field name="action" eval="False"/>
+        <field name="active" eval="False"/>
+    </record>
 
     <record id="action_automotive_order_create" model="ir.actions.act_window">
         <field name="name">Creează comandă</field>

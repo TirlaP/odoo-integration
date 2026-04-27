@@ -415,7 +415,6 @@ class InvoiceIngestJobExtract(models.Model):
     def _missing_runtime_schema_items(self):
         checks = [
             ('invoice_product_code_map', None),
-            ('invoice_ingest_job_line', 'match_review_bucket'),
             ('tecdoc_article_variant', 'identity_key'),
             ('tecdoc_article_variant', 'is_reference_only'),
             ('tecdoc_article_variant', 'last_enriched_at'),
