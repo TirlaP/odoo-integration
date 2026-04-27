@@ -194,6 +194,10 @@
         <field name="model">tecdoc.article.variant</field>
         <field name="arch" type="xml">
             <form string="TecDoc Variant">
+                <header>
+                    <button name="action_enrich_reference" type="object" string="Enrich TecDoc" class="btn-secondary"/>
+                    <button name="action_create_product_from_reference" type="object" string="Creează produs" class="btn-primary" invisible="product_tmpl_id"/>
+                </header>
                 <sheet>
                     <div class="oe_button_box" name="button_box">
                         <button name="action_open_vehicles" type="object" class="oe_stat_button" icon="fa-car"
@@ -222,6 +226,9 @@
                             <field name="name" readonly="1"/>
                             <field name="article_id"/>
                             <field name="article_no"/>
+                            <field name="identity_key" readonly="1"/>
+                            <field name="is_reference_only" readonly="1"/>
+                            <field name="last_enriched_at" readonly="1"/>
                             <field name="supplier_id"/>
                             <field name="supplier_name"/>
                             <field name="supplier_external_id"/>
@@ -395,6 +402,7 @@
                 <field name="brand"/>
                 <field name="display_no"/>
                 <field name="number_key"/>
+                <button name="action_lookup_oem_number" type="object" string="Caută" class="btn-secondary"/>
             </list>
         </field>
     </record>
@@ -404,6 +412,9 @@
         <field name="model">tecdoc.oem.number</field>
         <field name="arch" type="xml">
             <form string="OEM Number">
+                <header>
+                    <button name="action_lookup_oem_number" type="object" string="Caută produse" class="btn-primary"/>
+                </header>
                 <sheet>
                     <group>
                         <field name="brand"/>
@@ -431,6 +442,7 @@
                 <field name="manufacturer"/>
                 <field name="display_no"/>
                 <field name="number_key"/>
+                <button name="action_lookup_cross_number" type="object" string="Caută" class="btn-secondary"/>
             </list>
         </field>
     </record>
@@ -440,6 +452,9 @@
         <field name="model">tecdoc.cross.number</field>
         <field name="arch" type="xml">
             <form string="Cross Number">
+                <header>
+                    <button name="action_lookup_cross_number" type="object" string="Caută produse" class="btn-primary"/>
+                </header>
                 <sheet>
                     <group>
                         <field name="manufacturer"/>
@@ -455,6 +470,46 @@
         <field name="name">Echivalente</field>
         <field name="path">cross</field>
         <field name="res_model">tecdoc.cross.number</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- TecDoc Fast: Article Relations -->
+    <record id="view_tecdoc_article_relation_list" model="ir.ui.view">
+        <field name="name">tecdoc.article.relation.list</field>
+        <field name="model">tecdoc.article.relation</field>
+        <field name="arch" type="xml">
+            <list string="Article Relations">
+                <field name="source_variant_id"/>
+                <field name="relation_type"/>
+                <field name="target_variant_id"/>
+                <field name="source"/>
+                <field name="confidence"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_tecdoc_article_relation_form" model="ir.ui.view">
+        <field name="name">tecdoc.article.relation.form</field>
+        <field name="model">tecdoc.article.relation</field>
+        <field name="arch" type="xml">
+            <form string="Article Relation">
+                <sheet>
+                    <group>
+                        <field name="source_variant_id"/>
+                        <field name="relation_type"/>
+                        <field name="target_variant_id"/>
+                        <field name="source"/>
+                        <field name="confidence"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_tecdoc_article_relations" model="ir.actions.act_window">
+        <field name="name">Relații articole TecDoc</field>
+        <field name="path">relatii-articole-tecdoc</field>
+        <field name="res_model">tecdoc.article.relation</field>
         <field name="view_mode">list,form</field>
     </record>
 

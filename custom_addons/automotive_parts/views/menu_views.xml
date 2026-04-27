@@ -208,6 +208,12 @@
               action="action_tecdoc_sync_wizard"
               sequence="20"/>
 
+    <menuitem id="menu_tecdoc_lookup"
+              name="Căutare TecDoc"
+              parent="menu_configurare"
+              action="action_tecdoc_lookup_wizard"
+              sequence="25"/>
+
     <menuitem id="menu_tecdoc_products"
               name="Produse"
               parent="menu_configurare"
@@ -219,6 +225,12 @@
               parent="menu_configurare"
               action="action_invoice_product_code_maps"
               sequence="35"/>
+
+    <menuitem id="menu_tecdoc_article_relations"
+              name="Relații articole TecDoc"
+              parent="menu_configurare"
+              action="action_tecdoc_article_relations"
+              sequence="36"/>
 
     <menuitem id="menu_anaf_config"
               name="Configurare ANAF"

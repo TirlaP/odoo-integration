@@ -74,6 +74,7 @@
         'views/invoice_product_code_map_views.xml',
         'views/tecdoc_views.xml',
         'views/tecdoc_fast_views.xml',
+        'views/tecdoc_lookup_views.xml',
         'views/automotive_async_job_views.xml',
         'views/runtime_log_views.xml',
         'views/action_paths.xml',

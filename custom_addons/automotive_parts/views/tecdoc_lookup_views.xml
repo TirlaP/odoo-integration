@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_tecdoc_lookup_wizard_form" model="ir.ui.view">
+        <field name="name">tecdoc.lookup.wizard.form</field>
+        <field name="model">tecdoc.lookup.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Căutare TecDoc">
+                <header>
+                    <button name="action_search" string="Caută" type="object" class="btn-primary"/>
+                </header>
+                <sheet>
+                    <group>
+                        <field name="search_value" placeholder="Cod articol, OEM, EAN, echivalent..."/>
+                        <field name="lookup_type"/>
+                        <field name="result_count" readonly="1"/>
+                    </group>
+                    <field name="live_error" readonly="1" invisible="not live_error"/>
+                    <field name="result_ids" nolabel="1">
+                        <list string="Rezultate TecDoc" create="0" delete="0" editable="bottom">
+                            <field name="sequence" column_invisible="1"/>
+                            <field name="group_type"/>
+                            <field name="match_reason"/>
+                            <field name="supplier_name"/>
+                            <field name="supplier_id"/>
+                            <field name="article_no"/>
+                            <field name="article_id"/>
+                            <field name="article_name"/>
+                            <field name="image_url" widget="url"/>
+                            <field name="product_tmpl_id"/>
+                            <field name="variant_id"/>
+                            <field name="link_product_tmpl_id"/>
+                            <button name="action_open_product" type="object" string="Deschide produs" class="btn-secondary" invisible="not product_tmpl_id"/>
+                            <button name="action_open_variant" type="object" string="Ref" class="btn-secondary" invisible="not variant_id"/>
+                            <button name="action_enrich_reference" type="object" string="Enrich" class="btn-secondary" invisible="not variant_id"/>
+                            <button name="action_create_product" type="object" string="Creează produs" class="btn-primary" invisible="product_tmpl_id or not variant_id"/>
+                            <button name="action_link_existing" type="object" string="Leagă" class="btn-primary" invisible="not variant_id"/>
+                            <button name="action_search_article" type="object" string="Caută cod" class="btn-secondary" invisible="not article_no"/>
+                        </list>
+                    </field>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_tecdoc_lookup_wizard" model="ir.actions.act_window">
+        <field name="name">Căutare TecDoc</field>
+        <field name="path">cautare-tecdoc</field>
+        <field name="res_model">tecdoc.lookup.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">current</field>
+    </record>
+</odoo>

@@ -450,6 +450,10 @@ class TecDocAPI(models.Model):
             'name': name,
             'tecdoc_article_no': article_no,
             'tecdoc_supplier_id': supplier_id,
+            'tecdoc_supplier_name': article.get('supplierName') or article.get('supplier_name') or article.get('brandName') or article.get('brand_name'),
+            'tecdoc_image_url': article.get('s3image') or article.get('imageUrl') or article.get('image_url'),
+            'tecdoc_media_filename': article.get('articleMediaFileName') or article.get('mediaFileName'),
+            'tecdoc_media_type': article.get('articleMediaType') or article.get('mediaType'),
             # Keep internal reference close to what the user typed (usually without spaces).
             'default_code': fallback_article_no or (article_no or ''),
             'list_price': 0.0,
@@ -485,6 +489,13 @@ class TecDocAPI(models.Model):
             product.write(update_vals)
         else:
             product = Product.create(create_vals)
+        template = product.product_tmpl_id if product._name == 'product.product' else product
+        image_url = create_vals.get('tecdoc_image_url')
+        should_download = self.download_images and template and (self.overwrite_images or not template.image_1920)
+        if should_download and image_url:
+            image_b64 = self._fetch_image_base64(image_url)
+            if image_b64:
+                template.write({'image_1920': image_b64})
         return product
 
     @staticmethod
@@ -1349,18 +1360,19 @@ class TecDocAPI(models.Model):
 
         RapidAPI TecDoc does not always expose a dedicated 'EAN search' in the UI docs.
         Many provider variants accept EAN in the standard article search endpoints, so we try:
-        1) artlookup with article-type=EANNumber (if supported)
-        2) standard search-by-article-no (treating EAN as an article number)
+        1) artlookup with article-type=EAN
+        2) artlookup with article-type=EANNumber (older provider variant)
+        3) standard search-by-article-no (treating EAN as an article number)
         """
         lang_id = lang_id or self.lang_id
         ean = (ean or '').strip()
         if not ean:
             return {}
         try:
-            return self.search_articles_by_article_no(ean, article_type='EANNumber', lang_id=lang_id)
+            return self.search_articles_by_article_no(ean, article_type='EAN', lang_id=lang_id)
         except UserError:
             try:
-                return self.search_articles_by_article_no(ean, article_type='EAN', lang_id=lang_id)
+                return self.search_articles_by_article_no(ean, article_type='EANNumber', lang_id=lang_id)
             except UserError:
                 return self.search_article_by_number(ean)
 
@@ -1371,13 +1383,24 @@ class TecDocAPI(models.Model):
         if not oem_no:
             return {}
         try:
-            return self.search_oem_by_article_oem_no(oem_no, lang_id=lang_id)
+            return self.search_articles_by_article_no(oem_no, article_type='OENumber', lang_id=lang_id)
         except UserError:
-            return self.search_articles_by_oem(oem_no)
+            try:
+                return self.search_oem_by_article_oem_no(oem_no, lang_id=lang_id)
+            except UserError:
+                return self.search_articles_by_oem(oem_no)
 
     def search_articles_by_iam_no(self, iam_no, lang_id=None):
         """Search by IAM number."""
         return self.search_articles_by_article_no(iam_no, article_type='IAMNumber', lang_id=lang_id or self.lang_id)
+
+    def search_articles_by_equivalent_no(self, article_no, lang_id=None):
+        """Search equivalent/cross article references by IAM/cross number."""
+        lang_id = lang_id or self.lang_id
+        try:
+            return self.search_articles_by_iam_no(article_no, lang_id=lang_id)
+        except UserError:
+            return self.parts_cross_reference_by_article_no(article_no, article_type='IAMNumber', lang_id=lang_id)
 
     def search_articles_by_trade_no(self, trade_no, lang_id=None):
         """Search by trade number."""
@@ -1722,6 +1745,92 @@ class TecDocAPI(models.Model):
             })
         except Exception:
             _logger.info("TecDoc: could not mark template %s as fast-managed during single-article sync", template.id)
+        return True
+
+    def enrich_tecdoc_variant_reference(self, variant):
+        """Fetch full details and lightweight cross-reference targets for a TecDoc variant."""
+        self.ensure_one()
+        variant = variant.exists()[:1]
+        if not variant:
+            return False
+
+        article_id = variant.article_id if variant.article_id and variant.article_id > 0 else None
+        raw_details = None
+        if article_id:
+            try:
+                raw_details = self.get_article_details(article_id)
+            except UserError:
+                raw_details = None
+        if raw_details is None and variant.article_no:
+            raw_details = self.post_article_details_by_number_form(variant.article_no)
+
+        article_data = {}
+        articles = self._extract_articles(raw_details)
+        if articles:
+            normalized = [self._normalize_article_record(a) for a in articles if isinstance(a, dict)]
+            if variant.supplier_external_id:
+                article_data = next(
+                    (
+                        a for a in normalized
+                        if (a.get('supplierId') or a.get('supplier_id')) == variant.supplier_external_id
+                    ),
+                    {},
+                )
+            article_data = article_data or normalized[0]
+        else:
+            article_data = self._normalize_article_record(self._extract_article(raw_details))
+
+        importer = self.env['tecdoc.fast.import.run'].new({
+            'replace_variant_details': True,
+            'mark_products_managed': False,
+            'import_cross_references': True,
+        })
+        product = variant.product_tmpl_id if variant.product_tmpl_id else self.env['product.template']
+        importer._upsert_variant(product, article_data, raw_details if isinstance(raw_details, dict) else {})
+
+        refreshed_article_id = article_data.get('articleId') or article_data.get('article_id') or variant.article_id
+        refreshed = self.env['tecdoc.article.variant'].sudo().search([('article_id', '=', refreshed_article_id)], limit=1) or variant
+        self._sync_article_relation_targets(refreshed)
+        refreshed.write({'last_enriched_at': fields.Datetime.now()})
+        return True
+
+    def _sync_article_relation_targets(self, source_variant):
+        self.ensure_one()
+        source_variant = source_variant.exists()[:1]
+        if not source_variant or not source_variant.article_id or source_variant.article_id < 1:
+            return False
+
+        payloads = []
+        for fetcher in (self.cross_references_by_article_id_partial_match, self.cross_references_through_oem_numbers_by_article_id):
+            try:
+                payloads.append(fetcher(source_variant.article_id))
+            except UserError:
+                continue
+
+        Variant = self.env['tecdoc.article.variant'].sudo()
+        Relation = self.env['tecdoc.article.relation'].sudo()
+        seen = set()
+        for payload in payloads:
+            for article in self._extract_articles(payload):
+                target = Variant._upsert_light_reference(article)
+                if not target or target == source_variant:
+                    continue
+                dedupe = (source_variant.id, target.id, 'cross_ref')
+                if dedupe in seen:
+                    continue
+                seen.add(dedupe)
+                if not Relation.search([
+                    ('source_variant_id', '=', source_variant.id),
+                    ('target_variant_id', '=', target.id),
+                    ('relation_type', '=', 'cross_ref'),
+                ], limit=1):
+                    Relation.create({
+                        'source_variant_id': source_variant.id,
+                        'target_variant_id': target.id,
+                        'relation_type': 'cross_ref',
+                        'source': 'rapidapi',
+                        'confidence': 80.0,
+                    })
         return True
 
     def _sync_vehicle_compatibility(self, product, article_id):

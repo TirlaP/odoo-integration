@@ -1,12 +1,38 @@
 # -*- coding: utf-8 -*-
 import re
+import zlib
 
 from odoo import api, fields, models
+from odoo.exceptions import UserError, ValidationError
 
 
 def _normalize_key(value):
     value = (value or '').strip().upper()
     return re.sub(r'[^0-9A-Z]+', '', value)
+
+
+def _fallback_article_id(supplier_id, article_no):
+    key = f"{supplier_id or 0}:{_normalize_key(article_no)}"
+    checksum = zlib.crc32(key.encode('utf-8')) % 2147483647
+    return -(checksum or 1)
+
+
+def _article_identity_key(article_id, supplier_id, article_no):
+    if article_id and int(article_id) > 0:
+        return f"id:{int(article_id)}"
+    return f"supplier:{supplier_id or 0}:article:{_normalize_key(article_no)}"
+
+
+def _product_template_action(template):
+    template.ensure_one()
+    return {
+        'type': 'ir.actions.act_window',
+        'name': 'Product',
+        'res_model': 'product.template',
+        'res_id': template.id,
+        'view_mode': 'form',
+        'target': 'current',
+    }
 
 
 class TecDocSupplier(models.Model):
@@ -86,6 +112,14 @@ class TecDocOemNumber(models.Model):
             vals['number_key'] = _normalize_key(vals.get('display_no'))
         return super().write(vals)
 
+    def action_lookup_oem_number(self):
+        self.ensure_one()
+        wizard = self.env['tecdoc.lookup.wizard'].create({
+            'search_value': self.display_no,
+            'lookup_type': 'oem',
+        })
+        return wizard.action_search()
+
 
 class TecDocCrossNumber(models.Model):
     _name = 'tecdoc.cross.number'
@@ -113,6 +147,14 @@ class TecDocCrossNumber(models.Model):
         if vals.get('display_no') and not vals.get('number_key'):
             vals['number_key'] = _normalize_key(vals.get('display_no'))
         return super().write(vals)
+
+    def action_lookup_cross_number(self):
+        self.ensure_one()
+        wizard = self.env['tecdoc.lookup.wizard'].create({
+            'search_value': self.display_no,
+            'lookup_type': 'equivalent',
+        })
+        return wizard.action_search()
 
 
 class TecDocCriteria(models.Model):
@@ -154,6 +196,9 @@ class TecDocArticleVariant(models.Model):
     supplier_id = fields.Many2one('tecdoc.supplier', index=True, ondelete='restrict')
     supplier_name = fields.Char(index=True)
     supplier_external_id = fields.Integer(index=True, help='TecDoc supplierId (numeric)')
+    identity_key = fields.Char(index=True)
+    is_reference_only = fields.Boolean(default=True, index=True)
+    last_enriched_at = fields.Datetime(index=True)
 
     product_tmpl_id = fields.Many2one('product.template', index=True, ondelete='set null')
 
@@ -204,12 +249,150 @@ class TecDocArticleVariant(models.Model):
         for vals in vals_list:
             if not vals.get('article_no_key') and vals.get('article_no'):
                 vals['article_no_key'] = _normalize_key(vals.get('article_no'))
+            if not vals.get('identity_key') and vals.get('article_no'):
+                vals['identity_key'] = _article_identity_key(
+                    vals.get('article_id'),
+                    vals.get('supplier_external_id'),
+                    vals.get('article_no'),
+                )
+            if vals.get('product_tmpl_id'):
+                vals['is_reference_only'] = False
         return super().create(vals_list)
 
     def write(self, vals):
         if vals.get('article_no') and not vals.get('article_no_key'):
             vals['article_no_key'] = _normalize_key(vals.get('article_no'))
+        if vals.get('product_tmpl_id'):
+            vals = dict(vals)
+            vals['is_reference_only'] = False
         return super().write(vals)
+
+    @api.model
+    def _article_values_from_payload(self, article):
+        article = article if isinstance(article, dict) else {}
+        article_no = (article.get('articleNo') or article.get('article_no') or '').strip()
+        supplier_id_int = int(article.get('supplierId') or article.get('supplier_id') or 0)
+        article_id = int(article.get('articleId') or article.get('article_id') or 0)
+        if not article_id and article_no:
+            article_id = _fallback_article_id(supplier_id_int, article_no)
+        supplier_name = (
+            article.get('supplierName')
+            or article.get('supplier_name')
+            or article.get('brandName')
+            or article.get('brand_name')
+            or ''
+        ).strip()
+        article_name = (
+            article.get('articleProductName')
+            or article.get('article_product_name')
+            or article.get('articleName')
+            or article.get('article_name')
+            or article.get('genericArticleName')
+            or article.get('generic_article_name')
+            or ''
+        ).strip()
+        return {
+            'article_id': article_id,
+            'article_no': article_no,
+            'article_no_key': _normalize_key(article_no),
+            'supplier_external_id': supplier_id_int or False,
+            'supplier_name': supplier_name or False,
+            'article_product_name': article_name or False,
+            'image_url': article.get('s3image') or article.get('imageUrl') or article.get('image_url') or False,
+            'media_filename': article.get('articleMediaFileName') or article.get('mediaFileName') or False,
+            'media_type': article.get('articleMediaType') or article.get('mediaType') or False,
+            'identity_key': _article_identity_key(article_id, supplier_id_int, article_no),
+        }
+
+    @api.model
+    def _upsert_light_reference(self, article):
+        vals = self._article_values_from_payload(article)
+        if not vals.get('article_no') or not vals.get('article_id'):
+            return self.browse()
+
+        Supplier = self.env['tecdoc.supplier'].sudo()
+        supplier = self.env['tecdoc.supplier']
+        if vals.get('supplier_external_id'):
+            supplier = Supplier.search([('supplier_id', '=', vals['supplier_external_id'])], limit=1)
+            if not supplier:
+                supplier = Supplier.create({
+                    'supplier_id': vals['supplier_external_id'],
+                    'name': vals.get('supplier_name') or str(vals['supplier_external_id']),
+                })
+        elif vals.get('supplier_name'):
+            supplier = Supplier.search([('name', '=', vals['supplier_name'])], limit=1)
+            if not supplier:
+                supplier = Supplier.create({'supplier_id': 0, 'name': vals['supplier_name']})
+        vals['supplier_id'] = supplier.id if supplier else False
+
+        variant = self.sudo().search([('article_id', '=', vals['article_id'])], limit=1)
+        if not variant and vals.get('identity_key'):
+            variant = self.sudo().search([('identity_key', '=', vals['identity_key'])], limit=1)
+        if not variant and vals.get('article_no_key') and vals.get('supplier_external_id'):
+            variant = self.sudo().search([
+                ('article_no_key', '=', vals['article_no_key']),
+                ('supplier_external_id', '=', vals['supplier_external_id']),
+            ], limit=1)
+        if variant:
+            update_vals = {k: v for k, v in vals.items() if v not in (False, '', None)}
+            update_vals.pop('product_tmpl_id', None)
+            variant.write(update_vals)
+            return variant
+        vals['is_reference_only'] = True
+        return self.sudo().create(vals)
+
+    def action_create_product_from_reference(self):
+        self.ensure_one()
+        if self.product_tmpl_id:
+            return _product_template_action(self.product_tmpl_id)
+
+        api = self.env['tecdoc.api']._get_default_api()
+        if not api:
+            raise UserError("Please configure TecDoc API first!")
+
+        article_id = self.article_id if self.article_id and self.article_id > 0 else None
+        supplier_id = self.supplier_external_id or None
+        try:
+            product = api.sync_product_from_tecdoc(
+                article_id=article_id,
+                article_no=self.article_no,
+                supplier_id=supplier_id,
+            )
+        except UserError:
+            product = api.sync_product_from_article_snippet({
+                'articleId': article_id,
+                'articleNo': self.article_no,
+                'supplierId': supplier_id,
+                'supplierName': self.supplier_name,
+                'articleProductName': self.article_product_name,
+                's3image': self.image_url,
+                'articleMediaFileName': self.media_filename,
+                'articleMediaType': self.media_type,
+            }, fallback_article_no=self.article_no)
+
+        template = product.product_tmpl_id if product._name == 'product.product' else product
+        if template:
+            self.write({'product_tmpl_id': template.id, 'is_reference_only': False})
+            return _product_template_action(template)
+        return True
+
+    def action_enrich_reference(self):
+        self.ensure_one()
+        api = self.env['tecdoc.api']._get_default_api()
+        if not api:
+            raise UserError("Please configure TecDoc API first!")
+        api.enrich_tecdoc_variant_reference(self)
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'TecDoc',
+                'message': 'Reference enriched from TecDoc.',
+                'type': 'success',
+                'sticky': False,
+                'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
+            },
+        }
 
     def action_open_vehicles(self):
         self.ensure_one()
@@ -321,6 +504,41 @@ class TecDocArticleVariantCross(models.Model):
     _sql_constraints = [
         ('tecdoc_variant_cross_unique', 'unique(variant_id, cross_number_id, search_level)', 'Cross reference must be unique per variant.'),
     ]
+
+
+class TecDocArticleRelation(models.Model):
+    _name = 'tecdoc.article.relation'
+    _description = 'TecDoc Article Relation'
+    _order = 'relation_type, target_variant_id'
+
+    source_variant_id = fields.Many2one('tecdoc.article.variant', required=True, index=True, ondelete='cascade')
+    target_variant_id = fields.Many2one('tecdoc.article.variant', required=True, index=True, ondelete='cascade')
+    relation_type = fields.Selection(
+        [
+            ('am_equivalent', 'Echivalent AM'),
+            ('oe_equivalent', 'Echivalent OE'),
+            ('cross_ref', 'Cross Reference'),
+        ],
+        required=True,
+        default='cross_ref',
+        index=True,
+    )
+    source = fields.Char(index=True)
+    confidence = fields.Float(default=80.0)
+
+    _sql_constraints = [
+        (
+            'tecdoc_article_relation_unique',
+            'unique(source_variant_id, target_variant_id, relation_type)',
+            'Article relation must be unique.',
+        ),
+    ]
+
+    @api.constrains('source_variant_id', 'target_variant_id')
+    def _check_not_self(self):
+        for rec in self:
+            if rec.source_variant_id == rec.target_variant_id:
+                raise ValidationError('Article relation cannot point to itself.')
 
 
 class ProductTemplateTecDocFast(models.Model):

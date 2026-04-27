@@ -532,12 +532,16 @@ class TecDocFastImportRun(models.Model):
     def _upsert_variant(self, product, article, tecdoc_payload):
         Variant = self.env['tecdoc.article.variant'].sudo()
         Supplier = self.env['tecdoc.supplier'].sudo()
+        product = product[:1] if product else self.env['product.template']
 
-        article_id = _safe_int(article.get('articleId'))
+        article_id = _safe_int(article.get('articleId') or article.get('article_id'))
+        if not article_id:
+            variant = Variant._upsert_light_reference(article)
+            article_id = variant.article_id if variant else 0
         if not article_id:
             return
 
-        article_no = (article.get('articleNo') or product.tecdoc_article_no or '').strip()
+        article_no = (article.get('articleNo') or article.get('article_no') or (product.tecdoc_article_no if product else '') or '').strip()
         if not article_no:
             return
 
@@ -560,14 +564,24 @@ class TecDocFastImportRun(models.Model):
             'supplier_id': supplier.id if supplier else False,
             'supplier_name': supplier_name,
             'supplier_external_id': supplier_id_int or False,
-            'product_tmpl_id': product.id,
             'article_product_name': (article.get('articleProductName') or '').strip(),
             'image_url': article.get('s3image') or False,
             'media_filename': article.get('articleMediaFileName') or False,
             'media_type': article.get('articleMediaType') or False,
         }
+        if product:
+            vals['product_tmpl_id'] = product.id
+            vals['is_reference_only'] = False
 
         variant = Variant.search([('article_id', '=', article_id)], limit=1)
+        if not variant:
+            identity_key = vals.get('identity_key') or Variant._article_values_from_payload(article).get('identity_key')
+            variant = Variant.search([('identity_key', '=', identity_key)], limit=1) if identity_key else Variant.browse()
+        if not variant and vals.get('article_no_key') and vals.get('supplier_external_id'):
+            variant = Variant.search([
+                ('article_no_key', '=', vals['article_no_key']),
+                ('supplier_external_id', '=', vals['supplier_external_id']),
+            ], limit=1)
         created = False
         if not variant:
             variant = Variant.create(vals)
@@ -606,7 +620,7 @@ class TecDocFastImportRun(models.Model):
         variant.ean_count = self.env['tecdoc.article.variant.ean'].sudo().search_count([('variant_id', '=', variant.id)])
         variant.cross_count = self.env['tecdoc.article.variant.cross'].sudo().search_count([('variant_id', '=', variant.id)])
 
-        if created and not product.tecdoc_supplier_name and supplier_name:
+        if created and product and not product.tecdoc_supplier_name and supplier_name:
             product.write({'tecdoc_supplier_name': supplier_name, 'tecdoc_supplier_id': supplier_id_int})
 
     def _upsert_variant_eans(self, variant, eans, replace=False):
