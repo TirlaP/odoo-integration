@@ -310,6 +310,7 @@ class InvoiceIngestJobAsync(models.Model):
             target_model=self._name,
             target_method=INVOICE_INGEST_ASYNC_TARGET_METHOD,
             target_res_id=self.id,
+            max_attempts=1,
         )
         async_job.sudo().write({
             'progress': 0.0,
@@ -395,7 +396,7 @@ class InvoiceIngestJobAsync(models.Model):
     def cron_process_jobs(self):
         jobs = self.search(
             [
-                ('state', 'in', ['pending', 'failed']),
+                ('state', '=', 'pending'),
                 ('source', '=', 'ocr'),
                 ('attachment_id', '!=', False),
             ],

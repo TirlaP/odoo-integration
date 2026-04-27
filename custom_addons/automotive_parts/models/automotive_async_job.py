@@ -243,6 +243,12 @@ class AutomotiveAsyncJob(models.Model):
     def _is_allowed_target(cls, target_model, target_method):
         return (target_model, target_method) in cls._ALLOWED_TARGETS
 
+    def _effective_max_attempts(self):
+        self.ensure_one()
+        if self.job_type == INVOICE_INGEST_ASYNC_JOB_TYPE:
+            return 1
+        return max(int(self.max_attempts or 1), 1)
+
     @api.depends('started_at', 'finished_at')
     def _compute_duration_seconds(self):
         for job in self:
@@ -661,7 +667,8 @@ class AutomotiveAsyncJob(models.Model):
                 if self.batch_id:
                     self.batch_id._sync_state_from_jobs()
                 return False
-            retryable = attempt_count < self.max_attempts
+            executed_attempt_count = attempt_count if force else attempt_count + 1
+            retryable = executed_attempt_count < self._effective_max_attempts()
             vals = {
                 'last_error': str(exc),
                 'last_error_type': exc.__class__.__name__,
@@ -744,7 +751,7 @@ class AutomotiveAsyncJob(models.Model):
             if not job or job.state in {'done', 'cancelled'}:
                 return False
 
-            retryable = job.attempt_count < job.max_attempts
+            retryable = job.attempt_count < job._effective_max_attempts()
             values = {
                 'last_error': error_message,
                 'last_error_type': exc.__class__.__name__,
@@ -802,8 +809,21 @@ class AutomotiveAsyncJob(models.Model):
             ('state', '=', 'running'),
             ('write_date', '<', cutoff),
         ])
-        if stale_jobs:
-            stale_jobs.write({
+        retryable_jobs = stale_jobs.filtered(lambda job: job.attempt_count < job._effective_max_attempts())
+        exhausted_jobs = stale_jobs - retryable_jobs
+        if exhausted_jobs:
+            exhausted_jobs.write({
+                'state': 'failed',
+                'progress_message': _('Failed'),
+                'finished_at': fields.Datetime.now(),
+                'next_retry_at': False,
+                'last_error': _('Job timed out while running and retry budget is exhausted.'),
+                'last_error_type': 'Timeout',
+            })
+            exhausted_jobs._call_target_progress_hook('_automotive_async_on_failed')
+            exhausted_jobs.filtered('batch_id').mapped('batch_id')._sync_state_from_jobs()
+        if retryable_jobs:
+            retryable_jobs.write({
                 'state': 'queued',
                 'progress': 0.0,
                 'progress_message': _('Queued, waiting for worker'),
@@ -813,9 +833,30 @@ class AutomotiveAsyncJob(models.Model):
                 'last_error_type': False,
                 'next_retry_at': fields.Datetime.now(),
             })
-            stale_jobs._call_target_progress_hook('_automotive_async_on_requeue')
-            stale_jobs.filtered('batch_id').mapped('batch_id')._sync_state_from_jobs()
+            retryable_jobs._call_target_progress_hook('_automotive_async_on_requeue')
+            retryable_jobs.filtered('batch_id').mapped('batch_id')._sync_state_from_jobs()
         return stale_jobs
+
+    @api.model
+    def _fail_exhausted_queued_jobs(self):
+        jobs = self.search([
+            ('state', '=', 'queued'),
+            ('attempt_count', '>', 0),
+        ])
+        exhausted = jobs.filtered(lambda job: job.attempt_count >= job._effective_max_attempts())
+        if not exhausted:
+            return exhausted
+        exhausted.write({
+            'state': 'failed',
+            'progress_message': _('Failed'),
+            'finished_at': fields.Datetime.now(),
+            'next_retry_at': False,
+            'last_error': _('Retry skipped because retry budget is exhausted.'),
+            'last_error_type': 'RetrySkipped',
+        })
+        exhausted._call_target_progress_hook('_automotive_async_on_failed')
+        exhausted.filtered('batch_id').mapped('batch_id')._sync_state_from_jobs()
+        return exhausted
 
     @api.model
     def _claim_job_ids(self, limit):
@@ -864,6 +905,7 @@ class AutomotiveAsyncJob(models.Model):
         limit = int(limit or icp.get_param('automotive.async_jobs_per_run') or 20)
         stale_timeout = int(icp.get_param('automotive.async_running_timeout_minutes') or 30)
         self._requeue_stale_running_jobs(timeout_minutes=stale_timeout)
+        self._fail_exhausted_queued_jobs()
 
         processed = 0
         while processed < limit:
