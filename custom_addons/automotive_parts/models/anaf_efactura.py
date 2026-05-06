@@ -890,6 +890,17 @@ class ANAFEFactura(models.Model):
     def fetch_invoices(self, days_back=None, message_filter=None):
         """Fetch e-Factura messages from ANAF and create ingest jobs."""
         total_created = 0
+        async_job_id = self.env.context.get('automotive_async_job_id')
+
+        def report_progress(progress, message):
+            if async_job_id:
+                self.env['automotive.async.job'].sudo().report_progress(
+                    async_job_id,
+                    progress=progress,
+                    progress_message=message,
+                    state='running',
+                )
+
         for rec in self:
             days = int(days_back or rec.fetch_days or 7)
             days = min(max(days, 1), 60)
@@ -907,6 +918,7 @@ class ANAFEFactura(models.Model):
 
             endpoint = f"{rec._api_base_url()}/listaMesajeFactura"
             try:
+                report_progress(5.0, f'Listing ANAF messages for last {days} days')
                 response = requests.get(endpoint, headers=rec._get_headers(), params=params, timeout=60)
                 response.raise_for_status()
                 data = response.json()
@@ -929,6 +941,7 @@ class ANAFEFactura(models.Model):
                 raise UserError(f'ANAF API list fetch failed: {exc}')
 
             messages = rec._extract_messages_list(data)
+            report_progress(10.0, f'ANAF returned {len(messages)} messages')
             created_jobs = 0
             existing_jobs = 0
             downloaded_payloads = 0
@@ -936,7 +949,12 @@ class ANAFEFactura(models.Model):
             missing_download_ids = 0
             empty_payloads = 0
             sample_failures = []
-            for msg in messages:
+            message_count = len(messages) or 1
+            for index, msg in enumerate(messages, start=1):
+                report_progress(
+                    10.0 + (80.0 * (index - 1) / message_count),
+                    f'Processing ANAF message {index}/{len(messages)}',
+                )
                 message_id = rec._get_message_download_id(msg)
                 if not message_id:
                     missing_download_ids += 1
@@ -975,6 +993,7 @@ class ANAFEFactura(models.Model):
                         sample_failures.append(f'process id={message_id}: {exc}')
                     continue
 
+            report_progress(92.0, 'Finalizing ANAF import summary')
             sync_message = (
                 f'Fetched {len(messages)} messages, downloaded {downloaded_payloads} XML payloads, '
                 f'processed {processed_payloads}, created {created_jobs} jobs, existing {existing_jobs}.'
