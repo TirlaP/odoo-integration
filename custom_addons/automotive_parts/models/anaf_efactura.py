@@ -521,7 +521,7 @@ class ANAFEFactura(models.Model):
                 if tag == name:
                     next_node = child
                     break
-            if not next_node:
+            if next_node is None:
                 return False
             node = next_node
         text = (node.text or '').strip()
@@ -750,6 +750,27 @@ class ANAFEFactura(models.Model):
         return []
 
     @api.model
+    def _get_message_download_id(self, message):
+        """Return the ANAF download id from a listaMesajeFactura row."""
+        if not isinstance(message, dict):
+            return False
+        for key in (
+            'id_descarcare',
+            'idDescarcare',
+            'id_descarcare_factura',
+            'idDownload',
+            'id_download',
+            'download_id',
+            'id',
+            'id_solicitare',
+            'idSolicitare',
+        ):
+            value = message.get(key)
+            if value not in (None, False, ''):
+                return str(value)
+        return False
+
+    @api.model
     def _is_invoice_xml(self, xml_payload):
         try:
             root = ElementTree.fromstring(xml_payload.encode('utf-8') if isinstance(xml_payload, str) else xml_payload)
@@ -909,19 +930,23 @@ class ANAFEFactura(models.Model):
 
             messages = rec._extract_messages_list(data)
             created_jobs = 0
+            existing_jobs = 0
+            downloaded_payloads = 0
+            processed_payloads = 0
+            missing_download_ids = 0
+            empty_payloads = 0
+            sample_failures = []
             for msg in messages:
-                message_id = (
-                    msg.get('id')
-                    or msg.get('id_solicitare')
-                    or msg.get('idSolicitare')
-                )
+                message_id = rec._get_message_download_id(msg)
                 if not message_id:
+                    missing_download_ids += 1
                     continue
-                message_id = str(message_id)
                 try:
                     xml_payloads, attachment = rec._download_message_payload(message_id)
                     if not xml_payloads:
+                        empty_payloads += 1
                         continue
+                    downloaded_payloads += len(xml_payloads)
                     for xml_payload in xml_payloads:
                         payload_external_id = f"{message_id}:{hashlib.sha1(xml_payload.encode('utf-8')).hexdigest()}"
                         invoice_data = {
@@ -934,18 +959,36 @@ class ANAFEFactura(models.Model):
                             job.write({'attachment_id': attachment.id})
                         if created:
                             created_jobs += 1
+                        else:
+                            existing_jobs += 1
+                        processed_payloads += 1
                 except requests.exceptions.RequestException as exc:
                     _logger.warning("ANAF message download failed for id=%s: %s", message_id, exc)
                     download_failures += 1
+                    if len(sample_failures) < 3:
+                        sample_failures.append(f'download id={message_id}: {exc}')
                     continue
                 except Exception as exc:  # noqa: BLE001 - keep sync resilient to malformed payloads.
                     _logger.warning("ANAF message processing failed for id=%s: %s", message_id, exc)
                     processing_failures += 1
+                    if len(sample_failures) < 3:
+                        sample_failures.append(f'process id={message_id}: {exc}')
                     continue
 
+            sync_message = (
+                f'Fetched {len(messages)} messages, downloaded {downloaded_payloads} XML payloads, '
+                f'processed {processed_payloads}, created {created_jobs} jobs, existing {existing_jobs}.'
+            )
+            if missing_download_ids or empty_payloads or download_failures or processing_failures:
+                sync_message += (
+                    f' Missing download ids: {missing_download_ids}; empty payloads: {empty_payloads}; '
+                    f'download failures: {download_failures}; processing failures: {processing_failures}.'
+                )
+            if sample_failures:
+                sync_message += f' Samples: {" | ".join(sample_failures)}'
             rec.write({
                 'last_sync_at': fields.Datetime.now(),
-                'last_sync_message': f'Fetched {len(messages)} messages, created {created_jobs} jobs.',
+                'last_sync_message': sync_message,
                 'last_fetch_count': created_jobs,
             })
             rec._audit_log(
@@ -955,17 +998,25 @@ class ANAFEFactura(models.Model):
                     'days_back': days,
                     'filter_code': filter_code,
                     'message_count': len(messages),
+                    'downloaded_payloads': downloaded_payloads,
+                    'processed_payloads': processed_payloads,
                     'created_jobs': created_jobs,
+                    'existing_jobs': existing_jobs,
+                    'missing_download_ids': missing_download_ids,
+                    'empty_payloads': empty_payloads,
                     'download_failures': download_failures,
                     'processing_failures': processing_failures,
                     'last_sync_at': rec.last_sync_at,
                 },
             )
             _logger.info(
-                "ANAF fetch complete for config %s: messages=%s created_jobs=%s",
+                "ANAF fetch complete for config %s: messages=%s downloaded_payloads=%s processed_payloads=%s created_jobs=%s existing_jobs=%s",
                 rec.id,
                 len(messages),
+                downloaded_payloads,
+                processed_payloads,
                 created_jobs,
+                existing_jobs,
             )
             total_created += created_jobs
 
