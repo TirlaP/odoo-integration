@@ -812,6 +812,60 @@ class ANAFEFactura(models.Model):
             return [text_payload], False
         return [], False
 
+    def action_queue_fetch_invoices(self):
+        """Queue ANAF fetch so the web request is not held open by downloads."""
+        AsyncJob = self.env['automotive.async.job'].sudo()
+        queued_count = 0
+        existing_count = 0
+        for rec in self:
+            existing = AsyncJob.search([
+                ('target_model', '=', rec._name),
+                ('target_method', '=', 'fetch_invoices'),
+                ('target_res_id', '=', rec.id),
+                ('state', 'in', ['queued', 'running']),
+            ], limit=1)
+            if existing:
+                existing_count += 1
+                continue
+
+            days = int(rec.fetch_days or 7)
+            days = min(max(days, 1), 60)
+            filter_code = (rec.fetch_filter or 'P').strip().upper()
+            AsyncJob.enqueue_call(
+                rec._name,
+                'fetch_invoices',
+                target_res_id=rec.id,
+                name=f'Fetch ANAF e-Factura ({rec.display_name})',
+                kwargs={
+                    'days_back': days,
+                    'message_filter': filter_code,
+                },
+                payload={
+                    'cui_company': rec._normalize_cui(rec.cui_company),
+                    'days_back': days,
+                    'message_filter': filter_code,
+                },
+                source_record=rec,
+                job_type='anaf_efactura_fetch',
+                priority=5,
+                max_attempts=1,
+            )
+            queued_count += 1
+
+        message = f'Queued {queued_count} ANAF fetch job(s).'
+        if existing_count:
+            message += f' {existing_count} fetch job(s) already queued/running.'
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'ANAF Fetch Queued',
+                'message': message,
+                'type': 'success' if queued_count else 'warning',
+                'sticky': False,
+            },
+        }
+
     def fetch_invoices(self, days_back=None, message_filter=None):
         """Fetch e-Factura messages from ANAF and create ingest jobs."""
         total_created = 0

@@ -263,6 +263,12 @@
               action="action_audit_log"
               sequence="90"/>
 
+    <menuitem id="menu_background_jobs"
+              name="Background Jobs"
+              parent="menu_audit_log"
+              action="action_automotive_async_jobs"
+              sequence="15"/>
+
     <record id="menu_business_audit_log" model="ir.ui.menu">
         <field name="name">Audit Logs</field>
         <field name="parent_id" ref="menu_audit_log"/>

@@ -330,7 +330,7 @@
                             invisible="use_oauth == False"/>
                     <button name="action_refresh_access_token" string="Refresh Access Token" type="object" class="btn-secondary"
                             invisible="use_oauth == False"/>
-                    <button name="fetch_invoices" string="Fetch Invoices" type="object" class="btn-primary"/>
+                    <button name="action_queue_fetch_invoices" string="Fetch Invoices" type="object" class="btn-primary"/>
                 </header>
                 <sheet>
                     <group>
