@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr-eng \
     tesseract-ocr-ron \
     tzdata \
+    wkhtmltopdf \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
